@@ -239,5 +239,7 @@ STR char *S_BYE = "BYE";
 STR char *S_CHAMPION = "CHAMPION";
 STR char *S_RESULTS_EYEBROW = "%s . %s . %s";
 STR char *S_HOLD_A_QUIT = "HOLD A";
+STR char *S_EVENING_LABEL = "EVENING";
+STR char *S_ROW_2ND_SHORT = "2ND";
 
 #endif

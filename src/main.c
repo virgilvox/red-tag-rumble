@@ -25,6 +25,9 @@
 #include "audio.h"
 #include "juice.h"
 #include "content.h"
+#ifdef RTR_FAKE_MENUS
+#include "draw_menus.h"
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -388,7 +391,20 @@ void wc_render(void) {
   fx_update(dt, M.hitstop > 0);
 
   hud_dirty_reset();
-#if RTR_CUBE_DEMO
+#ifdef RTR_FAKE_MENUS
+  /* the menus probe: every fake menu scene for 120 frames each over the cube demo (tools/hudtest.sh is the native twin) */
+  {
+    static int scene = -1;
+    int want = (int)(tm.frame / 120) % fake_menus_count();
+    if (want != scene) { scene = want; fake_menus_setup(scene); }
+    demo_frame(t, dt);
+    hud_clear();
+    fake_menus_draw((float)(tm.frame % 120) / 60.0f + 0.66f, dt);
+    hud_dirty(0, 0, 1280, 720);
+  }
+  if (0) {}
+  else
+#elif RTR_CUBE_DEMO
   if (G.phase == PH_BOOT) demo_frame(t, dt);
   else
 #endif
