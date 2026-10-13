@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── state ─────────────────────────────────────────────────────── */
+/* -- state ------------------------------------------------------- */
 static rect_t views[4];
 static int nviews, view_layout;
 static int view_seat[4];
@@ -47,7 +47,7 @@ static int results_confetti_done;
 static float rematch_focus_y;
 static uint32_t rematch_hash_prev;
 
-/* ── helpers ───────────────────────────────────────────────────── */
+/* -- helpers ----------------------------------------------------- */
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 /* text top so a line box of font f is centred in a box of height h at y */
@@ -108,13 +108,13 @@ static int project(int viewport, float x, float y, float z, float *sx, float *sy
 #endif
 }
 
-/* ── entry ─────────────────────────────────────────────────────── */
+/* -- entry ------------------------------------------------------- */
 void draw_set_views(const rect_t *vp, int n, int layout) {
   for (int i = 0; i < n && i < 4; i++) { views[i] = vp[i]; view_seat[i] = cam_seat_of(i); }
   nviews = n > 4 ? 4 : n; view_layout = layout;
 }
 
-/* ── damage numbers (10.4) ─────────────────────────────────────── */
+/* -- damage numbers (10.4) --------------------------------------- */
 static void number_add(int viewport, float x, float y, float z, const char *s, uint32_t rgb, int big) {
   if (viewport < 0 || viewport >= 4) return;
   num_t *slot = NULL;
@@ -154,7 +154,7 @@ static void numbers_draw(int viewport, const rect_t *vp, float dt) {
   hud_clip_clear();
 }
 
-/* ── stingers (10.5) ───────────────────────────────────────────── */
+/* -- stingers (10.5) --------------------------------------------- */
 void stinger(int viewport, const char *s, uint32_t seat_colour) {
   if (viewport < 0 || viewport >= 4 || !s) return;
   stinger_t *st = &STING[viewport];
@@ -185,7 +185,7 @@ static void stinger_draw(int viewport, const rect_t *vp, int compact, float dt) 
   hud_dirty(vp->x - 20, y, vp->w + 26, h + 6);
 }
 
-/* ── the clock chip (10.5) ─────────────────────────────────────── */
+/* -- the clock chip (10.5) --------------------------------------- */
 void clock_chip(const match_t *m, int compact) {
   int h = compact ? 44 : 56, x = 580, y = 6, w = 120;
   int secs = (int)ceilf(m->clock_s > 0 ? m->clock_s : 0);
@@ -206,7 +206,7 @@ void clock_chip(const match_t *m, int compact) {
   hud_dirty(x, y, w + 6, h + 6);
 }
 
-/* ── tape seams, hazard tape, white, cut (10.5, 9.3) ───────────── */
+/* -- tape seams, hazard tape, white, cut (10.5, 9.3) ------------- */
 void tape_seams(int layout) {
   switch (layout) {
     case LAY_HALVES: hud_tape(638, 0, 4, 720, G.tape_phase); break;
@@ -238,7 +238,7 @@ void tape_cut(int frames_left) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── the off-screen enemy chevron (9.2) ────────────────────────── */
+/* -- the off-screen enemy chevron (9.2) -------------------------- */
 static const bot_t *nearest_enemy(const bot_t *b) {
   const bot_t *best = NULL; float bd = 1e9f;
   for (int i = 0; i < M.nbots; i++) {
@@ -253,12 +253,14 @@ static const bot_t *nearest_enemy(const bot_t *b) {
 
 /* a 24 px filled triangle in the enemy's seat colour on a 2 px char shadow at the viewport edge */
 static void chevron_at(const rect_t *vp, float ex, float ey, uint32_t c) {
-  float cx = vp->x + vp->w * 0.5f, cy = vp->y + vp->h * 0.5f;
+  /* the box the chevron rides is the viewport above its strip (72 px, 56 in quadrants) */
+  float strip = vp->h <= 360 ? 56.0f : 72.0f, bh = vp->h - strip;
+  float cx = vp->x + vp->w * 0.5f, cy = vp->y + bh * 0.5f;
   float dx = ex - cx, dy = ey - cy, l = sqrtf(dx * dx + dy * dy);
   if (l < 1) return;
   dx /= l; dy /= l;
-  /* the point on the viewport edge along (dx, dy), 20 px in */
-  float hx = vp->w * 0.5f - 24, hy = vp->h * 0.5f - 24;
+  /* the point on the box edge along (dx, dy), 24 px in */
+  float hx = vp->w * 0.5f - 24, hy = bh * 0.5f - 24;
   float tx = fabsf(dx) > 1e-4f ? hx / fabsf(dx) : 1e9f, ty = fabsf(dy) > 1e-4f ? hy / fabsf(dy) : 1e9f;
   float t = tx < ty ? tx : ty;
   float px = cx + dx * t, py = cy + dy * t;
@@ -288,7 +290,7 @@ void chevron(int viewport, const rect_t *vp, int seat) {
   if (ex < vp->x || ex > vp->x + vp->w || ey < vp->y || ey > vp->y + vp->h - 72) chevron_at(vp, ex, ey, c);
 }
 
-/* ── count-out (2.7, 10.4) ─────────────────────────────────────── */
+/* -- count-out (2.7, 10.4) --------------------------------------- */
 static int count_number(const bot_t *b) { int n = 10 - b->countout / 60; return n < 0 ? 0 : n; }
 static int can_self_right(const bot_t *b) { return WEAPONS[b->build.weapon].selfright != SR_NONE || b->build.drive == DR_MELTY; }
 
@@ -309,7 +311,7 @@ void countout(const rect_t *vp, const bot_t *b) {
   hud_dirty(cx - 200, y, 400, fh + 40);
 }
 
-/* ── the per viewport strip (10.4) ─────────────────────────────── */
+/* -- the per viewport strip (10.4) ------------------------------- */
 static void ghost_update(const bot_t *b, float dt) {
   ghost_t *g = &GHOST[bot_slot(b)];
   if (!g->seen) { g->seen = 1; g->ghost = g->last = b->hp; g->hold = 0; }
@@ -555,7 +557,7 @@ void hud_strip_short(const rect_t *vp, const bot_t *b) {
   hud_dirty(x, y, vp->w, h);
 }
 
-/* ── the minimap (9.5) ─────────────────────────────────────────── */
+/* -- the minimap (9.5) ------------------------------------------- */
 static int hazard_glyph(int type) {
   switch (type) {
     case HZ_PIT: return GL_PIT; case HZ_PULVERIZER: return GL_HAMMER; case HZ_KILLSAW: return GL_SAW; case HZ_FLAME: return GL_FLAME;
@@ -680,7 +682,7 @@ void minimap(const rect_t *r, const match_t *mt, const arena_def_t *a, int big) 
   hud_dirty(r->x, r->y, r->w, r->h);
 }
 
-/* ── the hazard seat viewport (10.19) ──────────────────────────── */
+/* -- the hazard seat viewport (10.19) ---------------------------- */
 static int seat_hazard_kind(const arena_def_t *a, int idx) {
   if (idx < 0 || idx >= a->nhaz) return HZ_PULVERIZER;
   return a->haz[idx].type;
@@ -727,7 +729,7 @@ void hazard_seat_view(const rect_t *vp, int seat) {
   hud_dirty(vp->x, vp->y, vp->w, vp->h);
 }
 
-/* ── the OPS speech panel (section 7) ──────────────────────────── */
+/* -- the OPS speech panel (section 7) ---------------------------- */
 void speech_panel(int viewport, float x, float y, float z, const char *line) {
   (void)viewport;
   snprintf(SPEECH.line, sizeof SPEECH.line, "%s", line ? line : "");
@@ -751,7 +753,7 @@ static void speech_draw(int viewport, const rect_t *vp) {
   hud_dirty(x, y, w + 6, h + 14);
 }
 
-/* ── the NEXT MATCH chip (10.2) ────────────────────────────────── */
+/* -- the NEXT MATCH chip (10.2) ---------------------------------- */
 void next_match_chip(int pad, float t) {
   if (t <= 0) return;
   int seat = 0;
@@ -768,7 +770,7 @@ void next_match_chip(int pad, float t) {
   hud_dirty(x, y, w + 4, h + 4);
 }
 
-/* ── pause (10.26) ─────────────────────────────────────────────── */
+/* -- pause (10.26) ----------------------------------------------- */
 void pause_overlay(void) {
   uint32_t c = SEAT_RGB[G.pauser & 3];
   hud_frame(0, 0, 1280, 720, 12, c, 255);
@@ -789,7 +791,7 @@ void pause_overlay(void) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── the KO card (10.18) ───────────────────────────────────────── */
+/* -- the KO card (10.18) ----------------------------------------- */
 static void vignette_tint(uint32_t c, int a) {
   /* 36 thin edge bands with a quadratic falloff: a vignette without a per pixel pass */
   const int n = 36, t = 4;
@@ -843,7 +845,7 @@ void ko_card(float t) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── the judges card (10.20) ───────────────────────────────────── */
+/* -- the judges card (10.20) ------------------------------------- */
 static const char *judge_line(int rule) {
   switch (rule) { case 1: return JUDGE_TIE_COST; case 2: return JUDGE_TIE_FLIP; case 3: return JUDGE_DRAW; default: return NULL; }
 }
@@ -928,7 +930,7 @@ void judges_card(float t) {
   hud_dirty(400, 40, 480, 140);
 }
 
-/* ── results and the rematch menu (10.21) ──────────────────────── */
+/* -- results and the rematch menu (10.21) ------------------------ */
 static const char *place_word(const bot_t *b) {
   if (b->place <= 1) return PLACE_WORD[0];          /* the sim ranks from 1 */
   if (b->alive) return PLACE_WORD[7];               /* still running at the bell: the judges or the hill placed it */
@@ -1005,7 +1007,7 @@ void results_screen(float t) {
   results_bracket_or_turntable(&tt);
   if (!results_confetti_done && t > 0.3f) { fx2_burst(FX2_CONFETTI, 274, 200, SEAT_RGB[winner->seat & 3]); results_confetti_done = 1; }
   /* the rows panel */
-  int px = 520, py = 180, pw = 696, ph = 330;
+  int px = 520, py = 180, pw = 696, ph = 26 + 76 * (n < 2 ? 2 : n) - 4;   /* the panel fits its rows */
   hud_panel(px, py, pw, ph, C_SLAB, C_STEEL_HI);
   hud_clip(px, py, pw, ph);
   for (int i = 0; i < n; i++) {
@@ -1104,7 +1106,7 @@ void rematch_menu(float t) {
   }
 }
 
-/* ── the bracket card (TOURNAMENT, 10.21) ──────────────────────── */
+/* -- the bracket card (TOURNAMENT, 10.21) ------------------------ */
 static int chip_h = 28;                          /* 24 in the compact garage card */
 static void bracket_chip(int x, int y, int seat, int w, int hot) {
   if (seat < 0 || seat > 3) {
@@ -1208,7 +1210,7 @@ void bracket_card(const rect_t *r) {
   hud_dirty(r->x, r->y, r->w + 6, r->h + 6);
 }
 
-/* ── the fight frame ───────────────────────────────────────────── */
+/* -- the fight frame --------------------------------------------- */
 static int in_tell_zone(const bot_t *b, const arena_def_t *a) {
   for (int k = 0; k < a->nhaz && k < MAX_HAZ; k++) {
     if (!M.haz[k].tell) continue;
@@ -1287,7 +1289,7 @@ static void fight_frame(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── draw_hud ──────────────────────────────────────────────────── */
+/* -- draw_hud ---------------------------------------------------- */
 void draw_init(void) {
   memset(NUMS, 0, sizeof NUMS); memset(STING, 0, sizeof STING); memset(GHOST, 0, sizeof GHOST);
   SPEECH.t = 0; results_confetti_done = 0; rematch_focus_y = 0;
@@ -1321,7 +1323,7 @@ void draw_hud(float dt) {
       fight_frame(dt);
       if (G.paused) {
         pause_overlay();
-        if (G.controls_card_seat >= 0) { rect_t cr = { 320, 180, 640, 360 }; controls_card(&cr, 0, G.controls_card_seat); }
+        if (G.controls_card_seat >= 0) { rect_t cr = { 320, 180, 640, 360 }; controls_card(&cr, 0, G.controls_card_seat); hud_dirty(cr.x, cr.y, cr.w + 8, cr.h + 8); }
       }
       break;
     case PH_KO:
@@ -1337,9 +1339,9 @@ void draw_hud(float dt) {
   if (G.phase != PH_RESULTS && G.phase != PH_REMATCH) { results_confetti_done = 0; rematch_focus_y = 0; rematch_hash_prev = 0; }
 }
 
-/* ══════════════════════════════════════════════════════════════════
+/* ==================================================================
  * RTR_FAKE_HUD: a staged match that walks every fight screen by frame
- * ══════════════════════════════════════════════════════════════════ */
+ * ================================================================== */
 #ifdef RTR_FAKE_HUD
 #include "world.h"
 #include "render.h"

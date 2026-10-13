@@ -6,6 +6,9 @@
 //   STATION=1 node tools/shot.mjs ...    # only pad 0 reports connected, as the RetroArch core does
 //   WAV=build/out.wav node tools/shot.mjs ...   # also writes the audio the cart played
 //   PACE=1 node tools/shot.mjs ...       # real time, non-deterministic
+//   SAVE_OUT=build/s.sav node tools/shot.mjs ...   # write the cart's save region at the end
+//   SAVE_IN=build/s.sav node tools/shot.mjs ...    # boot with that save (off by default: the rig never
+//                                                  # passes save data unless asked, so shots stay reproducible)
 //
 // script.json entries, frame ranges inclusive:
 //   { "from": 0, "to": 30, "pad": 0, "buttons": ["A"], "lx": 0, "ly": -32767, "rx": 0, "ry": 0, "lt": 0, "rt": 32767 }
@@ -50,7 +53,7 @@ for (const s of script) for (const b of s.buttons ?? []) if (!(b in BTN)) { cons
 const W = 1280, H = 720;
 const { gl } = createWebGL2Context(W, H);
 const host = new CartHost();
-await host.load(new Uint8Array(readFileSync(cart)), { glBackend: gl, ...(process.env.PACE ? {} : { deterministic: { seed: 7 } }) });
+await host.load(new Uint8Array(readFileSync(cart)), { glBackend: gl, ...(process.env.SAVE_IN ? { saveData: new Uint8Array(readFileSync(process.env.SAVE_IN)) } : {}), ...(process.env.PACE ? {} : { deterministic: { seed: 7 } }) });
 
 // STATION=1 reports only pad 0 connected, which is what the RetroArch core does
 // (libretro.c writes every pad's buttons and sticks but sets connected only on
@@ -107,5 +110,9 @@ if (process.env.WAV) {
   for (const c of audioChunks) for (const v of c) { buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v * 32767))), o); o += 2; }
   writeFileSync(process.env.WAV, buf);
   console.log(`wav ${process.env.WAV}`);
+}
+if (process.env.SAVE_OUT) {
+  const sd = host.getSaveData();
+  if (sd) { writeFileSync(process.env.SAVE_OUT, sd); console.log(`save ${process.env.SAVE_OUT} ${sd.length} bytes`); }
 }
 process.exit(0);

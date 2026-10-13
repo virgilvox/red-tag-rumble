@@ -163,6 +163,7 @@ void attract_overlay(void) {
   for (int i = 0; i < 2 && i < M.nbots; i++) {
     const bot_t *b = &M.bots[i];
     float f = b->hp_max > 0 ? clampf(b->hp / b->hp_max, 0, 1) : 0;
+    hud_rect(bx[i] - 8, 28, 216, 36, C_CHAR, 210);           /* a char backing so the bars read over a light floor */
     hud_rect(bx[i], 32, 200, 10, C_STEEL, 200);
     hud_rect(bx[i], 32, (int)(200 * f), 10, C_ASH, 255);
     hud_text(F_MONO_S, i == 0 ? bx[i] : bx[i] + 200, 46, b->name, C_ASH, 255, i == 0 ? AL_LEFT : AL_RIGHT);
@@ -178,7 +179,7 @@ void title_screen(float dt) {
   /* tape, the left column scrim, the marquee */
   hud_tape(0, 0, 1280, 24, G.tape_phase);
   hud_tape(0, 696, 1280, 24, G.tape_phase);
-  hud_rect(0, 24, 480, 672, C_CHAR, 120);
+  hud_rect(0, 24, 480, 672, C_CHAR, 205);
   marquee();
   /* the tagline rotates every 6 s */
   hud_text_wrap(F_H3, 80, 250, 400, TAGLINES[(int)(t / 6) % LEN(TAGLINES)], C_BONE, 255, 30);

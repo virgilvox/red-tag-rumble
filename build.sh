@@ -22,7 +22,7 @@ TOBJ="$OUT/obj/three_core"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 HEADLESS_SRCS="src/sim.c src/bot.c src/arena.c src/ai.c"
 
-# ── the native targets need no emscripten ───────────────────────────
+# -- the native targets need no emscripten ---------------------------
 if [ "${1:-}" = lint ]; then
   exec "$ROOT/tools/lint.sh"
 fi
@@ -58,7 +58,7 @@ if [ "${1:-}" = music ]; then
   exit 0
 fi
 
-# ── the cart ────────────────────────────────────────────────────────
+# -- the cart --------------------------------------------------------
 if ! command -v emcc >/dev/null; then
   [ -f "$HOME/emsdk/emsdk_env.sh" ] && source "$HOME/emsdk/emsdk_env.sh" >/dev/null 2>&1
 fi

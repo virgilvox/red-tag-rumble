@@ -86,7 +86,7 @@ void hud_init(void) {
 
 void hud_clear(void) { memset(hud_px, 0, HUD_W * HUD_H * 4); }
 
-/* ── pixel writers ──────────────────────────────────────────────── */
+/* -- pixel writers ------------------------------------------------ */
 
 static inline void blend(int x, int y, uint32_t rgb, int a) {
   if (x < clip_x0 || x >= clip_x1 || y < clip_y0 || y >= clip_y1) return;
@@ -166,7 +166,7 @@ void hud_bar(int x, int y, int w, int h, float frac, uint32_t fill, uint32_t bg)
   hud_rect(x + 2, y + 2, (int)((w - 4) * frac), h - 4, fill, 255);
 }
 
-/* ── text ───────────────────────────────────────────────────────── */
+/* -- text --------------------------------------------------------- */
 
 int hud_font_h(int font) { return fonts[font].px * HUD_DIV; }
 
@@ -279,7 +279,7 @@ int hud_keycap(int x, int y, const char *k, uint32_t fill, uint32_t ink) {
   return w;
 }
 
-/* ── easing ─────────────────────────────────────────────────────── */
+/* -- easing ------------------------------------------------------- */
 
 float hud_ease_out(float t) { t = t < 0 ? 0 : t > 1 ? 1 : t; float u = 1 - t; return 1 - u * u * u; }
 float hud_ease_inout(float t) { t = t < 0 ? 0 : t > 1 ? 1 : t; if (t < 0.5f) return 4 * t * t * t; float u = -2 * t + 2; return 1 - u * u * u / 2; }
@@ -289,7 +289,7 @@ void hud_tween(float *cur, float target, float speed, float dt) {
   if (fabsf(target - *cur) < 0.5f) *cur = target;
 }
 
-/* ── shapes ─────────────────────────────────────────────────────── */
+/* -- shapes ------------------------------------------------------- */
 
 void hud_circle(int cx, int cy, int r, uint32_t rgb, int a) {
   int bx = D(cx), by = D(cy), br = D(r);
@@ -404,7 +404,7 @@ void hud_steps(int cx, int y, int n, int step, float frac) {
   }
 }
 
-/* ── the HeatSync mark ──────────────────────────────────────────── */
+/* -- the HeatSync mark -------------------------------------------- */
 
 /* even-odd scanline fill into a coverage grid (ss x ss supersampled) */
 static void fill_rings(uint8_t *cov, int size, const float *pts, const int *ring, int nrings) {
@@ -480,7 +480,7 @@ uint8_t *hud_logo_image(int size, uint32_t flame_rgb, uint32_t bg_rgb, int bg_a)
   return img;
 }
 
-/* ── screen space particles ─────────────────────────────────────── */
+/* -- screen space particles --------------------------------------- */
 
 typedef struct { float x, y, vx, vy, life, max, size; uint32_t c; int kind; } fx2_t;
 static fx2_t FX2[J_FX2_CAP];
@@ -538,7 +538,7 @@ void fx2_draw(float dt) {
   }
 }
 
-/* ── spec 10.3 additions ───────────────────────────────────────── */
+/* -- spec 10.3 additions ----------------------------------------- */
 
 /* the 14 x 10 tag glyph with a notched corner */
 void hud_tag(int x, int y, int filled, int bonus, int over) {

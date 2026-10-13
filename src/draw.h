@@ -17,14 +17,14 @@
 #include "camera.h"
 #include "game.h"
 
-/* ── entry ─────────────────────────────────────────────────────── */
+/* -- entry ------------------------------------------------------- */
 void draw_init(void);
 /* dispatches on game phase; per viewport strips project with cam_project(i) */
 void draw_hud(float dt);
 /* the current viewport rects the HUD is drawing over (set by main.c every frame from cam_current) */
 void draw_set_views(const rect_t *vp, int n, int layout);
 
-/* ── fight (draw.c) ────────────────────────────────────────────── */
+/* -- fight (draw.c) ---------------------------------------------- */
 /* the per viewport strip (10.4): 72 px tall in halves and full, 56 px in quadrants (compact) */
 void hud_strip(const rect_t *vp, const bot_t *b, int compact);
 /* the 320 px short strip for the practice bot in 1 player (10.17) */
@@ -61,7 +61,7 @@ void next_match_chip(int pad, float t);
 /* the TOURNAMENT bracket in place of the results turntable (10.21): reads G.bracket, G.bracket_wins, G.tournament_round, G.bye_seat */
 void bracket_card(const rect_t *r);
 
-/* ── menus (draw_menus.c) ──────────────────────────────────────── */
+/* -- menus (draw_menus.c) ---------------------------------------- */
 void boot_screen(float frac);
 void title_screen(float dt);
 void attract_overlay(void);

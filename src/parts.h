@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include "content.h"
 
-/* ── ids ─────────────────────────────────────────────────────────── */
+/* -- ids ----------------------------------------------------------- */
 enum { CH_BOX, CH_WEDGE, CH_LOWBOY, CH_SHELL, CH_FRAME, CH_LUNCHBOX, CH_COUNT };
 enum { DR_TWO, DR_FOUR, DR_SIX, DR_TREAD, DR_HOVER, DR_WALKER, DR_LEGTRACK, DR_MELTY, DR_COUNT };
 enum { WP_NONE, WP_WEDGE, WP_SPIKE, WP_LIFTER, WP_SAW, WP_FLAME, WP_HAMMER, WP_FLIPPER, WP_DRUM, WP_HORIZ, WP_CRUSHER, WP_COUNT };
@@ -39,10 +39,10 @@ enum { DC_NONE, DC_HAZARD_STRIPES, DC_TAPE_BAND, DC_SEAT_NUMBER };
 #define BAR_COUNT 3
 enum { BAR_SPEED, BAR_HIT, BAR_TOUGH };
 
-/* ── build ───────────────────────────────────────────────────────── */
+/* -- build --------------------------------------------------------- */
 typedef struct { uint8_t chassis, drive, weapon, weapon2, armour, paint, decal; } build_t;
 
-/* ── tables ──────────────────────────────────────────────────────── */
+/* -- tables -------------------------------------------------------- */
 typedef struct {
   const char *name, *short_name, *flavour;   /* short_name is at most 9 chars for quadrant rows */
   uint8_t tags, hp; float mass;
@@ -123,9 +123,15 @@ static const weapon_def_t WEAPONS[WP_COUNT] __attribute__((unused)) = {
 #define WP_FLAME_BURN_T       180
 #define WP_FLAME_BURN_DPS     2.0f
 #define WP_HORIZ_WALL_DMG     15.0f
+#ifndef WP_MELTY_DMG
 #define WP_MELTY_DMG          18.0f
+#endif
+#ifndef WP_MELTY_SPIN_UP
 #define WP_MELTY_SPIN_UP      1.5f
+#endif
+#ifndef WP_MELTY_WALL_DMG
 #define WP_MELTY_WALL_DMG     10.0f
+#endif
 #define WP_CRUSHER_HOLD_DPS   6.0f
 #define WP_LIFTER_FRAMES      36
 #define WP_LIFTER_MAX_HOLD    180
@@ -160,7 +166,7 @@ static const struct { uint8_t body, stripe; } PAINT_SCHEMES[PAINT_COUNT] __attri
 #define REASON_MELTY   "BODY IS THE WEAPON"
 #define REASON_MOUNT   "NO MOUNT"
 
-/* ── the one RNG (xorshift32); everything random in the game goes through it ── */
+/* -- the one RNG (xorshift32); everything random in the game goes through it -- */
 static inline uint32_t rtr_rand(uint32_t *s) {
   uint32_t x = *s ? *s : 0x9e3779b9u;
   x ^= x << 13; x ^= x >> 17; x ^= x << 5;
@@ -170,7 +176,7 @@ static inline uint32_t rtr_rand(uint32_t *s) {
 static inline int rtr_rand_n(uint32_t *s, int n) { return n <= 0 ? 0 : (int)(rtr_rand(s) % (uint32_t)n); }
 static inline float rtr_rand_f(uint32_t *s) { return (float)(rtr_rand(s) >> 8) * (1.0f / 16777216.0f); }
 
-/* ── budget ──────────────────────────────────────────────────────── */
+/* -- budget -------------------------------------------------------- */
 static inline int build_budget(const build_t *b) { return BUDGET_BASE + DRIVES[b->drive].bonus; }
 
 static inline int build_cost(const build_t *b) {
@@ -295,7 +301,7 @@ static inline void build_random(build_t *b, uint32_t *rng, int players) {
   }
 }
 
-/* ── the three bars (3.3 to 3.6, 3.8), each clamped 0..1 ─────────── */
+/* -- the three bars (3.3 to 3.6, 3.8), each clamped 0..1 ----------- */
 static inline float build_mass(const build_t *b) {
   float m = CHASSIS[b->chassis].mass + DRIVES[b->drive].mass + WEAPONS[b->weapon].mass + ARMOURS[b->armour].mass;
   if (b->weapon2 != WP_NONE) m += WEAPONS[b->weapon2].mass;

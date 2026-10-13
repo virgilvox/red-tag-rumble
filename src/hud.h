@@ -81,7 +81,7 @@ void hud_logo(int x, int y, int size, uint32_t flame_rgb);
 /* RGBA image of the mark (caller frees); kept for parity with DO-OCRACY, unused here */
 uint8_t *hud_logo_image(int size, uint32_t flame_rgb, uint32_t bg_rgb, int bg_a);
 
-/* ── FINAL-frontend 5 additions ─────────────────────────────────── */
+/* -- FINAL-frontend 5 additions ----------------------------------- */
 /* text with a 3 px solid shadow in C_SHADOW at 80 percent of a, then the text */
 int  hud_text_sh(int font, int x, int y, const char *s, uint32_t rgb, int a, int align);
 /* runs drawn left to right; total width measured with hud_text_w for align; shadowed */
@@ -111,7 +111,7 @@ enum { FX2_SPARK, FX2_CONFETTI, FX2_RING };
 void fx2_burst(int kind, float x, float y, uint32_t c);
 void fx2_draw(float dt);
 
-/* ── spec 10.3 additions for this cart ──────────────────────────── */
+/* -- spec 10.3 additions for this cart ---------------------------- */
 /* the 14 x 10 tag glyph with a notched corner: hazard fill when filled, char with a
  * 1 px steel frame when free, live frame for a bonus tag; rust when over is set */
 void hud_tag(int x, int y, int filled, int bonus, int over);

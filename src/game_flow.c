@@ -769,7 +769,7 @@ static void garage_update(float dt) {
     if (held(p, IN_Y)) G.controls_card_seat = s;
     /* the right stick scrubs the turntable; releasing resumes (3.1) */
     if (PADS[p].cur.rx < -8000 || PADS[p].cur.rx > 8000) world_turntable(s, world_turntable_angle(s) + PADS[p].cur.rx / 32767.0f * 3.0f * dt);
-    if (PADS[p].cur.rt > TRIGGER_ON && PADS[p].prev.rt <= TRIGGER_ON) world_weapon_test_fire(s);
+    if (PADS[p].cur.rt > TRIGGER_ON && PADS[p].prev.rt <= TRIGGER_ON) { world_weapon_test_fire(s); audio_part(ROW_WEAPON, st->build.drive == DR_MELTY ? WP_NONE : st->build.weapon); }
     if (st->locked) {
       if (edge(p, IN_B)) { st->locked = 0; world_turntable_lock(s, 0); audio_play(SFX_MENU_BACK); }
       continue;
@@ -886,6 +886,7 @@ static void pause_close(void) {
   G.paused = 0; G.controls_card_seat = -1; G.reset_hold = 0;
   G.timescale = G.miniko_frames > 0 ? J_MINIKO_TIMESCALE : 1;
   audio_duck(1);
+  audio_play(SFX_MENU_BACK);
 }
 
 static void pause_update(float dt) {
@@ -894,14 +895,18 @@ static void pause_update(float dt) {
     return;
   }
   int quit_held = 0;
+  /* the pause menu belongs to the pad that paused: a stick another player is still
+   * holding from the fight must not walk the cursor */
+  int owner = G.pauser >= 0 && G.pauser < 4 ? G.seats[G.pauser].pad : -1;
   for (int p = 0; p < 4; p++) {
+    if (owner >= 0 && p != owner) continue;
     if (PADS[p].nav_y) { G.pause_row = wrap(G.pause_row + PADS[p].nav_y, 4); G.reset_hold = 0; audio_play(SFX_MENU_MOVE); }
     if (edge(p, IN_START | IN_B)) { pause_close(); return; }
     if (G.pause_row == 3) { if (held(p, IN_A)) quit_held = 1; continue; }
     if (edge(p, IN_A)) {
       if (G.pause_row == 0) { pause_close(); return; }
-      if (G.pause_row == 1) { G.controls_card_seat = G.pauser; return; }
-      if (G.pause_row == 2) { G.settings_from_pause = 1; G.paused = 0; G.settings_row = 0; G.settings_saved_t = 0; G.phase = PH_SETTINGS; G.phase_t = 0; return; }
+      if (G.pause_row == 1) { G.controls_card_seat = G.pauser; audio_play(SFX_MENU_OK); return; }
+      if (G.pause_row == 2) { audio_play(SFX_MENU_OK); G.settings_from_pause = 1; G.paused = 0; G.settings_row = 0; G.settings_saved_t = 0; G.phase = PH_SETTINGS; G.phase_t = 0; return; }
     }
   }
   if (quit_held) {
@@ -995,7 +1000,7 @@ static void rematch_update(void) {
     seat_t *st = &G.seats[s];
     if (PADS[p].nav_y && !G.rematch_votes[s]) { st->rematch = wrap(st->rematch + PADS[p].nav_y, 4); audio_play(SFX_MENU_MOVE); }
     if (edge(p, IN_A)) { G.rematch_votes[s] = 1; audio_play(SFX_MENU_OK); }
-    if (edge(p, IN_B)) G.rematch_votes[s] = 0;
+    if (edge(p, IN_B) && G.rematch_votes[s]) { G.rematch_votes[s] = 0; audio_play(SFX_MENU_BACK); }
   }
   int count[4] = { 0 };
   for (int s = 0; s < 4; s++) {

@@ -94,7 +94,7 @@ STR char *CARD_KEYS      = "KEYBOARD: ARROWS, Z WEAPON, X BRAKE, A TAUNT, Q BOOS
 /* placement words, under 10 */
 STR char *PLACE_WORD[]   = { "WINNER", "HP ZERO", "FLIPPED", "PITTED", "OFF ROOF", "COUNTED", "DECK", "TIMED OUT" };
 
-/* ── fixed UI labels (section 10), never jokes ─────────────────────── */
+/* fixed UI labels (section 10), never jokes */
 /* title (10.7) */
 STR char *S_EYEBROW_TITLE = "HEATSYNC LABS ARCADE";
 STR char *S_TITLE_1 = "RED TAG";

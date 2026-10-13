@@ -27,6 +27,9 @@
 #ifndef SPIN_BLEED_DRUM
 #define SPIN_BLEED_DRUM  0.35f
 #endif
+#ifndef MELTY_TIP
+#define MELTY_TIP 9.0f
+#endif
 #ifndef SPIN_BLEED_MELTY
 #define SPIN_BLEED_MELTY 0.3f
 #endif
@@ -625,7 +628,7 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
   float nx = v->b.x - a->b.x, nz = v->b.z - a->b.z, nl = len2(nx, nz);
   if (nl < 1e-4f) { nx = 0; nz = 1; } else { nx /= nl; nz /= nl; }
   float base, tip = 0, spin_or_1 = 1; int stun; float knockv = 0, self = 0;
-  if (melty) { base = WP_MELTY_DMG; stun = 18; knockv = 4.0f; tip = spin * 9.0f; *cd = 18; wid = -2; }
+  if (melty) { base = WP_MELTY_DMG; stun = 18; knockv = 4.0f; tip = spin * MELTY_TIP; *cd = 18; wid = -2; }
   else {
     const weapon_def_t *w = &WEAPONS[wid];
     base = w->base; stun = w->stun; knockv = w->knock; self = w->self_dmg;

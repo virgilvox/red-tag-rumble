@@ -18,7 +18,7 @@
 #define DEG(d)    ((d) * (PI_F / 180.0f))
 #define STICK     32767.0f
 
-/* ── small vector helpers ────────────────────────────────────────── */
+/* -- small vector helpers ------------------------------------------ */
 static float absf(float v) { return v < 0 ? -v : v; }
 static float len2(float x, float z) { return sqrtf(x * x + z * z); }
 static float dotp(float ax, float az, float bx, float bz) { return ax * bx + az * bz; }
@@ -41,7 +41,7 @@ static const arena_def_t *ai_arena(const ai_t *a, const match_t *m) {
   return &ARENAS[m->arena < ARENA_COUNT ? m->arena : 0];
 }
 
-/* ── weapon families ─────────────────────────────────────────────── */
+/* -- weapon families ----------------------------------------------- */
 static int weapon_spinner(int w) { return w == WP_HORIZ || w == WP_DRUM; }
 static int bot_is_spinner(const ai_view_t *v) { return weapon_spinner(v->weapon) || v->drive == DR_MELTY; }
 static int bot_is_wedge(const bot_t *b) { return b->build.chassis == CH_WEDGE || b->build.weapon == WP_WEDGE; }
@@ -73,7 +73,7 @@ static int weapon_ready(const bot_t *b) {
   }
 }
 
-/* ── hazards ─────────────────────────────────────────────────────── */
+/* -- hazards ------------------------------------------------------- */
 /* distance from a point to the hazard's square (axis aligned; ang is a render tilt) */
 static float haz_dist(const hazard_def_t *h, float x, float z) {
   float hw = h->w > 0 ? h->w * 0.5f : 0.6f, hd = h->d > 0 ? h->d * 0.5f : 0.6f;
@@ -102,7 +102,7 @@ static int haz_danger(const hazard_def_t *h, float haz_clock, float within, floa
   return 0;
 }
 
-/* ── the perception ring (8.1) ───────────────────────────────────── */
+/* -- the perception ring (8.1) ------------------------------------- */
 static void ring_push(ai_t *a, const match_t *m) {
   ai_frame_t *f = &a->ring[a->ring_head];
   memset(f, 0, sizeof *f);
@@ -128,7 +128,7 @@ static const ai_frame_t *ring_read(const ai_t *a, int back) {
   return &a->ring[i];
 }
 
-/* ── the pin detector (2.11), the AI's own view of it ─────────────── */
+/* -- the pin detector (2.11), the AI's own view of it --------------- */
 static int walls_within(const arena_def_t *ar, float x, float z, float r) {
   float hw = ar->w * 0.5f, hd = ar->d * 0.5f; int n = 0;
   if (!(ar->open_mask & OPEN_PX) && hw - x < r) n++;
@@ -167,7 +167,7 @@ static int hp_leader(const match_t *m) {
   return best;
 }
 
-/* ── habit observation (8.4): what the human does to AI bots, tallied for ai_learn ── */
+/* -- habit observation (8.4): what the human does to AI bots, tallied for ai_learn -- */
 static struct { int pins, hazard_pushes, boosts; int pin_seen[MAX_BOTS]; } OBS;
 
 static void observe(ai_t *a, const match_t *m) {
@@ -195,7 +195,7 @@ static void observe(ai_t *a, const match_t *m) {
   }
 }
 
-/* ── init and bind ───────────────────────────────────────────────── */
+/* -- init and bind ------------------------------------------------- */
 void ai_init(ai_t *a, int difficulty, int seat) {
   memset(a, 0, sizeof *a);
   a->difficulty = (uint8_t)difficulty;
@@ -211,7 +211,7 @@ void ai_init(ai_t *a, int difficulty, int seat) {
 void ai_bind(ai_t *a, int slot) { a->slot = (uint8_t)slot; }
 void ai_set_arena(ai_t *a, const arena_def_t *arena) { a->arena = arena; }
 
-/* ── target choice: the nearest live enemy as seen through the ring ── */
+/* -- target choice: the nearest live enemy as seen through the ring -- */
 static int pick_target(const ai_t *a, const match_t *m, const ai_frame_t *f) {
   const bot_t *me = &m->bots[a->slot];
   int best = -1; float bd = 1e9f;
@@ -235,7 +235,7 @@ static float land_time(const ai_view_t *v) {
   return (v->vy + sqrtf(disc)) / g;
 }
 
-/* ── the scorer (8.2) ────────────────────────────────────────────── */
+/* -- the scorer (8.2) ---------------------------------------------- */
 typedef struct {
   float score[GOAL_COUNT];
   float tx[GOAL_COUNT], tz[GOAL_COUNT];
@@ -394,7 +394,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
   if (me->countout > 300 && !me->inverted) { s->score[GOAL_WIGGLE] = 0.95f; s->tx[GOAL_WIGGLE] = mx; s->tz[GOAL_WIGGLE] = mz; }
 }
 
-/* ── OPS (7, 8.6): the referee's own goals ───────────────────────── */
+/* -- OPS (7, 8.6): the referee's own goals ------------------------- */
 static void ops_goals(ai_t *a, const match_t *m, scores_t *s) {
   const bot_t *me = &m->bots[a->slot];
   const arena_def_t *ar = ai_arena(a, m);
@@ -466,7 +466,7 @@ static void ops_goals(ai_t *a, const match_t *m, scores_t *s) {
   }
 }
 
-/* ── choosing: highest score, 0.1 hysteresis for the current goal ── */
+/* -- choosing: highest score, 0.1 hysteresis for the current goal -- */
 static void choose(ai_t *a, const scores_t *s) {
   int best = GOAL_NONE; float bs = 0;
   for (int g = 1; g < GOAL_COUNT; g++) {
@@ -486,7 +486,7 @@ static void choose(ai_t *a, const scores_t *s) {
   if (best != GOAL_NONE) { a->tx = s->tx[best]; a->tz = s->tz[best]; }
 }
 
-/* ── steering (8.5) ──────────────────────────────────────────────── */
+/* -- steering (8.5) ------------------------------------------------ */
 /* keep a target inside the floor, 1.2 u off every wall and open edge */
 static void clamp_inside(const arena_def_t *ar, float *x, float *z) {
   float hw = ar->w * 0.5f - 1.2f, hd = ar->d * 0.5f - 1.2f;
@@ -588,7 +588,7 @@ static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float
   write_stick(out, turn, throttle);
 }
 
-/* ── weapons (8.3) ───────────────────────────────────────────────── */
+/* -- weapons (8.3) ------------------------------------------------- */
 static int enemy_in_box(const bot_t *me, const ai_view_t *e, float ehl, float w, float z0, float z1, float lead_frames) {
   float ex = e->x + e->vx * lead_frames * DT, ez = e->z + e->vz * lead_frames * DT;
   float lx, lz; to_local(me->b.h, me->b.x, me->b.z, ex, ez, &lx, &lz);
@@ -698,7 +698,7 @@ static void maybe_boost(ai_t *a, const match_t *m, const ai_frame_t *f, pad_stat
   if (want) out->buttons |= IN_L;
 }
 
-/* ── the frame ───────────────────────────────────────────────────── */
+/* -- the frame ----------------------------------------------------- */
 void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
   uint16_t prev = a->prev_buttons;
   memset(out, 0, sizeof *out);
@@ -802,7 +802,7 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
   a->prev_buttons = out->buttons;
 }
 
-/* ── build choice (8.4) ──────────────────────────────────────────── */
+/* -- build choice (8.4) -------------------------------------------- */
 static int human_has_wedge(const build_t *h) { return h->chassis == CH_WEDGE || h->weapon == WP_WEDGE; }
 static int human_has_spinner(const build_t *h) { return weapon_spinner(h->weapon) || h->drive == DR_MELTY; }
 
@@ -847,7 +847,7 @@ void ai_pick_build(build_t *b, int difficulty, const build_t *human_last, const 
   if (!build_legal(b, 2)) build_preset(b, PRE_LAUNCH);             /* 2: legal in a 1v1 too, so never CRUSHER */
 }
 
-/* ── habits (8.4): fold a finished match into save.habits ────────── */
+/* -- habits (8.4): fold a finished match into save.habits ---------- */
 static uint8_t sat_add(uint8_t v, int d) { int r = (int)v + d; return (uint8_t)(r > 255 ? 255 : r < 0 ? 0 : r); }
 
 void ai_learn(uint8_t habits[8], const match_t *m, int human_slot) {
@@ -869,7 +869,7 @@ void ai_learn(uint8_t habits[8], const match_t *m, int human_slot) {
   memset(&OBS, 0, sizeof OBS);
 }
 
-/* ── the practice bot panel (3.12) ───────────────────────────────── */
+/* -- the practice bot panel (3.12) --------------------------------- */
 int ai_garage_tick(build_t *cur, const build_t *pick, int frame, int players, uint32_t *rng) {
   if (frame < 0) return 0;
   if (frame == 300) { *cur = *pick; return 2; }
@@ -888,7 +888,7 @@ int ai_garage_tick(build_t *cur, const build_t *pick, int frame, int players, ui
   return 0;
 }
 
-/* ── the attract driver (8.6) ────────────────────────────────────── */
+/* -- the attract driver (8.6) -------------------------------------- */
 void ai_attract_setup(match_setup_t *s, ai_t ais[2], uint32_t frame_seed) {
   memset(s, 0, sizeof *s);
   uint32_t rng = frame_seed * 2654435761u + 0x9e3779b9u;
