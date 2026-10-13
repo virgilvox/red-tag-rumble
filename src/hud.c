@@ -155,7 +155,8 @@ void hud_tape(int x, int y, int w, int h, float phase) {
       blend(xx, yy, k < half ? C_HAZARD : C_TAPE, 255);
     }
   }
-  hud_frame(x, y, w, h, 2, C_TAPE, 255);
+  /* a tape thinner than 12 px (the seams, the bracket chains) is all stripe; the frame would swallow it */
+  if (w >= 12 && h >= 12) hud_frame(x, y, w, h, 2, C_TAPE, 255);
 }
 
 void hud_bar(int x, int y, int w, int h, float frac, uint32_t fill, uint32_t bg) {

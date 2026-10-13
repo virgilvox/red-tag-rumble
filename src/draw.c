@@ -945,6 +945,16 @@ static int names_collide(const bot_t *const *bs, int n) {
 
 static int evening_wins(int seat) { return G.seats[seat & 3].wins; }
 
+/* a char backdrop everywhere but the turntable viewport: the 3D pass clears only that
+ * viewport, so nothing stale shows through and every line of the screen sits on char */
+static void results_backdrop(const rect_t *r) {
+  if (M.mode == MODE_TOURNAMENT) { hud_rect(0, 24, 1280, 672, C_CHAR, 255); return; }
+  hud_rect(0, 24, 1280, r->y - 24, C_CHAR, 255);
+  hud_rect(0, r->y + r->h, 1280, 696 - r->y - r->h, C_CHAR, 255);
+  hud_rect(0, r->y, r->x, r->h, C_CHAR, 255);
+  hud_rect(r->x + r->w, r->y, 1280 - r->x - r->w, r->h, C_CHAR, 255);
+}
+
 static void results_bracket_or_turntable(const rect_t *r) {
   if (M.mode == MODE_TOURNAMENT) bracket_card(r);
   else {
@@ -959,6 +969,8 @@ void results_screen(float t) {
   int n = ranked(bs);
   hud_tape(0, 0, 1280, 24, 0);          /* static here, so the results hold uploads nothing */
   hud_tape(0, 696, 1280, 24, 0);
+  rect_t tt = { 64, 180, 420, 300 };    /* the turntable viewport (or the bracket card) */
+  results_backdrop(&tt);
   if (!n) return;
   const bot_t *winner = bs[0];
   int judged = M.win_how == WIN_JUDGES;
@@ -981,7 +993,6 @@ void results_screen(float t) {
   int ci = judged ? (G.judges_rule >= 1 ? 6 : 7) : (M.win_how < 6 ? M.win_how : 0);
   hud_text_sh(fit_font(F_H3, KO_CAUSE_LINES[ci], 1152), 64, 136, KO_CAUSE_LINES[ci], C_HAZARD, 255, AL_LEFT);
   /* the turntable or the bracket */
-  rect_t tt = { 64, 180, 420, 300 };
   results_bracket_or_turntable(&tt);
   if (!results_confetti_done && t > 0.3f) { fx2_burst(FX2_CONFETTI, 274, 200, SEAT_RGB[winner->seat & 3]); results_confetti_done = 1; }
   /* the rows panel */
@@ -1106,8 +1117,9 @@ void bracket_card(const rect_t *r) {
   int round = G.tournament_round;
   const char *rn = round <= 0 ? S_SEMIS : round == 1 ? S_THIRD_PLACE : S_FINAL;
   hud_text(F_MONO_S, r->x + r->w - 16, r->y + 12, rn, C_HAZARD, 255, AL_RIGHT);
-  /* three columns of 120 px chips: the semi pairs, the final pair, the champion */
-  int cw = 120, lx = r->x + 16, mx = r->x + 150, rx = r->x + 284;
+  /* two columns of 170 px chips (the longest generated name fits): the semi pairs on the
+   * left, the final pair on the right with the champion slot under it */
+  int cw = 170, lx = r->x + 16, mx = r->x + 16 + cw + 24;
   int y0 = r->y + 56;
   int sem[2][2] = { { G.bracket[0], G.bracket[1] }, { G.bracket[2], G.bracket[3] } };
   int fin[2] = { -1, -1 }, champ = -1;
@@ -1128,16 +1140,17 @@ void bracket_card(const rect_t *r) {
     hud_tape(lx + cw, py + 33, mx - lx - cw, 6, 0);
   }
   int final_next = round == 2 && champ < 0;
-  bracket_chip(mx, y0 + 22, fin[0], cw, final_next);
+  /* the final chips sit on the pair midlines (y0 + 33 and y0 + 143) the tapes arrive at */
+  bracket_chip(mx, y0 + 19, fin[0], cw, final_next);
   hud_text(F_MONO_S, mx + cw / 2, y0 + 80, S_VS, final_next ? C_HAZARD : C_SMOKE, 255, AL_CENTER);
-  bracket_chip(mx, y0 + 132, fin[1], cw, final_next);
-  hud_tape(mx + cw, y0 + 33, 6, 116, 0);
-  hud_tape(mx + cw + 6, y0 + 88, rx - mx - cw - 6, 6, 0);
-  hud_text(F_MONO_S, rx + cw / 2, y0 + 56, S_CHAMPION, C_ASH, 255, AL_CENTER);
-  if (champ >= 0) bracket_chip(rx, y0 + 77, champ, cw, 1);
-  else { hud_rect(rx, y0 + 77, cw, 28, C_GRIME, 255); hud_frame(rx, y0 + 77, cw, 28, 1, C_STEEL, 255); }
+  bracket_chip(mx, y0 + 129, fin[1], cw, final_next);
+  /* the chain from the final down to the champion slot */
+  hud_tape(mx + cw / 2 - 3, y0 + 157, 6, 26, 0);
+  hud_text(F_MONO_S, mx + cw / 2, y0 + 185, S_CHAMPION, C_ASH, 255, AL_CENTER);
+  if (champ >= 0) bracket_chip(mx, y0 + 206, champ, cw, 1);
+  else { hud_rect(mx, y0 + 206, cw, 28, C_GRIME, 255); hud_frame(mx, y0 + 206, cw, 28, 1, C_STEEL, 255); }
   /* the NEXT tag above the pairing that fights next */
-  int nx = round <= 0 ? lx : mx, ny = round <= 0 ? y0 + (fin[0] < 0 ? 0 : pair_y[1]) - 22 : y0 + 22 - 22;
+  int nx = round <= 0 ? lx : mx, ny = round <= 0 ? y0 + (fin[0] < 0 ? 0 : pair_y[1]) - 22 : y0 + 19 - 22;
   if (round == 1) { nx = lx; ny = y0 + pair_y[1] - 22; }
   hud_rect(nx, ny, hud_text_w(F_MONO_S, S_NEXT) + 16, 18, C_HAZARD, 255);
   hud_text(F_MONO_S, nx + 8, ny + 1, S_NEXT, C_TAPE, 255, AL_LEFT);
@@ -1369,7 +1382,7 @@ void fake_hud_frame(float dt) {
   (void)dt;
   int f = (int)G.frame;
   static int stage = -1;
-  int s = f / 200; if (s > 11) s = 11;
+  int s = f / 200; if (s > 12) s = 12;
   if (s != stage) {
     stage = s;
     G.phase_t = 0; G.paused = 0; G.miniko_frames = 0; G.timescale = 1;
@@ -1399,6 +1412,12 @@ void fake_hud_frame(float dt) {
         fake_match(2, AR_BAY, MODE_DEATHMATCH); G.phase = PH_JUDGES; M.clock_s = 0; M.win_how = WIN_JUDGES;
         G.judge_bars[0][0] = 5.2f; G.judge_bars[0][1] = 1.8f; G.judge_bars[1][0] = 1.9f; G.judge_bars[1][1] = 2.1f; G.judge_bars[2][0] = 1.0f; G.judge_bars[2][1] = 3.0f;
         G.judge_winner = 0; G.judges_rule = 0;
+        cam_set_match(&M, 2, 0, &ARENAS[AR_BAY]);
+        break;
+      case 12:   /* the judges tie: the UNDERDOG RULE chip and the cheaper build line */
+        fake_match(2, AR_BAY, MODE_DEATHMATCH); G.phase = PH_JUDGES; M.clock_s = 0; M.win_how = WIN_JUDGES;
+        G.judge_bars[0][0] = 4.0f; G.judge_bars[0][1] = 4.0f; G.judge_bars[1][0] = 2.0f; G.judge_bars[1][1] = 2.0f; G.judge_bars[2][0] = 1.5f; G.judge_bars[2][1] = 1.5f;
+        G.judge_winner = 1; G.judges_rule = 1;
         cam_set_match(&M, 2, 0, &ARENAS[AR_BAY]);
         break;
       case 9: fake_match(2, AR_BAY, MODE_DEATHMATCH); G.paused = 1; G.pauser = 1; G.pause_row = 3; G.reset_hold = 0.6f; break;
