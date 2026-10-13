@@ -120,6 +120,9 @@ static void composite(uint8_t *out) {
   }
 }
 
+/* the bracket card lives in draw.c (the fight layer), which this native twin does not link */
+void bracket_card(const rect_t *r) { (void)r; }
+
 int main(int argc, char **argv) {
   const char *out_dir = argc > 1 ? argv[1] : "build/shots";
   const char *only = argc > 2 && argv[2][0] ? argv[2] : 0;

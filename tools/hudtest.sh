@@ -21,6 +21,8 @@ cc "${CF[@]}" -D__wasm__ -Wno-ignored-attributes -Wno-unknown-attributes "${INC[
 cc "${CF[@]}" -DRTR_FAKE_MENUS "${INC[@]}" -c src/draw_menus.c -o "$OUT/draw_menus.o"
 cc "${CF[@]}" "${INC[@]}" -c src/game.c -o "$OUT/game.o"
 cc "${CF[@]}" "${INC[@]}" -c src/arena.c -o "$OUT/arena.o"
+cc "${CF[@]}" -DRTR_HEADLESS -I src -c src/sim.c -o "$OUT/sim.o"
+cc "${CF[@]}" -DRTR_HEADLESS -I src -c src/bot.c -o "$OUT/bot.o"
 cc "${CF[@]}" -DRTR_FAKE_MENUS "${INC[@]}" -c tools/hudtest.c -o "$OUT/hudtest.o"
-cc "$OUT"/hud.o "$OUT"/draw_menus.o "$OUT"/game.o "$OUT"/arena.o "$OUT"/hudtest.o -lm -o build/hudtest
+cc "$OUT"/hud.o "$OUT"/draw_menus.o "$OUT"/game.o "$OUT"/arena.o "$OUT"/sim.o "$OUT"/bot.o "$OUT"/hudtest.o -lm -o build/hudtest
 build/hudtest build/shots "${1:-}" "${HUD_DIV:-1}"

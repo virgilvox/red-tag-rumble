@@ -14,6 +14,7 @@
  * judges, pause, bracket, closing time). Nothing of it is compiled into a
  * normal cart. */
 #include "draw.h"
+#include "draw_menus.h"
 #include "content.h"
 #include "juice.h"
 #include "fx.h"
@@ -922,7 +923,7 @@ void judges_card(float t) {
 
 /* ── results and the rematch menu (10.21) ──────────────────────── */
 static const char *place_word(const bot_t *b) {
-  if (b->place == 0) return PLACE_WORD[0];
+  if (b->place <= 1) return PLACE_WORD[0];          /* the sim ranks from 1 */
   switch (b->ko_how) {
     case KO_HP: return PLACE_WORD[1]; case KO_FLIP: return PLACE_WORD[2]; case KO_PIT: return PLACE_WORD[3];
     case KO_ROOF: return PLACE_WORD[4]; case KO_COUNT: return PLACE_WORD[5]; case KO_DECK: return PLACE_WORD[6];
@@ -1204,7 +1205,7 @@ static void fight_frame(float dt) {
     if (b && b->alive) chevron(i, vp, seat);
     if (b) countout(vp, b);
     stinger_draw(i, vp, compact, dt);
-    if (view_layout == LAY_FULL && M.players == 1 && nviews == 1) {
+    if (view_layout == LAY_FULL && M.players <= 2 && nviews == 1 && b) {
       /* 1 player: a 640 strip bottom left and a 320 short strip for the practice bot bottom right */
       rect_t l = { 0, 0, 640, 720 };
       hud_strip(&l, b, 0);
@@ -1214,7 +1215,7 @@ static void fight_frame(float dt) {
   }
   /* shared overlays */
   tape_seams(view_layout);
-  if (M.players > 0 && G.phase != PH_COUNTDOWN && G.phase != PH_JUDGES) clock_chip(&M, compact);
+  if (M.players > 0 && G.phase != PH_JUDGES) clock_chip(&M, compact);
   switch (view_layout) {
     case LAY_FULL: { rect_t r = { 1024, 16, 240, 135 }; minimap(&r, &M, a, 0); break; }
     case LAY_HALVES: { rect_t r = { 540, 66, 200, 112 }; minimap(&r, &M, a, 0); break; }
@@ -1257,31 +1258,23 @@ void draw_hud(float dt) {
 #ifdef RTR_FAKE_HUD
   fake_hud_frame(dt);
 #endif
+  /* the menu phases (draw_menus.c) own the whole frame; the countdown keeps the live strips */
+  if (G.phase != PH_COUNTDOWN && G.phase != PH_FIGHT && menus_draw(dt)) {
+    results_confetti_done = 0; rematch_focus_y = 0; rematch_hash_prev = 0;
+    return;
+  }
   switch (G.phase) {
-    case PH_BOOT: boot_screen(G.phase_t); break;
-    case PH_TITLE: title_screen(dt); break;
-    case PH_SETTINGS: settings_screen(dt); break;
-    case PH_HALL: hall_screen(dt); break;
-    case PH_RULES: flash_card(G.flash_step, G.flash_t); break;
-    case PH_LOBBY: lobby_screen(dt); break;
-    case PH_GARAGE: {
-      int n = game_seated(); if (n < 1) n = 1;
-      rect_t vp[4]; int nv;
-      cam_layout(n, 0, vp, &nv);
-      int compact = n >= 3;
-      for (int i = 0; i < 4; i++) if (G.seats[i].kind != SEAT_EMPTY && i < nv) garage_panel(&vp[i], i, compact, dt);
-      if (n == 3) { rect_t mq = RECT_MAP_QUADRANT; garage_match_card(&mq); }
-      tape_seams(cam_layout_kind(n, 0));
-      garage_timer_tape(GARAGE_FRAMES - G.phase_frames, GARAGE_FRAMES);
-      if (G.controls_card_seat >= 0 && G.controls_card_t > 0 && G.controls_card_seat < nv) controls_card(&vp[G.controls_card_seat], compact, G.controls_card_seat);
-      break;
-    }
-    case PH_VOTE: vote_screen(dt); break;
     case PH_COUNTDOWN:
       fight_frame(dt);
       for (int i = 0; i < nviews; i++) countdown_overlay(&views[i], G.countdown_n, G.phase_t);
       break;
-    case PH_FIGHT: fight_frame(dt); if (G.paused) pause_overlay(); break;
+    case PH_FIGHT:
+      fight_frame(dt);
+      if (G.paused) {
+        pause_overlay();
+        if (G.controls_card_seat >= 0) { rect_t cr = { 320, 180, 640, 360 }; controls_card(&cr, 0, G.controls_card_seat); }
+      }
+      break;
     case PH_KO:
       if (G.miniko_frames > 0) fight_frame(dt);
       else ko_card(G.phase_t);

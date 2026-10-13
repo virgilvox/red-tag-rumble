@@ -120,10 +120,13 @@ void cam_set_match(const match_t *m, int one_camera_setting, int split_setting, 
   nvp = 0;
   /* only the player slots: with 3 players and OPS, slot 3 is empty and never gets a view */
   int lim = m ? (m->players > 0 && m->players < m->nbots ? m->players : m->nbots) : 0;
-  if (m) for (int i = 0; i < lim && nvp < 4; i++) if (!m->bots[i].is_ops) vp_seat[nvp++] = m->bots[i].seat;
+  /* a viewport per human seat (solo is the 1 player full view of 10.17, the practice bot gets the
+   * short strip); a match with no human (the attract, a test) shows every bot */
+  int humans = 0;
+  if (m) for (int i = 0; i < lim; i++) if (!m->bots[i].is_ops && !m->bots[i].is_ai) humans++;
+  if (m) for (int i = 0; i < lim && nvp < 4; i++) if (!m->bots[i].is_ops && (!humans || !m->bots[i].is_ai)) vp_seat[nvp++] = m->bots[i].seat;
   if (nvp == 0) { nvp = 2; vp_seat[0] = 0; vp_seat[1] = 1; }
   cur_players = nvp;
-  if (m && m->players > 0) cur_players = m->players < nvp ? nvp : m->players;
   one_cam_allowed = one_camera_setting == ONECAM_ALWAYS ? 1 : one_camera_setting == ONECAM_OFF ? 0 : (a && a->one_camera_default && cur_players == 2);
   one_cam_active = one_camera_setting == ONECAM_ALWAYS;
   cut_frames = 0; engage_frames = release_frames = 0;
@@ -468,6 +471,18 @@ void cam_set_lobby(int seated_mask) {
     cams[nfixed]->fov = 22; cam_turntable(nfixed, s, 3.6f, 1.2f);
     vp_seat[nfixed] = s;
     nfixed++;
+  }
+  nvp = nfixed;
+}
+
+/* results (10.21): one viewport (64, 180, 420, 300) on the winner's turntable; table -1 shows none (TOURNAMENT) */
+void cam_set_results(int table) {
+  mode = CAMM_GARAGE;
+  nfixed = 0;
+  if (table >= 0 && table < 4) {
+    fixed_rects[0] = (rect_t){ 64, 180, 420, 300 };
+    cams[0]->fov = 30; cam_turntable(0, table, 4.4f, 1.7f);
+    vp_seat[0] = table; nfixed = 1;
   }
   nvp = nfixed;
 }

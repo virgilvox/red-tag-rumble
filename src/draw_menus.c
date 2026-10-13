@@ -168,7 +168,9 @@ void attract_overlay(void) {
     hud_text(F_MONO_S, i == 0 ? bx[i] : bx[i] + 200, 46, b->name, C_ASH, 255, i == 0 ? AL_LEFT : AL_RIGHT);
   }
   int tip = (int)(G.phase_t / 8) % LEN(ATTRACT_TIPS);
-  hud_text_sh(F_MONO, 880, 636, ATTRACT_TIPS[tip], C_ASH, 255, AL_CENTER);
+  int tw = hud_text_w(F_MONO, ATTRACT_TIPS[tip]) + 32;
+  hud_rect(880 - tw / 2, 628, tw, 36, C_CHAR, 220);
+  hud_text(F_MONO, 880, 634, ATTRACT_TIPS[tip], C_BONE, 255, AL_CENTER);
 }
 
 void title_screen(float dt) {
@@ -289,7 +291,9 @@ void lobby_screen(float dt) {
     hud_rect(x - lift / 2, y - lift / 2, w, h, C_SLAB, 255);
     hud_frame(x - lift / 2, y - lift / 2, w, h, 2, i == cur ? C_HAZARD : C_STEEL_HI, 255);
     uint32_t ink = ok ? C_BONE : C_SMOKE;
-    hud_text(F_H3, x + 8 - lift / 2, y + 10 - lift / 2, MODE_CARD_1[i], ink, 255, AL_LEFT);
+    /* a one word name too wide for the card in F_H3 drops to F_MONO_L so it stays inside the frame */
+    int nf = hud_text_w(F_H3, MODE_CARD_1[i]) > w - 20 ? F_MONO_L : F_H3;
+    hud_text(nf, x + 8 - lift / 2, y + 10 - lift / 2, MODE_CARD_1[i], ink, 255, AL_LEFT);
     if (MODE_CARD_2[i][0]) hud_text(F_H3, x + 8 - lift / 2, y + 38 - lift / 2, MODE_CARD_2[i], ink, 255, AL_LEFT);
     hud_glyph(x + w - 44 - lift / 2, y + h - 44 - lift / 2, MODE_GLYPH[i], 2, ok ? (i == cur ? C_HAZARD : C_ASH) : C_SMOKE, 255);
   }
@@ -306,6 +310,7 @@ void lobby_screen(float dt) {
     for (int k = 0; k < 3; k++) {
       int cx = 320 + 320 * k;
       hud_text(F_MONO_S, cx, 508, lab[k], C_ASH, 255, AL_CENTER);
+      if (G.lobby_row == k + 1) { hud_rect(cx - 124, 500, 248, 56, C_SLAB, 255); hud_frame(cx - 124, 500, 248, 56, 2, C_HAZARD, 255); hud_text(F_MONO_S, cx, 508, lab[k], C_ASH, 255, AL_CENTER); }
       stepper(cx, 526, F_MONO, val[k], C_BONE, idx[k] > 0, idx[k] < 2, 0);
     }
   }
@@ -788,7 +793,7 @@ void vote_screen(float dt) {
   int oc = clampi(G.vote_one_camera, 0, 2);
   hud_text(F_MONO_S, 880, 30, S_ONE_CAMERA, C_ASH, 255, AL_LEFT);
   stepper(1060, 22, F_MONO, VAL_ONE_CAMERA[oc], C_BONE, oc > 0, oc < 2, 0);
-  int frames_left = VOTE_FRAMES - G.phase_frames;
+  int frames_left = G.vote_left > 0 || G.vote_decided ? G.vote_left : VOTE_FRAMES - G.phase_frames;
   if (frames_left < 0) frames_left = 0;
   int secs = (frames_left + 59) / 60;
   snprintf(buf, sizeof buf, "0:%02d", secs);

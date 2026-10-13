@@ -72,6 +72,8 @@ for (let f = 0; f <= last; f++) {
     if (f < s.from || f > s.to) continue;
     const p = pads[s.pad ?? 0];
     for (const b of s.buttons ?? []) p.buttons |= BTN[b];
+    // PRACTICE=off (15.5): the cart reads SELECT + L3 + R3 held on pad 0 in its first frames as the flag
+    if (s.practice === 0) p.buttons |= BTN.SELECT | BTN.L3 | BTN.R3;
     if (s.lx !== undefined) p.leftX = s.lx;
     if (s.ly !== undefined) p.leftY = s.ly;
     if (s.rx !== undefined) p.rightX = s.rx;

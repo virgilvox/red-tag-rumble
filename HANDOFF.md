@@ -6,9 +6,13 @@ The complete specification is `docs/design/FINAL-bots.md`. Read section 20 (thin
 
 ## State of the tree
 
-Work item 1 of the breakdown (spec section 17) is done: the folder, the submodules at their pinned commits, the vendored pieces, `build.sh`, the state table, the headless rig with the twin-stick extension, every header of the contract, stub sources that compile and link, hud.c with the 10.3 additions, and a `main.c` that runs the frame of section 14 and proves the split-screen pipeline with spinning cubes in halves and quadrants.
+The six subsystem branches (sim, world, draw-fight, draw-menus, audio, ai) are merged on main. `src/game_flow.c` runs the phase machine of 10.1: boot, title with the attract fight, settings, hall of fame, the rules flash, lobby, garage, arena vote, countdown, fight with pause, KO, judges, results and the rematch vote. `src/game.c` keeps the state that has no renderer in it (the save struct with its crc, seats, the settings rows) so `tools/hudtest.c` still links it natively. The cube demo is gone.
 
-Everything else is a stub. `G.phase` stays at `PH_BOOT` until game.c drives phases, and while it does `main.c` renders the cube demo (`RTR_CUBE_DEMO` in `src/main.c`). The game agent deletes that block when the phase machine lands.
+Seats are packed when the lobby closes, so seat i is match slot i and turntable i for the rest of the evening. Under the rig a `"practice": 0` script entry makes `tools/shot.mjs` hold SELECT, L3 and R3 on pad 0 in the first frames; the cart reads that as PRACTICE=off (the practice bot is LAUNCH, parked, the fight is 90 s, the seed is the host seed), so `build/balance --replay` reproduces the cart's `[sim]` hash lines for the drive scripts. The first fight step of every scripted session is shot frame 668.
+
+Scripts: `tools/scripts/menus.json` (title, lobby, two seats, garage picks, vote, countdown), `menu.json` (settings, hall of fame, the rules flash), `flow.json` (a 60 s fight through KO, results and the rematch menu), `title.json` (the attract), the 2p and 4p fights of 15.5 and the six drive scripts.
+
+Not wired yet: the hazard seats, the mini-KO viewport hand-over to the hazard seat view, the TOURNAMENT bracket and OPS driving (item 16).
 
 ## The header contract
 

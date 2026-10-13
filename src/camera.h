@@ -76,6 +76,8 @@ void cam_set_garage(int players);
 void cam_set_lobby(int seated_mask);
 /* the title: the shared camera orbits the attract fight slowly in one full rect */
 void cam_set_attract(void);
+/* results: the winner's turntable in the results viewport; -1 for none */
+void cam_set_results(int table);
 /* the shared orbit for the title attract */
 void cam_attract(float t);
 

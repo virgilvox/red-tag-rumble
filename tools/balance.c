@@ -544,6 +544,7 @@ static int replay(const char *script, const char *setup, int frames) {
       bot_t *b = &m.bots[i];
       if (b->hp_max == 0) continue;
       if (s.pad[i]) b->in = pads[s.pad[i] - 1];
+      else if (s.is_ai[i] && s.park) memset(&b->in, 0, sizeof b->in);   /* PRACTICE=off: the AI sits still, as in the cart */
       else if (s.is_ai[i]) ai_think(&ais[i], &m, &b->in);
     }
     sim_step(&m);
@@ -568,7 +569,7 @@ static int replay(const char *script, const char *setup, int frames) {
  * the script replays the same lap natively (--replay) and in the cart. `cross` is
  * driven once (the pit first, while it is still closed), then `lap` repeats along
  * the walls until 5400 frames. */
-#define DRIVE_START 600
+#define DRIVE_START 668   /* the cart's first fight step: the garage ends at 308, the vote 2 s later, 1 s, then the 3 s countdown */
 typedef struct { const float (*cross)[2]; int ncross; const float (*lap)[2]; int nlap; } drive_plan_t;
 static const float BAY_X[][2] = { { -3, 0 }, { 3, 0 }, { 4, -4 }, { 0, -7.0f }, { -5, -6.2f }, { -8.5f, -3 }, { -9, 3 }, { -3, 6.2f }, { 0, 7.0f }, { 4, 5 } };
 static const float BAY_L[][2] = { { -10, 0 }, { -10, 5.8f }, { -4, 6.0f }, { 5, 6.0f }, { 10.2f, 5.8f }, { 10.2f, -5.8f }, { 5, -6.0f }, { -5, -6.0f }, { -8.5f, -3 } };

@@ -1,0 +1,17 @@
+[
+  { "from": 30,  "to": 32,  "pad": 0, "buttons": ["A"] },
+  { "from": 60,  "to": 62,  "pad": 0, "buttons": ["A"] },
+  { "from": 70,  "to": 72,  "pad": 1, "buttons": ["A"] },
+  { "from": 90,  "to": 92,  "pad": 0, "buttons": ["A"] },
+  { "from": 94,  "to": 96,  "pad": 1, "buttons": ["A"] },
+  { "from": 110, "to": 112, "pad": 0, "buttons": ["START"] },
+  { "from": 140, "to": 142, "pad": 0, "buttons": ["DOWN"] },
+  { "from": 150, "to": 152, "pad": 0, "buttons": ["DOWN"] },
+  { "from": 160, "to": 162, "pad": 0, "buttons": ["RIGHT"] },
+  { "from": 175, "to": 177, "pad": 0, "buttons": ["RIGHT"] },
+  { "from": 170, "to": 172, "pad": 1, "buttons": ["X"] },
+  { "from": 230, "to": 300, "pad": 0, "buttons": ["A"] },
+  { "from": 230, "to": 300, "pad": 1, "buttons": ["A"] },
+  { "from": 330, "to": 332, "pad": 0, "buttons": ["RIGHT"] },
+  { "from": 330, "to": 332, "pad": 1, "buttons": ["RIGHT"] }
+]

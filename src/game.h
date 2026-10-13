@@ -41,7 +41,7 @@ enum { SEAT_EMPTY, SEAT_HUMAN, SEAT_AI };
 #define TITLE_IDLE_S      60.0f
 #define ATTRACT_DELAY_S   1.5f
 
-/* ── save (14.4) ───────────────────────────────────────────────── */
+/* -- save (14.4) ------------------------------------------------- */
 #define SAVE_MAGIC   0x31525452u   /* 'RTR1' */
 #define SAVE_VERSION 1
 typedef struct {
@@ -65,7 +65,7 @@ uint32_t save_crc(const save_t *s);
 void save_commit(void);      /* recompute the crc after a change; the host picks the region up after the frame */
 int  save_valid(const save_t *s);
 
-/* ── pads and seats ────────────────────────────────────────────── */
+/* -- pads and seats ---------------------------------------------- */
 /* one per physical pad, written by main.c every frame before game_update */
 typedef struct {
   pad_state_t cur, prev;
@@ -101,7 +101,7 @@ typedef struct {
   char hint[48];
 } seat_t;
 
-/* ── the evening ───────────────────────────────────────────────── */
+/* -- the evening ------------------------------------------------- */
 typedef struct {
   int phase; float phase_t; int phase_frames;
   float timescale;           /* 1 play, 0.2 KO slow-mo, 0.4 mini-KO, 0 paused */
@@ -131,6 +131,14 @@ typedef struct {
   float tape_phase;          /* the scrolling caution tape phase */
   int evening_started;
   uint32_t match_index;
+  /* game_flow.c */
+  int lobby_row;             /* lobby: 0 the mode cards, 1..3 the ONE CAMERA, SPLIT and COMEBACK steppers */
+  int rig_park;              /* the PRACTICE=off script flag under the rig (15.5): AI seats park, 90 s fights */
+  int sim_on;                /* main.c steps the sim this frame (fight, KO, the title attract) */
+  int settings_from_pause;   /* SETTINGS opened from the pause menu: B returns to the paused fight */
+  uint32_t seed;             /* the host seed (wc_set_seed); every match seed derives from it */
+  int solo;                  /* SOLO from the title: one human and the practice bot */
+  int vote_left;             /* frames until the vote closes (8 s, or 2 s after every seat has voted); 0 when unset */
 } game_t;
 
 extern game_t G;
@@ -169,5 +177,9 @@ void game_attract_start(void);
 void game_attract_stop(void);
 /* the input ring for the KO replay and balance --replay (4.10) */
 void game_record_inputs(const pad_state_t in[4]);
+/* game_flow.c: 0 when the frame has no 3D views (boot, the vote, a title without the attract), else 1 */
+int  game_view_kind(void);
+/* the physical pad driving a match slot, or -1 for an AI (or attract) slot */
+int  game_slot_pad(int slot);
 
 #endif
