@@ -21,7 +21,7 @@ void fx_event(const event_t *e, const match_t *m);
 void fx_update(float dt, int frozen);
 /* face flash quad i toward viewport i's camera before that viewport renders */
 void fx_face(int viewport);
-/* smoke and fire emitters follow HP: 50 grey, 30 black plus fire */
+/* smoke and fire emitters follow HP: 50 grey, 30 black plus fire (world_sync calls it per alive bot) */
 void fx_bot_damage_state(int slot, float hp, float x, float y, float z);
 /* the spark colour for an armour and red tag state (3.6, 5.3) */
 uint32_t fx_spark_colour(int armour, int red_tag, uint32_t *rng);
@@ -29,5 +29,11 @@ uint32_t fx_spark_colour(int armour, int red_tag, uint32_t *rng);
 int  fx_white_alpha(int viewport);
 /* counts for the perf log */
 int  fx_live_sparks(void);
+/* world space bursts the menus and the garage fire (5.2): confetti squares in a colour
+ * (lock in 12, taunt 4), dust puffs (part cycle 4, launch 6, landing 10) */
+void fx_confetti(float x, float y, float z, int n, uint32_t colour);
+void fx_dust(float x, float y, float z, int n);
+/* plain sparks in a colour from a point with a direction (nx, nz) to fly away from */
+void fx_sparks(float x, float y, float z, float nx, float nz, int n, uint32_t colour);
 
 #endif

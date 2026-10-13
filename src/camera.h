@@ -36,7 +36,9 @@ t3_camera *cam_get(int viewport);
 t3_camera *cam_shared(void);
 /* which seat viewport i shows (the seat index into M.bots), or -1 for the shared view */
 int  cam_seat_of(int viewport);
-/* bind the cameras to a match: players, the settings, the arena (shared yaw, walls for push-out) */
+/* bind the cameras to a match: players, the settings, the arena (shared yaw, walls for push-out).
+ * one_camera_setting is ONECAM_AUTO (the arena default decides whether the hysteresis may
+ * engage), ONECAM_OFF (never) or ONECAM_ALWAYS (the shared view, no hysteresis) */
 void cam_set_match(const match_t *m, int one_camera_setting, int split_setting, const arena_def_t *a);
 /* the current layout and rects after cam_set_match and the ONE CAMERA hysteresis */
 int  cam_current(rect_t out[4], int *n);
@@ -49,7 +51,10 @@ void cam_set_shake_scale(int setting);     /* SHAKE 0..3 */
 void cam_ko(int victim, int victor);
 /* TIME: pull up to the ONE CAMERA pose over 0.6 s */
 void cam_time(void);
+/* the nearest enemy of this seat's bot is outside its viewport: the chevron point on the
+ * viewport edge in 1280 x 720 space (24 px inset) and the enemy slot in *enemy when given */
 int  cam_enemy_offscreen(int seat, float *edge_x, float *edge_y);
+int  cam_enemy_offscreen_ex(int seat, float *edge_x, float *edge_y, int *enemy);
 /* project a world point through viewport i's camera into 1280 x 720 HUD space; 0 when behind */
 int  cam_project(int viewport, float x, float y, float z, float *sx, float *sy);
 /* the chase camera's yaw for pad_state_t.cam_yaw (HOVER and MELTY steer relative to it) */
@@ -59,8 +64,18 @@ void cam_nudge(int seat, float rx, float ry);
 /* ONE CAMERA state and the tape cut (9.3): frames left in the cut, 0 when none */
 int  cam_one_camera_active(void);
 int  cam_cut_frames(void);
+/* the viewport whose seat is `seat` under the current layout, or -1 */
+int  cam_viewport_of(int seat);
 /* garage, lobby and results: viewport i looks at turntable `table` (0..3) at distance dist */
 void cam_turntable(int viewport, int table, float dist, float height);
+/* the garage (3.1, 10.9 to 10.11): cam_current returns the 3D viewport rects of the garage
+ * panels for this player count and cam_get(i) looks at turntable i; cam_set_lobby does the
+ * same for the lobby seat cards (10.8) of the seats in `seated_mask` (bit i = seat i).
+ * cam_set_match returns to the fight layout. */
+void cam_set_garage(int players);
+void cam_set_lobby(int seated_mask);
+/* the title: the shared camera orbits the attract fight slowly in one full rect */
+void cam_set_attract(void);
 /* the shared orbit for the title attract */
 void cam_attract(float t);
 
