@@ -1,0 +1,243 @@
+// wasmcart ABI v4 definitions
+
+export const ABI_VERSION = 4;
+// v4 widened the pad's triggers from uint8 to int16, which MOVED `connected`
+// from byte 12 to 14. A cart built against v1-v3 reads `connected` at 12,
+// which is now a trigger byte, so it would see every pad as unplugged. That
+// is a silent, baffling failure, so those carts are refused at load with a
+// version error instead: rebuild against the v4 header.
+export const MIN_ABI_VERSION = 4;
+
+// Button bitmask positions (matches common gamepad layout)
+export const BUTTON = {
+  A:       1 << 0,
+  B:       1 << 1,
+  X:       1 << 2,
+  Y:       1 << 3,
+  L:       1 << 4,
+  R:       1 << 5,
+  START:   1 << 6,
+  SELECT:  1 << 7,
+  UP:      1 << 8,
+  DOWN:    1 << 9,
+  LEFT:    1 << 10,
+  RIGHT:   1 << 11,
+  L3:      1 << 12,
+  R3:      1 << 13,
+  // v4: the rest of SDL2's controller button set, which libretro mirrors.
+  // A pad without one of these never sets the bit, so a cart can read them
+  // unconditionally.
+  GUIDE:    1 << 14,
+  MISC1:    1 << 15,
+  PADDLE1:  1 << 16,
+  PADDLE2:  1 << 17,
+  PADDLE3:  1 << 18,
+  PADDLE4:  1 << 19,
+  TOUCHPAD: 1 << 20,
+};
+
+// WCPad struct layout (20 bytes per pad)
+// u32 buttons                       (21 bits used, 21-31 reserved)
+// i16 left_x, left_y, right_x, right_y
+// i16 left_trigger, right_trigger   (0..32767, never negative)
+// u8  connected, _pad[3]
+//
+// Every analog axis is int16, which is bit-for-bit SDL2's and libretro's own
+// representation, so a native host passes values straight through. Triggers
+// were uint8 through v3; see the note on wc_pad_t in include/wasmcart.h for
+// why the inconsistency was worth a breaking change.
+export const PAD_SIZE = 20;
+export const MAX_PADS = 4;
+export const INPUT_REGION_SIZE = PAD_SIZE * MAX_PADS; // 64 bytes
+
+// Longest single rumble effect, in ms. The cap exists so a cart cannot pin the
+// motors forever: SDL stops on its own timer, so even a cart that crashes
+// mid-effect leaves a controller that falls silent. A cart wanting sustained
+// rumble re-arms each frame, which also means rumble stops when the cart does.
+export const MAX_RUMBLE_MS = 5000;
+
+// Longest delta_ms a cart will ever be handed, in ms (250ms = 4fps).
+//
+// delta_ms is `now - lastFrameTime`, so ANY stall inflates it: a GC pause, a
+// slow disk hit, a debugger breakpoint, a suspended tab. Handing that number to
+// a cart integrating velocity by dt teleports it through the world -- a 30s
+// stall moves an object 30s worth of distance in one step, straight through
+// whatever it should have collided with.
+//
+// Every engine caps this (Unity's maximumDeltaTime, Unreal's Max Physics Delta
+// Time) for the same reason, and the cap is the general fix: lifecycle only
+// covers stalls the host KNOWS about, while this covers all of them.
+//
+// 250ms is slow enough that no real frame reaches it and fast enough that the
+// clamp never fires during normal play. A cart that wants true elapsed time
+// across a gap reads time_ms, which stays continuous.
+export const MAX_DELTA_MS = 250;
+
+/** Clamp to 0..1, mapping NaN to 0 (NaN would otherwise pass `<` and `>`). */
+export function clamp01(v) {
+  return v > 0 ? (v < 1 ? v : 1) : 0;
+}
+
+/**
+ * Clamp a pad trigger to its wire range, 0..32767.
+ *
+ * Triggers are one-directional, so a negative value is meaningless and
+ * becomes 0 rather than wrapping to a huge positive. The clamp is the point:
+ * a caller that scaled a trigger like a stick (by 32767 from a 0..1 float,
+ * or past full travel) previously overflowed the old uint8 silently, which
+ * made a resting trigger report a number that moved on its own. NaN maps to
+ * 0 for the same reason clamp01 does it.
+ */
+export function clampTrigger(v) {
+  return v > 0 ? (v < TRIGGER_MAX ? Math.round(v) : TRIGGER_MAX) : 0;
+}
+
+/** Full travel on a pad trigger. Matches SDL2 and libretro. */
+export const TRIGGER_MAX = 32767;
+
+// WCTime struct layout (20 bytes)
+// f64 time_ms (offset 0)
+// f64 delta_ms (offset 8)
+// u32 frame (offset 16)
+export const TIME_SIZE = 20;
+
+// WCInfo struct field offsets (returned by wc_get_info)
+// All fields are u32
+export const INFO_FIELDS = {
+  VERSION:     0,
+  WIDTH:       4,
+  HEIGHT:      8,
+  FB_PTR:      12,
+  AUDIO_PTR:   16,
+  AUDIO_CAP:   20,  // capacity in stereo frames
+  AUDIO_WRITE: 24,  // cart's write cursor offset (pointer to u32 in cart memory)
+  INPUT_PTR:   28,
+  SAVE_PTR:    32,
+  SAVE_SIZE:   36,
+  TIME_PTR:    40,
+  HOST_INFO_PTR: 44, // pointer to wc_host_info_t (host writes before wc_init)
+};
+export const INFO_STRUCT_SIZE = 48;
+
+// WCHostInfo struct layout (written by host before wc_init)
+// All fields are u32
+export const HOST_INFO_FIELDS = {
+  PREFERRED_WIDTH:  0,
+  PREFERRED_HEIGHT: 4,
+  // Field 3 is RESERVED and always 0. It was host_fps; carts read
+  // wc_time_t.delta_ms instead, which is clamped and survives a stall.
+  RESERVED0:        8,
+  AUDIO_SAMPLE_RATE: 12,
+  FLAGS:            16,
+  // Written only for a cart that sets FLAG_HOST_THREADS: a cart built before
+  // the field has a 20-byte struct, and the bytes after it are its own.
+  HARDWARE_THREADS: 20,
+};
+export const HOST_INFO_SIZE = 20; // 24 for a cart that sets FLAG_HOST_THREADS
+
+// Cart info flags (wc_info_t.flags)
+export const FLAG_AUDIO_F32 = 1 << 0;  // audio ring buffer uses float32
+export const FLAG_NET_PEER  = 1 << 1;  // cart wants peer-connection imports
+// 1 << 2 is RESERVED AND UNUSED — it was FLAG_NET_DC before the WebSocket and
+// data-channel families merged into one peer-connection family. Hosts must
+// ignore it; carts must not set it. FLAG_NET_PEER governs all networking.
+export const FLAG_POINTER   = 1 << 3;  // cart wants pointer input
+export const FLAG_KEYBOARD  = 1 << 4;  // cart wants raw keyboard input
+export const FLAG_DEBUG     = 1 << 5;  // cart exports wc_debug_state() (opt-in; default OFF)
+export const FLAG_DETERMINISTIC = 1 << 6; // cart honors deterministic mode (opt-in; default OFF)
+// The cart's wc_host_info_t has hardware_threads at offset 20 (24 bytes): the
+// host writes the machine's hardware thread count there, 0 when it cannot tell.
+export const FLAG_HOST_THREADS = 1 << 7;
+
+// Peer connection state (wc_peer_state)
+export const PEER_CONNECTING = 0;
+export const PEER_OPEN       = 1;
+export const PEER_CLOSING    = 2;
+export const PEER_CLOSED     = 3;
+
+// Transport properties (wc_peer_transport bitmask). Deliberately properties,
+// not a transport name: a name invites carts to branch on the implementation
+// the peer abstraction exists to hide. UNKNOWN means the host does not
+// characterize it — carts must treat that as "assume nothing".
+export const TRANSPORT_UNKNOWN     = 0x00;
+export const TRANSPORT_RELIABLE    = 0x01;
+export const TRANSPORT_ORDERED     = 0x02;
+export const TRANSPORT_LOW_LATENCY = 0x04;
+
+// A WebSocket is reliable and ordered, but makes no latency promise.
+export const TRANSPORT_WS = TRANSPORT_RELIABLE | TRANSPORT_ORDERED;
+
+// Host-info flags (wc_host_info_t.flags, written by the host BEFORE wc_init,
+// read by the cart ONCE at init — never per frame).
+export const HOST_FLAG_DETERMINISTIC = 1 << 0; // this run is a deterministic replay
+// The host selected WebGPU for a cart that imports both `gl` and WebGPU
+// functions. Zero means GL, so a host that never heard of WebGPU has said GL.
+export const HOST_FLAG_GPU_WGPU = 1 << 1;
+
+// ── Deterministic replay (OPT-IN, default OFF) ───────────────────────────
+// A cart that sets FLAG_DETERMINISTIC declares it honors deterministic mode:
+// RNG seeded ONLY from the host (via the optional wc_set_seed(u32) export,
+// called by the host after instantiation, BEFORE wc_init), all timing taken
+// from wc_time_t, no other entropy. The host signals a deterministic run by
+// setting HOST_FLAG_DETERMINISTIC in host-info flags before wc_init; the cart
+// branches ONCE at init — the per-frame path is identical in both modes.
+// Default UNSET = today's wall-clock/native-entropy path, unchanged.
+// Same seed + same input script + fixed step → identical frame sequence.
+// NOT universal: large/engine carts may legitimately never set this flag —
+// a harness must treat non-deterministic carts as first-class (named-state
+// checkpoints instead of frame hashes).
+
+// ── Debug ABI (OPT-IN, default OFF) ──────────────────────────────────────
+// A debug-capable cart (FLAG_DEBUG set) exports wc_debug_state() returning a
+// pointer to a NUL-terminated array of wc_debug_field_t. The host reads it ONLY
+// on demand (pull, never per-frame). A cart WITHOUT FLAG_DEBUG is structurally
+// identical to a non-debug cart — no export, no table, no cost.
+//
+// wc_debug_field_t layout (16 bytes, all little-endian):
+//   u32 name_ptr   // pointer to a NUL-terminated field name ("player_x")
+//   u32 value_ptr  // pointer to the value in cart memory
+//   u8  type       // WC_DBG_* below
+//   u8  _pad[3]
+//   u32 len        // element count (scalar=1; array>1; BYTES=byte length)
+// Array terminates at the first entry whose name_ptr == 0.
+export const DEBUG_FIELD_SIZE = 16;
+export const DEBUG_TYPE = {
+  U8: 0, I8: 1, U16: 2, I16: 3, U32: 4, I32: 5, F32: 6, F64: 7, BYTES: 8,
+};
+// Byte width of each scalar debug type (BYTES uses `len` directly).
+export const DEBUG_TYPE_WIDTH = { 0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 8, 8: 1 };
+export const DEBUG_TYPE_NAME = { 0: "u8", 1: "i8", 2: "u16", 3: "i16", 4: "u32", 5: "i32", 6: "f32", 7: "f64", 8: "bytes" };
+
+// Extended info fields (v3) - byte offsets from wc_info_t start
+export const INFO_FIELDS_V3 = {
+  POINTER_PTR: 56,  // u32 index 14
+  KEYS_PTR:    60,  // u32 index 15
+  GPU_API:     64,  // u32 index 16 - 0=2D, 1=WebGL2/GLES3, 2=WebGPU, 3=Vulkan
+  WHEEL_PTR:   68,  // u32 index 17 - wc_wheel_t, 0 = not used (v3.1)
+};
+
+// GPU API values for wc_info_t.gpu_api
+export const GPU_API_NONE    = 0;  // 2D framebuffer only
+export const GPU_API_WEBGL2  = 1;  // WebGL2 / GLES3
+export const GPU_API_WEBGPU  = 2;  // WebGPU (the cart imports WebGPU functions; see SPEC.md)
+export const GPU_API_VULKAN  = 3;  // reserved
+
+// Pointer struct layout (8 bytes per pointer)
+// i16 x, i16 y, u8 buttons, u8 active, u8[2] pad
+export const POINTER_SIZE = 8;
+export const MAX_POINTERS = 10;
+export const POINTER_REGION_SIZE = POINTER_SIZE * MAX_POINTERS; // 80 bytes
+
+// Wheel struct layout (8 bytes): i32 dx, i32 dy, in 1/120 notch units.
+//
+// The host ACCUMULATES events, writes the frame's total before wc_render,
+// and zeroes it after -- so the cart reads a per-frame delta and never has
+// to clear anything. A device with no wheel leaves it zero forever, the
+// same way a desktop leaves the nine touch slots inactive.
+export const WHEEL_SIZE = 8;
+// One notch of a detented wheel. Trackpads and free-spin wheels report
+// fractions of this, which is the whole reason the unit is not "clicks".
+export const WHEEL_DELTA = 120;
+
+// Keyboard state bitmask size
+export const KEYS_STATE_SIZE = 32; // 256 bits = 32 bytes

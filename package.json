@@ -1,0 +1,16 @@
+{
+  "name": "red-tag-rumble",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RED TAG RUMBLE: a split-screen bot builder and arena combat cart for wasmcart (three.c + Bellows), 1 to 4 pads",
+  "license": "MIT",
+  "scripts": {
+    "build": "./build.sh",
+    "shot": "node tools/shot.mjs",
+    "serve": "node tools/serve.mjs",
+    "balance": "./build.sh balance",
+    "lint": "./build.sh lint"
+  },
+  "author": "virgilvox <hackbuildvideo@gmail.com>"
+}

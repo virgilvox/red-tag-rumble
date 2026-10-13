@@ -1,0 +1,11 @@
+--target=wasm32-unknown-emscripten
+--sysroot=/Users/obsidian/emsdk/upstream/emscripten/cache/sysroot
+-std=gnu11
+-DT3_WASMCART
+-DWC_USE_GL
+-Ithird_party/wasmcart/include
+-Ithird_party/three.c/include
+-Ithird_party/three.c/src
+-Ithird_party
+-Isrc
+-Ibuild/obj/game

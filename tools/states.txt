@@ -1,0 +1,16 @@
+standard+l1201
+standard+instbig+l1201
+standard+map+l1201
+standard+map+instbig+l1201
+standard+trans+l1201
+basic
+basic+instbig
+basic+map
+basic+map+trans
+basic+trans
+basic+trans+instbig
+basic+inst+icol
+basic+instbig+icol
+basic+inst+icol+trans
+basic+instbig+icol+trans
+basic+map+trans+nearest

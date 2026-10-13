@@ -1,0 +1,2892 @@
+import { readFile, stat } from 'fs/promises';
+import { openSync, readSync, closeSync, statSync } from 'fs';
+import { join, extname } from 'path';
+import { open as yauzlOpen } from 'yauzl';
+import { inflateRawSync } from 'zlib';
+import { Worker } from 'worker_threads';
+import { availableParallelism } from 'os';
+import {
+  ABI_VERSION,
+  MIN_ABI_VERSION,
+  INFO_FIELDS,
+  HOST_INFO_FIELDS,
+  PAD_SIZE,
+  MAX_PADS,
+  TIME_SIZE,
+  INPUT_REGION_SIZE,
+  FLAG_NET_PEER,
+  PEER_OPEN,
+  PEER_CLOSED,
+  TRANSPORT_UNKNOWN,
+  TRANSPORT_WS,
+  FLAG_POINTER,
+  FLAG_KEYBOARD,
+  FLAG_DEBUG,
+  FLAG_DETERMINISTIC,
+  FLAG_HOST_THREADS,
+  HOST_FLAG_DETERMINISTIC,
+  HOST_FLAG_GPU_WGPU,
+  GPU_API_WEBGPU,
+  FLAG_AUDIO_F32,
+  POINTER_SIZE,
+  MAX_POINTERS,
+  KEYS_STATE_SIZE,
+  MAX_DELTA_MS,
+  MAX_RUMBLE_MS,
+  clamp01,
+  clampTrigger,
+} from './abi.js';
+import { createJitImports, jitOptionsFromEnv } from './jit.js';
+import { ActionTable } from './actions.js';
+import { readDebugState, readDebugValue, writeDebugValue, pushDebugEvent, MAX_DEBUG_EVENTS } from './debugState.js';
+import { createWebGLImports, noteGlCurrent } from './webgl_imports.js';
+import { importsWgpu, isWgpuImportName, createWgpuSession, gpuImportTrap, wgpuAdapterOptions } from './wgpu/host.js';
+import { listDirRelative, diffFileList } from './assetFiles.js';
+import { createCartAllocator } from './cartMemory.js';
+
+/* The manifest's asset root is stripped as a PATH PREFIX from packed entries,
+ * so it needs its trailing slash: "app" turns "app/main.lua" into "/main.lua"
+ * and every lookup misses. Dev mode joins the same field as a directory,
+ * where the slash is harmless -- so a cart written and tested from a dev
+ * directory boots fine and then fails the moment it is packed, which is a
+ * miserable way to find out. Normalize once instead of trusting authors to
+ * remember. (Observed in the wild: wasmcart-lua and wasmcart-mruby both
+ * shipped manifests saying "app".) */
+function assetPrefixOf(manifest) {
+  const raw = manifest && manifest.assets;
+  if (raw === undefined || raw === null || raw === '') return 'assets/';
+  const s = String(raw);
+  return s.endsWith('/') ? s : s + '/';
+}
+
+
+// --- Path validation for asset security ---
+
+function validateAssetPath(path) {
+  // Reject absolute paths
+  if (path.startsWith('/') || path.startsWith('\\')) return false;
+  // Reject Windows drive letters
+  if (/^[a-zA-Z]:/.test(path)) return false;
+  // Reject path traversal
+  if (path.includes('..')) return false;
+  // Reject null bytes (C string truncation attacks)
+  if (path.includes('\0')) return false;
+  // Reject backslashes (normalize to forward slash only)
+  if (path.includes('\\')) return false;
+  return true;
+}
+
+// --- ZIP central directory parser for random-access reads ---
+
+function parseZipCentralDirectory(fd, fileSize) {
+  // Find End of Central Directory record (last 65KB max)
+  const searchSize = Math.min(fileSize, 65536 + 22);
+  const searchBuf = Buffer.alloc(searchSize);
+  readSync(fd, searchBuf, 0, searchSize, fileSize - searchSize);
+
+  // Find EOCD signature (0x06054b50)
+  let eocdOffset = -1;
+  for (let i = searchBuf.length - 22; i >= 0; i--) {
+    if (searchBuf[i] === 0x50 && searchBuf[i + 1] === 0x4b &&
+        searchBuf[i + 2] === 0x05 && searchBuf[i + 3] === 0x06) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) throw new Error('Not a valid ZIP file (EOCD not found)');
+
+  const entryCount = searchBuf.readUInt16LE(eocdOffset + 10);
+  const cdSize = searchBuf.readUInt32LE(eocdOffset + 12);
+  const cdOffset = searchBuf.readUInt32LE(eocdOffset + 16);
+
+  // Read entire central directory
+  const cdBuf = Buffer.alloc(cdSize);
+  readSync(fd, cdBuf, 0, cdSize, cdOffset);
+
+  const index = new Map();
+  let pos = 0;
+
+  for (let i = 0; i < entryCount; i++) {
+    // Central directory file header signature (0x02014b50)
+    if (cdBuf.readUInt32LE(pos) !== 0x02014b50) break;
+
+    const compressionMethod = cdBuf.readUInt16LE(pos + 10);
+    const compressedSize = cdBuf.readUInt32LE(pos + 20);
+    const uncompressedSize = cdBuf.readUInt32LE(pos + 24);
+    const nameLen = cdBuf.readUInt16LE(pos + 28);
+    const extraLen = cdBuf.readUInt16LE(pos + 30);
+    const commentLen = cdBuf.readUInt16LE(pos + 32);
+    const externalAttrs = cdBuf.readUInt32LE(pos + 38);
+    const localHeaderOffset = cdBuf.readUInt32LE(pos + 42);
+
+    const fileName = cdBuf.toString('utf8', pos + 46, pos + 46 + nameLen);
+
+    // Skip directories and symlinks
+    const isDir = fileName.endsWith('/');
+    const isSymlink = ((externalAttrs >> 16) & 0xF000) === 0xA000;
+
+    if (!isDir && !isSymlink) {
+      index.set(fileName, {
+        compressionMethod,
+        compressedSize,
+        uncompressedSize,
+        localHeaderOffset,
+      });
+    }
+
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return index;
+}
+
+function readZipEntry(fd, entry) {
+  // Read local file header to get actual data offset
+  const localBuf = Buffer.alloc(30);
+  readSync(fd, localBuf, 0, 30, entry.localHeaderOffset);
+
+  const nameLen = localBuf.readUInt16LE(26);
+  const extraLen = localBuf.readUInt16LE(28);
+  const dataOffset = entry.localHeaderOffset + 30 + nameLen + extraLen;
+
+  // Read compressed data
+  const compressedBuf = Buffer.alloc(entry.compressedSize);
+  readSync(fd, compressedBuf, 0, entry.compressedSize, dataOffset);
+
+  // Decompress if needed
+  if (entry.compressionMethod === 0) {
+    // Stored (no compression)
+    return compressedBuf;
+  } else if (entry.compressionMethod === 8) {
+    // Deflate
+    return inflateRawSync(compressedBuf);
+  } else {
+    throw new Error(`Unsupported ZIP compression method: ${entry.compressionMethod}`);
+  }
+}
+
+// --- In-memory ZIP parser for ArrayBuffer-based loading ---
+
+function parseZipFromBuffer(buf) {
+  // Find EOCD
+  let eocdOffset = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {
+    if (buf[i] === 0x50 && buf[i + 1] === 0x4b &&
+        buf[i + 2] === 0x05 && buf[i + 3] === 0x06) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) throw new Error('Not a valid ZIP file');
+
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const entryCount = view.getUint16(eocdOffset + 10, true);
+  const cdSize = view.getUint32(eocdOffset + 12, true);
+  const cdOffset = view.getUint32(eocdOffset + 16, true);
+
+  const index = new Map();
+  let pos = cdOffset;
+
+  for (let i = 0; i < entryCount; i++) {
+    if (view.getUint32(pos, true) !== 0x02014b50) break;
+
+    const compressionMethod = view.getUint16(pos + 10, true);
+    const compressedSize = view.getUint32(pos + 20, true);
+    const uncompressedSize = view.getUint32(pos + 24, true);
+    const nameLen = view.getUint16(pos + 28, true);
+    const extraLen = view.getUint16(pos + 30, true);
+    const commentLen = view.getUint16(pos + 32, true);
+    const externalAttrs = view.getUint32(pos + 38, true);
+    const localHeaderOffset = view.getUint32(pos + 42, true);
+
+    const decoder = new TextDecoder();
+    const fileName = decoder.decode(buf.subarray(pos + 46, pos + 46 + nameLen));
+
+    const isDir = fileName.endsWith('/');
+    const isSymlink = ((externalAttrs >> 16) & 0xF000) === 0xA000;
+
+    if (!isDir && !isSymlink) {
+      index.set(fileName, {
+        compressionMethod,
+        compressedSize,
+        uncompressedSize,
+        localHeaderOffset,
+      });
+    }
+
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return index;
+}
+
+function readZipEntryFromBuffer(buf, entry) {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const nameLen = view.getUint16(entry.localHeaderOffset + 26, true);
+  const extraLen = view.getUint16(entry.localHeaderOffset + 28, true);
+  const dataOffset = entry.localHeaderOffset + 30 + nameLen + extraLen;
+
+  const compressedData = buf.subarray(dataOffset, dataOffset + entry.compressedSize);
+
+  if (entry.compressionMethod === 0) {
+    return compressedData;
+  } else if (entry.compressionMethod === 8) {
+    return inflateRawSync(compressedData);
+  } else {
+    throw new Error(`Unsupported ZIP compression method: ${entry.compressionMethod}`);
+  }
+}
+
+// Max single asset size (256MB)
+const MAX_ASSET_SIZE = 256 * 1024 * 1024;
+// Max entries in a .wasc archive
+const MAX_ARCHIVE_ENTRIES = 100000;
+
+// listDirRelative lives in assetFiles.js, shared with `wasmcart index`.
+
+function warnStaleFileList(declared, onDisk, dirPath) {
+  const { missing, unlisted } = diffFileList(declared, onDisk);
+  if (!missing.length && !unlisted.length) return;
+  const show = (list) => list.slice(0, 5).join(', ') + (list.length > 5 ? `, ... (${list.length} in all)` : '');
+  const parts = [];
+  if (unlisted.length) parts.push(`on disk but not listed: ${show(unlisted)}`);
+  if (missing.length) parts.push(`listed but not on disk: ${show(missing)}`);
+  console.warn(`wasmcart: manifest.json \`files\` in ${dirPath} is out of date (${parts.join('; ')}). ` +
+    `A web host serving this directory lists only \`files\`. Regenerate it: wasmcart index ${dirPath}`);
+}
+
+// Last-resort size for a host-provisioned offscreen GL context, used only
+// when neither the manifest nor the caller says anything. The context must
+// exist before the cart is instantiated, so this is chosen before
+// wc_get_info can report the truth -- and a mismatch either clips the frame
+// (too small) or lets the cart paint past a cart-sized readback (too large).
+// 720p is the most common cart resolution, so it is the best blind guess;
+// a cart that declares its size in the manifest never relies on it.
+const DEFAULT_GL_W = 1280;
+const DEFAULT_GL_H = 720;
+
+export class CartHost {
+  /** Cap per debug-event ring (log / marks) between drains. */
+  static MAX_DEBUG_EVENTS = MAX_DEBUG_EVENTS;
+
+  constructor() {
+    this.instance = null;
+    this.memory = null;
+    this.info = null;       // parsed WCInfo
+    this.frameCount = 0;
+    this.startTime = 0;
+    this.lastFrameTime = 0;
+    this.audioReadCursor = 0;
+
+    // Deterministic-clock mode (opt-in via setFixedStep). 0 = use wall-clock
+    // (performance.now) as normal. > 0 = each runFrame advances this many virtual
+    // ms, so frame N always reports timeMs = N * step regardless of real elapsed
+    // time. Lets a host step frames reproducibly (screenshot testing, harnesses).
+    this._fixedStepMs = 0;
+
+    // Deterministic replay (opt-in via load({deterministic:{seed}})). null =
+    // normal run. Set = fixed step + HOST_FLAG_DETERMINISTIC in host-info +
+    // wc_set_seed(seed) before wc_init. Everything happens at load; the
+    // per-frame path has no deterministic branch.
+    this.deterministicSeed = null;
+
+    // Asyncify loop-inversion state (wc_frame_yield protocol). buf is the
+    // cart-provided unwind stack (wc_yield_buffer export), resolved lazily.
+    this._asyncify = { buf: 0, suspended: false, rewinding: false, unwound: false };
+
+    // Debug event capture (pull-drained, capped). wc_log lines and
+    // wc_debug_mark(id) annotations land here stamped with the frame they
+    // occurred on. A cart that never logs/marks never touches these.
+    this.debugLog = [];
+    this.debugMarks = [];
+
+    // Views into cart memory (set after init)
+    this._u8 = null;
+    this._u16 = null;
+    this._i16 = null;
+    this._i32 = null;
+    this._u32 = null;
+    this._f64 = null;
+    this._lastByteLength = 0;
+
+    // Thread support (WASI threads)
+    this.isThreaded = false;
+    this._sharedMemory = null;
+    this._compiledModule = null;
+    this._workers = new Map();   // tid → Worker
+    this._threadFatal = null;    // a cart thread died (_threadDied): thrown from runFrame
+    this._nextTid = 1;
+
+    // GL state
+    this.usesGL = false;       // true if cart imports from 'gl' module
+    this.usesWgpu = false;     // true if the cart runs on WebGPU (SPEC.md, WebGPU)
+    this._wgpu = null;         // the cart's WebGPU session (src/wgpu/host.js)
+    // {reason, message} once the host's WebGPU device was lost while the cart
+    // ran (load option onGpuLost is called then too); null otherwise. From
+    // then on runFrame no longer calls wc_render: every WebGPU call would do
+    // nothing and the frame would stay black (docs/webgpu.md).
+    this.gpuLost = null;
+
+    // Asset index for .wasc carts
+    this._assetIndex = null;   // Map<path, entry>
+    this._ownedGl = null;
+    this._ownedGlCtx = null;
+    this._callerGl = null;     // a context the CALLER supplied via glBackend      // a GL context this host created (not the caller's)
+    this._assetFd = null;      // file descriptor for on-disk zip reading
+    this._assetBuf = null;     // in-memory zip buffer (for Uint8Array source)
+    this._assetDir = null;     // directory path for dev-mode loading
+    this._hasAssets = false;
+
+    // Networking (ABI v3)
+    this._manifest = null;     // parsed manifest.json
+    this._peers = new Map();   // peer_id → { ws|dc, name, transport, eventQueue }
+    this._peerNextId = 0;
+
+    // Pointer input (ABI v3)
+    this._pointerState = new Array(MAX_POINTERS).fill(null).map(() => ({
+      x: 0, y: 0, buttons: 0, active: 0,
+    }));
+    this._pointerEvents = [];
+    // Wheel deltas accumulated since the last frame (1/120 notch units).
+    this._wheelAccum = { dx: 0, dy: 0 };  // { type, id, x, y, button }
+
+    // Keyboard input (ABI v3)
+    this._keyState = new Uint8Array(KEYS_STATE_SIZE); // 256-bit bitmask
+    this._keyEvents = [];  // { type, keycode, modifiers }
+    this._textEvents = []; // committed UTF-8 strings, only while text input is active
+    this._textActive = false; // cart called wc_text_input_begin()
+
+    // Pad names (populated each frame from pad objects)
+    this._padNames = ['', '', '', ''];
+    // Input actions: survive a cart reload so the embedder's describer stays.
+    this._lastPads = null;
+    this._inputOwned = false; // the embedder set a describer or device
+    this._actions = new ActionTable({ getPads: () => this._lastPads });
+    this._rumbleHandler = null; // set by the embedder via setRumbleHandler()
+    // Memory the host writes into the cart comes from the cart's allocator
+    // (wc_alloc/wc_free; SPEC.md "Cart memory the host writes").
+    this._alloc = createCartAllocator({ getExports: () => this.instance?.exports, getMemory: () => this.memory });
+
+    // Lifecycle. `suspended` means the host has stopped driving frames
+    // entirely; `focused` means the cart is running but is not the active
+    // window. They are deliberately distinct -- alt-tab should let a game
+    // auto-pause while still rendering, minimize should stop it dead.
+    this._suspended = false;
+    this._focused = true;
+    this._lastFrame = null; // replayed while suspended
+  }
+
+  /**
+   * Load and instantiate a .wasc cart file.
+   * @param {string|Uint8Array} source - file path (.wasc), directory path (dev mode), or .wasc zip bytes
+   * @param {object} [options]
+   * @param {Uint8Array} [options.saveData] - existing save data to load
+   * @param {boolean|'msaa'} [options.directPresent] - GL carts: draw straight into the context's default
+   *   framebuffer when it is exactly the cart's size (no redirect FBO, no copy); 'msaa' also for a
+   *   multisampled context. Off by default; not for embedders that scale the cart into a window.
+   * @param {boolean} [options.antialias] - a host-created GL context gets a 4x multisampled surface
+   * @param {object|Function} [options.glBackend] - WebGL2RenderingContext (from webgl-node or browser),
+   *   OR a factory (sync or async) returning one. The factory is invoked once, only if the cart's
+   *   wasm imports from the "gl" module - so launchers don't need to know a cart is GL up front.
+   */
+  async load(source, options = {}) {
+    this._alloc = createCartAllocator({ getExports: () => this.instance?.exports, getMemory: () => this.memory });
+    let wasmBytes;
+
+    if (typeof source === 'string') {
+      const s = await stat(source);
+
+      if (s.isDirectory()) {
+        // Dev mode: load from directory
+        wasmBytes = await this._loadFromDirectory(source);
+      } else {
+        wasmBytes = await this._loadFromWasc(source);
+      }
+    } else {
+      // Uint8Array - must be a .wasc zip
+      if (source.length >= 4 && source[0] === 0x50 && source[1] === 0x4b &&
+          source[2] === 0x03 && source[3] === 0x04) {
+        wasmBytes = this._loadFromWascBuffer(source);
+      } else {
+        throw new Error('Invalid cart data: expected .wasc (ZIP) format');
+      }
+    }
+
+    // Validate module before instantiation
+    const module = await WebAssembly.compile(wasmBytes);
+    this._validateModule(module);
+
+    // Detect thread usage (WASI threads model)
+    const threadAnalysis = this._analyzeModule(module);
+    this.isThreaded = threadAnalysis.isThreaded;
+
+    // For threaded carts: create shared memory and store module for worker reuse
+    if (this.isThreaded) {
+      const memLimits = CartHost._parseMemoryImportLimits(wasmBytes);
+      if (!memLimits || !memLimits.shared) {
+        throw new Error('Threaded cart must have shared memory import (compile with --shared-memory)');
+      }
+      this._sharedMemory = new WebAssembly.Memory({
+        initial: memLimits.initial,
+        maximum: memLimits.maximum,
+        shared: true,
+      });
+      this._compiledModule = module;
+    }
+
+    // Detect GL usage: check gpu_api field first, fall back to import scanning for old carts
+    const moduleImports = WebAssembly.Module.imports(module);
+    const cartImportsGL = moduleImports.some(imp =>
+      imp.module === 'gl' ||
+      (imp.module === 'env' && imp.kind === 'function' && /^gl[A-Z]/.test(imp.name))
+    );
+
+    // WebGPU (SPEC.md, "WebGPU"). A cart that imports WebGPU functions runs on
+    // WebGPU when this host can provide it. One that imports both `gl` and
+    // WebGPU runs on GL when it cannot, and host-info flags tell it which. One
+    // that imports only WebGPU cannot run without it: a load error saying why,
+    // never a stub.
+    const cartImportsWgpu = importsWgpu(moduleImports);
+    let gpuSelect = cartImportsGL ? 'gl' : null;
+    if (cartImportsWgpu) {
+      const wgpu = await this._wgpuAvailability(options);
+      if (wgpu.ok) gpuSelect = 'wgpu';
+      else if (!cartImportsGL) throw new Error(`this cart is a WebGPU cart, but this host cannot provide WebGPU: ${wgpu.reason}`);
+      this._wgpuProvider = wgpu.ok ? wgpu : null;
+    }
+    this._gpuSelect = gpuSelect;
+    this._cartImportsGL = cartImportsGL;
+    this._cartImportsWgpu = cartImportsWgpu;
+    const importsGL = gpuSelect === 'gl';
+    // gpu_api will be read after wc_get_info - for now detect from imports
+    this._importsGL = importsGL;
+    this.usesGL = importsGL;
+
+    // glBackend may be a FACTORY (sync or async): "here's how to get a GL
+    // context if you turn out to need one". Invoked once, only when the wasm
+    // import section says the cart is GL - so a launcher never has to know
+    // what kind of cart it's launching. The import scan is the ground truth;
+    // a manifest field never gates this (the pointer double-gate lesson).
+    if (typeof options.glBackend === 'function') {
+      let made = null;
+      if (importsGL) {
+        made = await options.glBackend();
+        if (!made) throw new Error('glBackend factory returned no GL context for a GL cart');
+      }
+      options = { ...options, glBackend: made };
+    }
+    // Remember a caller-supplied context so getGlContext() can report it. The
+    // host does NOT own it — destroy() must not lose a context the caller may
+    // still be drawing into.
+    if (options.glBackend) this._callerGl = options.glBackend;
+
+    if (this.usesGL && !options.glBackend) {
+      // Satisfy the "hosts MUST be able to supply a GL context" rule here
+      // rather than pushing it onto the embedder. webgl-node is already a
+      // dependency, so this host can always make an offscreen context; a
+      // caller-supplied glBackend still wins (that is how you render into
+      // your own window). Only reached for carts that actually import `gl`,
+      // so a 2D cart never causes a context to exist.
+      //
+      // Sizing this context is a chicken-and-egg problem: it is an IMPORT, so
+      // it must exist before instantiation, but only wc_get_info -- which
+      // needs the instance -- knows the cart's resolution. The cart is the
+      // authority there (preferredWidth/Height is the host ASKING, and
+      // wc_get_info is the cart ANSWERING), and wasmcart dictates neither a
+      // resolution nor an aspect ratio, so any size is legal.
+      //
+      // The drawable must therefore match the cart as closely as possible in
+      // BOTH directions. Too small and the frame is clipped into a corner.
+      // Too large is equally wrong: a cart's own renderer sets its viewport
+      // from the drawable, not from wc_gl_blit's glViewport(0, 0, w, h), so
+      // it paints the full drawable and a cart-sized readback crops it.
+      // (Measured against wasmcart-lua: with a 1920x1080 drawable a cart
+      // declaring 1280x720 painted out to x=1918, y=1078.)
+      //
+      // A manifest width/height is the only forward-looking source, so it
+      // wins; the host's own request is the next best guess.
+      const m = this._manifest || {};
+      const w = m.width || options.preferredWidth || DEFAULT_GL_W;
+      const h = m.height || options.preferredHeight || DEFAULT_GL_H;
+      let made = null;
+      try {
+        const { createWebGL2Context } = await import('webgl-node');
+        // Keep the WHOLE result, not just .gl: native-gles is multi-context
+        // now, so this context's makeCurrent/destroy are bound to its handle.
+        // Another host (or an active-bezel compositor) in the same process
+        // owning the "current" context is normal, and a cart that never
+        // claims its own draws into someone else's.
+        // antialias: true (load option, opt in) asks webgl-node for a 4x
+        // multisampled surface, a browser canvas made with antialias: true
+        this._ownedGlCtx = createWebGL2Context(w, h, { antialias: options.antialias === true }) || null;
+        made = this._ownedGlCtx?.gl || null;
+      } catch { made = null; this._ownedGlCtx = null; }
+
+      if (!made) {
+        // GL genuinely unavailable (no driver, headless box with no EGL, an
+        // install that could not build the native addon). Stubbing would
+        // render black while reporting success, so fail loudly and name the
+        // actual cause rather than blaming the caller for not passing a
+        // context they should not have had to pass.
+        throw new Error(
+          'this cart imports the `gl` module but a WebGL2 context could not be ' +
+          'created. wasmcart requires GL; check that webgl-node installed and ' +
+          'that a GL driver is available, or pass glBackend to supply your own.');
+      }
+      this._ownedGl = made;
+      options = { ...options, glBackend: made };
+      this.usesGL = true;
+    }
+    // If glBackend IS provided, keep usesGL = true even with fbPtr (hybrid cart)
+
+    if (gpuSelect === 'wgpu') {
+      // The canvas starts at the best guess of the cart's size, as the GL
+      // context does; the cart's own wgpuSurfaceConfigure sets the real one.
+      const m = this._manifest || {};
+      const { gpu, adapter, createCanvas, globals, wasmImports } = this._wgpuProvider;
+      this._wgpu = await createWgpuSession({
+        moduleImports, gpu, adapter, createCanvas, globals, wasmImports, adapterOptions: options.adapterOptions,
+        width: m.width || options.preferredWidth || DEFAULT_GL_W,
+        height: m.height || options.preferredHeight || DEFAULT_GL_H,
+        log: msg => console.error(msg),
+        onLost: info => { this.gpuLost = info; try { options.onGpuLost?.(info); } catch (e) { console.error(e); } },
+      });
+      this.usesWgpu = true;
+      this.usesGL = false;
+      options = { ...options, flags: (options.flags || 0) | HOST_FLAG_GPU_WGPU };
+    }
+
+    // Eagerly resolve WebSocket implementation for Node.js (must be sync at call time)
+    if (this._manifest?.net?.domains || this._manifest?.net?.websocket) {
+      if (globalThis.WebSocket) {
+        this._WebSocketImpl = globalThis.WebSocket;
+      } else {
+        try {
+          const ws = await import('ws');
+          this._WebSocketImpl = ws.default || ws.WebSocket;
+        } catch {
+          // No WebSocket support - _peerOpen will return -1
+        }
+      }
+    }
+
+    // Runtime code generation (SPEC.md, "Runtime code generation"; src/jit.js).
+    // Node compiles synchronously. options.jit === false or WASMCART_JIT=0 is
+    // the loud off switch: options.onJitNotice (default: stderr) hears it once.
+    this._actions.reset();
+    this._jit?.dispose();
+    const jitOpts = {
+      ...jitOptionsFromEnv(),
+      ...(options.jit === false ? { disabled: true } : (options.jit || {})),
+    };
+    this._jitDisabled = !!jitOpts.disabled;
+    this.jitNotice = null;
+    this._jit = createJitImports({
+      getInstance: () => this.instance,
+      getMemory: (inst) => inst.exports.memory || this._sharedMemory,
+      mode: 'sync',
+      ...jitOpts,
+      onNotice: (msg) => {
+        this.jitNotice = msg;
+        (options.onJitNotice || ((m) => console.error(`\n*** ${m} ***\n`)))(msg);
+      },
+    });
+    this.jitStats = this._jit.stats;
+    // Minimal host imports
+    const imports = {
+      env: {
+        wc_log: (ptr, len) => {
+          this._updateViews();
+          if (this._u8) {
+            const bytes = this._u8.slice(ptr, ptr + len);
+            const text = new TextDecoder().decode(bytes);
+            console.error('[cart]', text);
+            this._pushDebugEvent(this.debugLog, { frame: this.frameCount, text });
+          }
+        },
+        // Frame annotation (debug ABI): the cart timestamps a moment ("level
+        // loaded", "boss spawned") so a trace/replay is navigable by event.
+        // Capture is pull-drained; a cart that never calls this pays nothing.
+        wc_debug_mark: (id) => {
+          this._pushDebugEvent(this.debugMarks, { frame: this.frameCount, id: id >>> 0 });
+        },
+        // Loop-inversion protocol for ported engines that own their main
+        // loop: the cart is post-processed with binaryen's asyncify pass
+        // (asyncify-imports = env.wc_frame_yield) and calls this once per
+        // frame from inside its loop. Unwind suspends the whole engine
+        // stack out of wc_render; the next runFrame rewinds back to this
+        // exact point. A cart without asyncify exports never triggers it.
+        wc_frame_yield: () => {
+          const ex = this.instance?.exports;
+          if (!ex?.asyncify_start_unwind) return; // not an asyncify cart: no-op
+          if (this._asyncify.rewinding) {
+            ex.asyncify_stop_rewind();
+            this._asyncify.rewinding = false;
+            return; // arrived back at the yield point; engine continues
+          }
+          ex.asyncify_start_unwind(this._asyncify.buf);
+          this._asyncify.unwound = true;
+        },
+        // Asset API (v2) - always provided, returns -1 if no assets loaded
+        wc_asset_size: (pathPtr, pathLen) => {
+          return this._assetSize(pathPtr, pathLen);
+        },
+        wc_load_asset: (pathPtr, pathLen, destPtr, maxSize) => {
+          return this._loadAsset(pathPtr, pathLen, destPtr, maxSize);
+        },
+        // Pad name query - returns the device name for a given pad slot
+        wc_pad_name: (padId, bufPtr, bufLen) => {
+          return this._padName(padId, bufPtr, bufLen);
+        },
+        // --- Rumble (cart -> host) ---
+        wc_pad_has_rumble: (padId) => this._padHasRumble(padId),
+        wc_pad_rumble: (padId, low, high, durationMs) =>
+          this._padRumble(padId, low, high, durationMs),
+        wc_pad_rumble_stop: (padId) => this._padRumbleStop(padId),
+        // --- WebSocket API (ABI v3) ---
+        // --- Runtime code generation ---
+        ...this._jit.imports,
+        // --- Input actions ---
+        ...this._actions.imports(() => { this._updateViews(); return this._u8; }),
+        // --- Text input (ABI v3) ---
+        // Characters, not scancodes: the OS has already applied the keyboard
+        // layout, shift, dead keys and compose, so a cart receives "@" or "e-
+        // acute" or a CJK glyph without knowing anything about layouts. The
+        // raw keyboard ABI stays for editing keys (backspace, arrows, enter).
+        wc_text_input_begin: () => { this._textActive = true; },
+        wc_text_input_end: () => {
+          this._textActive = false;
+          // Drop anything queued but undelivered: text typed before the cart
+          // stopped listening must not surface in the next field it opens.
+          this._textEvents.length = 0;
+        },
+        wc_text_input_active: () => (this._textActive ? 1 : 0),
+        // --- Peer connections (ABI v3) ---
+        // One family. Transport is opaque to the cart: WebSocket, WebRTC data
+        // channel, TCP, relay, serial - the cart cannot tell and must not care.
+        wc_peer_open: (addrPtr, addrLen) => {
+          return this._peerOpen(addrPtr, addrLen);
+        },
+        wc_peer_close: (peerId) => {
+          this._peerClose(peerId);
+        },
+        wc_peer_send: (peerId, dataPtr, len) => {
+          return this._peerSend(peerId, dataPtr, len);
+        },
+        wc_peer_broadcast: (dataPtr, len) => {
+          return this._peerBroadcast(dataPtr, len);
+        },
+        wc_peer_state: (peerId) => {
+          return this._peerState(peerId);
+        },
+        wc_peer_count: () => {
+          return this._peers.size;
+        },
+        wc_peer_id: (index) => {
+          return this._peerIdAt(index);
+        },
+        wc_peer_name: (peerId, destPtr, maxLen) => {
+          return this._peerName(peerId, destPtr, maxLen);
+        },
+        wc_peer_transport: (peerId) => {
+          return this._peerTransport(peerId);
+        },
+        // memfs - in-memory filesystem for engine carts (Godot etc.)
+        // The cart calls memfs_register_file to map a name to a region of
+        // its own WASM linear memory. We record the pointer+size so the
+        // cart's filesystem layer can read from it later.
+        memfs_register_file: (namePtr, dataPtr, size) => {
+          try {
+            const name = new TextDecoder().decode(
+              new Uint8Array(this.memory.buffer, namePtr,
+                new Uint8Array(this.memory.buffer).indexOf(0, namePtr) - namePtr));
+            if (!this._memfsFiles) this._memfsFiles = new Map();
+            this._memfsFiles.set(name, { ptr: dataPtr, size });
+            return 0;
+          } catch(e) { return -1; }
+        },
+        // Emscripten memory growth notification
+        emscripten_notify_memory_growth: () => { this._updateViews(); },
+        // Emscripten stubs (used by gl4es and emscripten libc)
+        emscripten_asm_const_int: () => 0,
+        emscripten_asm_const_double: () => 0.0,
+        // setjmp/longjmp: the cart's longjmp calls this to unwind; we throw a
+        // tagged JS error that the invoke_* trampolines above catch and turn
+        // into setThrew (emscripten's classic SjLj protocol).
+        _emscripten_throw_longjmp: () => { const e = new Error('longjmp'); e._emscripten_longjmp = true; throw e; },
+        emscripten_get_element_css_size: (targetPtr, widthPtr, heightPtr) => {
+          try {
+            const view = new DataView(this.memory.buffer);
+            view.setFloat64(widthPtr, this.info ? this.info.width : 800, true);
+            view.setFloat64(heightPtr, this.info ? this.info.height : 600, true);
+          } catch(e) {}
+          return 0;
+        },
+        __syscall_getcwd: () => -1,
+        __syscall_getdents64: () => -1,
+      },
+      // Safe no-op WASI stubs (emscripten libc may require these for snprintf/math)
+      wasi_snapshot_preview1: {
+        fd_close: () => 0,
+        fd_write: (fd, iovs, iovs_len, nwritten_ptr) => {
+          try {
+            this._updateViews();
+            const view = new DataView(this.memory.buffer);
+            let totalWritten = 0;
+            let text = '';
+            for (let i = 0; i < iovs_len; i++) {
+              const ptr = view.getUint32(iovs + i * 8, true);
+              const len = view.getUint32(iovs + i * 8 + 4, true);
+              if (this._u8 && len > 0) {
+                text += new TextDecoder().decode(this._u8.slice(ptr, ptr + len));
+              }
+              totalWritten += len;
+            }
+            if (text && (fd === 1 || fd === 2)) {
+              // stdout or stderr
+              const lines = text.split('\n');
+              for (const line of lines) {
+                if (line.length > 0) process.stderr.write('[cart] ' + line + '\n');
+              }
+            }
+            if (nwritten_ptr) view.setUint32(nwritten_ptr, totalWritten, true);
+            return 0;
+          } catch(e) { return 0; }
+        },
+        fd_seek: () => 0,
+        fd_read: () => 0,
+        environ_get: () => 0,
+        environ_sizes_get: () => 0,
+        proc_exit: () => {},
+        clock_time_get: (id, precision, resultPtr) => {
+          // Return monotonic time in nanoseconds (used by SDL_GetTicks)
+          try {
+            const ns = BigInt(Math.round(performance.now() * 1e6));
+            const view = new DataView(this.memory.buffer);
+            view.setBigUint64(resultPtr, ns, true);
+          } catch (e) { /* memory not ready yet */ }
+          return 0;
+        },
+        sched_yield: () => 0,
+      },
+    };
+
+    // Provide no-op stubs for any wasi_snapshot_preview1 imports not explicitly handled
+    for (const imp of moduleImports) {
+      if (imp.module === 'wasi_snapshot_preview1' && imp.kind === 'function') {
+        if (!(imp.name in imports.wasi_snapshot_preview1)) {
+          imports.wasi_snapshot_preview1[imp.name] = () => 0;
+        }
+      }
+    }
+
+    // Auto-stub any env functions not explicitly handled (syscalls, emscripten,
+    // pthread, networking, etc.). These appear in engine-level carts like Godot.
+    //
+    // invoke_* are emscripten's setjmp/longjmp trampolines: they call an
+    // indirect function (first arg = table index) and, if it longjmps, catch
+    // the throw and reset the stack. A cart built with -enable-emscripten-sjlj
+    // (any big C/C++ engine that uses setjmp) needs these REAL, not stubbed —
+    // stubbing invoke_ji/invoke_jiji (i64 return) with () => -1 also throws
+    // "Cannot convert -1 to a BigInt". Implemented generically here against the
+    // cart's exported setThrew + __indirect_function_table.
+    const needsInvoke = moduleImports.some(
+      (imp) => imp.module === 'env' && imp.kind === 'function' && imp.name.startsWith('invoke_'),
+    );
+    if (needsInvoke) {
+      for (const imp of moduleImports) {
+        if (imp.module === 'env' && imp.kind === 'function'
+            && imp.name.startsWith('invoke_') && !(imp.name in imports.env)) {
+          // Signature is encoded in the name (invoke_<sig>); only the arity
+          // matters for the trampoline — pass all args after the index through.
+          imports.env[imp.name] = (index, ...args) => {
+            const ex = this.instance.exports;
+            const sp = ex.emscripten_stack_get_current?.() ?? ex.stackSave?.();
+            try {
+              return ex.__indirect_function_table.get(index)(...args);
+            } catch (e) {
+              if (sp !== undefined) (ex._emscripten_stack_restore ?? ex.stackRestore)?.(sp);
+              // Only a wasm longjmp (or the emscripten throw) is expected; a real
+              // error rethrows. setThrew records the longjmp for the setjmp side.
+              if (e instanceof WebAssembly.Exception || (e && e._emscripten_longjmp)) {
+                ex.setThrew?.(1, 0);
+                return 0;
+              }
+              throw e;
+            }
+          };
+        }
+      }
+    }
+
+    if (this._wgpu) {
+      Object.assign(imports.env, this._wgpu.env);
+      imports.wgpu = this._wgpu.env;
+    }
+
+    for (const imp of moduleImports) {
+      if (imp.module === 'env' && imp.kind === 'function') {
+        if (!(imp.name in imports.env)) {
+          imports.env[imp.name] = () => -1; // -1 = ENOSYS/error for syscalls
+        }
+      }
+    }
+
+    // A cart importing both GPU APIs gets the one this host selected. The
+    // other is bound to functions that throw, naming the call: a cart that
+    // ignores the host-info flag fails loudly instead of rendering nothing.
+    if (cartImportsWgpu && gpuSelect !== 'wgpu') {
+      for (const imp of moduleImports) {
+        if (imp.kind !== 'function' || !isWgpuImportName(imp.name)) continue;
+        if (imp.module !== 'env' && imp.module !== 'wgpu') continue;
+        (imports[imp.module] ||= {})[imp.name] = gpuImportTrap(imp.name, 'GL');
+      }
+    }
+
+    // A dual cart running on WebGPU: its GL imports throw if called.
+    if (gpuSelect === 'wgpu' && cartImportsGL) {
+      const traps = {};
+      for (const imp of moduleImports) {
+        if (imp.kind !== 'function') continue;
+        if (imp.module === 'gl') traps[imp.name] = gpuImportTrap(imp.name, 'WebGPU');
+        else if (imp.module === 'env' && /^(gl[A-Z]|emscripten_gl)/.test(imp.name)) imports.env[imp.name] = gpuImportTrap(imp.name, 'WebGPU');
+      }
+      if (Object.keys(traps).length) imports.gl = traps;
+    }
+    // Stub GL imports for hybrid carts that import GL but don't use it
+    else if (!this.usesGL) {
+      const glStubs = {};
+      for (const imp of moduleImports) {
+        if (imp.module === 'gl' && imp.kind === 'function') {
+          glStubs[imp.name] = () => 0;
+        }
+      }
+      if (Object.keys(glStubs).length > 0) {
+        imports.gl = glStubs;
+      }
+    }
+
+    // Wire up GL imports if cart uses GL
+    if (this.usesGL) {
+      // DIRECT PRESENT (opt in): with directPresent: true the cart draws
+      // straight into the context's default framebuffer when that is exactly
+      // the cart's size, instead of into the redirect FBO, as CartHostWeb does
+      // for a matching canvas. That saves a full-surface copy per presented
+      // frame, and with a multisampled context ('msaa', for an antialias
+      // context) the cart's own MSAA resolve too. Off by default: an embedder
+      // that scales or letterboxes the cart into a window (presentToSurface
+      // with a rect) needs the redirect. withRenderedFrame still works; it
+      // reads the default framebuffer.
+      const gl = options.glBackend;
+      const directPresent = !options.directPresent ? null : (w, h) => {
+        const a = typeof gl.getContextAttributes === 'function' ? gl.getContextAttributes() : null;
+        if (!a || !a.depth || !a.stencil) return false;
+        if (a.antialias && options.directPresent !== 'msaa') return false;
+        return gl.drawingBufferWidth === w && gl.drawingBufferHeight === h;
+      };
+      const glFuncs = createWebGLImports({
+        getMemory: () => this.memory,
+        ctx: options.glBackend,
+        allocator: this._alloc,
+        nativeGL: options.nativeGL || null,
+        directPresent,
+      });
+      imports.gl = glFuncs;
+      // Kept so load() can set up the FBO redirect once the cart's real
+      // resolution is known (see _setupRedirectFBO below). CartHostWeb has
+      // always done this; without it the Node host has no way to reach the
+      // redirect machinery at all.
+      this._glFuncs = glFuncs;
+      // Auto-stub any GL imports not covered by webgl_imports.js.
+      //
+      // A stub returns 0, and for a QUERY that zero reads as a real answer
+      // rather than as a failure. glGetActiveUniformBlockiv stubbed this way
+      // reported a 2-byte uniform block for a 64-byte mat4: the engine sized
+      // its UBO from that, uploaded garbage, and every vertex collapsed to a
+      // point, with no GL error and no failed draw call. The screen just stays
+      // empty. So name them - a silent stub is the difference between a
+      // five-minute fix and a multi-day hunt.
+      const _glStubbed = [];
+      for (const imp of moduleImports) {
+        if (imp.module === 'gl' && imp.kind === 'function' && !(imp.name in glFuncs)) {
+          glFuncs[imp.name] = () => 0;
+          _glStubbed.push(imp.name);
+        }
+      }
+      // Also provide GL functions under 'env' module for carts that use
+      // gl4es (which imports GLES2 functions from 'env' internally).
+      // Covers both env.glXxx and env.emscripten_glXxx patterns.
+      for (const imp of moduleImports) {
+        if (imp.module !== 'env' || imp.kind !== 'function') continue;
+        // Direct GL function in env (e.g. env.glStencilFunc)
+        // Note: must overwrite auto-stubs (which run before GL wiring)
+        if (imp.name.startsWith('gl') && imp.name in glFuncs) {
+          imports.env[imp.name] = glFuncs[imp.name];
+        }
+        // A GL name under env that we do NOT implement keeps the generic env
+        // auto-stub installed above, which returns 0. Name it for the same
+        // reason as the `gl` module case: this is the path a big engine
+        // actually imports GL through, so it is where the silence hurts.
+        else if (imp.name.startsWith('gl')) {
+          _glStubbed.push(`env.${imp.name}`);
+        }
+        // Emscripten GL wrapper (e.g. env.emscripten_glEnable -> glEnable)
+        else if (imp.name.startsWith('emscripten_gl')) {
+          const glName = imp.name.replace('emscripten_', '');
+          // Strip OES/EXT/ANGLE/WEBGL suffixes to find base function
+          const baseName = glName.replace(/(OES|EXT|ANGLE|WEBGL)$/, '');
+          if (glName in glFuncs) {
+            imports.env[imp.name] = glFuncs[glName];
+          } else if (baseName in glFuncs) {
+            imports.env[imp.name] = glFuncs[baseName];
+          } else {
+            // Stub for unsupported emscripten GL extensions
+            imports.env[imp.name] = () => 0;
+          }
+        }
+      }
+      if (_glStubbed.length) {
+        console.warn(`wasmcart: ${_glStubbed.length} GL import(s) not implemented, stubbed to return 0: ${_glStubbed.join(', ')}`);
+      }
+    }
+
+    // For threaded carts: provide shared memory as import and thread-spawn
+    if (this.isThreaded) {
+      imports.env.memory = this._sharedMemory;
+      imports.wasi = imports.wasi || {};
+      imports.wasi['thread-spawn'] = (startArg) => this._spawnThread(startArg);
+    }
+
+    // Instantiate
+    this.instance = await WebAssembly.instantiate(module, imports);
+    const exports = this.instance.exports;
+
+    // Memory access - threaded carts use the shared memory we created,
+    // non-threaded carts use the module's exported memory
+    if (this.isThreaded) {
+      this.memory = exports.memory || this._sharedMemory;
+    } else {
+      this.memory = exports.memory;
+      if (!this.memory) {
+        throw new Error('Cart must export memory');
+      }
+    }
+
+    this._updateViews();
+
+    if (this._wgpu) await this._wgpu.attach(this.instance, this.memory, this._alloc);
+
+    // Read info struct BEFORE wc_init so we can load save data first
+    if (typeof exports.wc_get_info !== 'function') {
+      throw new Error('Cart must export wc_get_info');
+    }
+
+    this._infoPtr = exports.wc_get_info();
+    this.info = this._readInfo(this._infoPtr);
+
+    // Validate ABI version (accept v1 and v2)
+    if (this.info.version < MIN_ABI_VERSION || this.info.version > ABI_VERSION) {
+      throw new Error(`ABI version mismatch: cart=${this.info.version}, host supports ${MIN_ABI_VERSION}-${ABI_VERSION}`);
+    }
+    this._checkGpuApi(this.info.gpuApi);
+
+
+    // Load save data BEFORE wc_init so cart can read it during init
+    if (options.saveData && this.info.saveSize > 0) {
+      const saveRegion = this._u8.subarray(this.info.savePtr, this.info.savePtr + this.info.saveSize);
+      const copyLen = Math.min(options.saveData.length, this.info.saveSize);
+      saveRegion.set(options.saveData.subarray(0, copyLen));
+    }
+
+    // Deterministic replay (opt-in): fixed virtual clock + host flag + seed,
+    // ALL selected here at load — the per-frame path never checks a flag.
+    // options.deterministic: {seed: u32, stepMs?: number} (stepMs default 60fps).
+    if (options.deterministic) {
+      const det = options.deterministic;
+      this.deterministicSeed = (det.seed ?? 1) >>> 0;
+      this._fixedStepMs = det.stepMs > 0 ? det.stepMs : 1000 / 60;
+      options = { ...options, flags: (options.flags || 0) | HOST_FLAG_DETERMINISTIC };
+    }
+
+    // Write host info BEFORE wc_init so cart can read preferred resolution etc.
+    if (this.info.hostInfoPtr) {
+      this._writeHostInfo(this.info.hostInfoPtr, options);
+    }
+
+    // Deliver the seed BEFORE wc_init (and before _initialize's constructors
+    // run game code) so the cart's RNG is seeded from frame 0. Optional export:
+    // a cart without WC_DETERMINISTIC_RNG simply doesn't get called.
+    if (typeof exports.wc_set_seed === 'function') {
+      // Entropy by default, determinism by request: a normal load gets a
+      // fresh random seed (so "same first hand every power-on" can't happen);
+      // load({deterministic:{seed}}) pins it for replays/regression.
+      const seed = this.deterministicSeed !== null
+        ? this.deterministicSeed
+        : (Math.random() * 0x100000000) >>> 0;
+      exports.wc_set_seed(seed);
+    }
+
+    // Call WASI reactor _initialize (emscripten static constructors) if present
+    if (typeof exports._initialize === 'function') {
+      exports._initialize();
+      this._updateViews(); // memory may have grown
+    }
+
+    // Call wc_init after save data and host info are loaded
+    if (typeof exports.wc_init === 'function') {
+      exports.wc_init();
+      this._updateViews(); // memory may have grown
+    }
+
+    // Re-read info after wc_init - cart may have changed resolution based on host prefs
+    this.info = this._readInfo(this._infoPtr);
+
+    // Asyncify loop-inversion carts export their unwind-stack descriptor
+    // (a pre-initialized {current, end} pair followed by the stack area).
+    if (typeof exports.wc_yield_buffer === 'function' && typeof exports.asyncify_start_unwind === 'function') {
+      this._asyncify.buf = exports.wc_yield_buffer();
+    }
+
+    // Update GL detection from gpu_api field (authoritative) with import fallback for old carts
+    if (this.info.gpuApi > 0) {
+      this.usesGL = gpuSelect !== 'wgpu';
+    } else if (this.info.gpuApi === 0 && this._importsGL) {
+      // Old cart that imports GL but doesn't set gpu_api - use import detection
+      // (will be removed once all carts set gpu_api)
+      this.usesGL = !!options.glBackend;
+    }
+
+    // FBO REDIRECT for GL carts (same as CartHostWeb and wasmcart-native).
+    // The cart renders into an offscreen FBO at ITS OWN resolution instead of
+    // straight into the context's default framebuffer. That decouples what the
+    // cart draws from whatever surface the host is presenting to, which is
+    // what lets a host scale the result: presenting a 1080p cart into a
+    // smaller window otherwise puts the picture 1:1 at the surface origin, so
+    // only a corner of it is visible (GL's origin is bottom-left, so the
+    // BOTTOM-left corner). Set up after wc_init, when info holds the cart's
+    // final resolution -- a cart that picks its size at boot reports the
+    // compile-time default before that.
+    if (this.usesGL && this._glFuncs?._setupRedirectFBO
+        && this.info.width > 0 && this.info.height > 0) {
+      this._glFuncs._setupRedirectFBO(this.info.width, this.info.height);
+      this._glRedirected = true;
+    }
+
+    // Initialize timing
+    this.startTime = performance.now();
+    this.lastFrameTime = this.startTime;
+    this.frameCount = 0;
+    this.audioReadCursor = 0;
+  }
+
+  /**
+   * Run one frame: write time + input, call wc_render, return frame data.
+   * @param {Array} [pads] - array of up to 4 pad objects
+   * @returns {{ framebuffer: Uint8Array, width: number, height: number, audio: Int16Array|Float32Array|null }}
+   */
+  runFrame(pads) {
+    // A suspended cart does not run. Returning the last frame rather than
+    // throwing means a host that keeps its loop ticking (rAF still fires in
+    // some browsers, a timer-driven host may not check) stays correct without
+    // having to know about lifecycle at all.
+    if (this._suspended) return this._lastFrame ?? null;
+    if (this.gpuLost) return this._lastFrame ?? null;
+
+    // A WebGPU callback that could not get cart memory (no wc_alloc, or it
+    // failed) stops the cart here, with the allocator's error.
+    const wgpuFatal = this._wgpu?.takeFatal();
+    if (wgpuFatal) throw wgpuFatal;
+    // A cart thread that died stops the cart (_threadDied).
+    if (this._threadFatal) throw this._threadFatal;
+
+    // A GL cart on a context THIS host created must make it current before
+    // the cart's draws run — in a multi-context process, whoever rendered
+    // last owns the current context. Caller-supplied backends manage their
+    // own currency (and browser contexts have no notion of it).
+    if (this.usesGL && this._ownedGlCtx?.makeCurrent) {
+      this._ownedGlCtx.makeCurrent();
+      // Record the claim so another cart's teardown can hand currency back
+      // here instead of leaving this context unset (see _releaseAll).
+      try { noteGlCurrent(this._ownedGlCtx); } catch {}
+    }
+
+    let timeMs, deltaMs;
+    if (this._fixedStepMs > 0) {
+      // Deterministic clock: a host (e.g. an automated harness) drives frames
+      // and wants frame N to always report the same time, independent of how
+      // long the frame actually took. Each runFrame advances a fixed virtual
+      // step. Opt-in via setFixedStep(); wall-clock is the default (below).
+      deltaMs = this._fixedStepMs;
+      timeMs = this.frameCount * this._fixedStepMs;
+      this.lastFrameTime = this.startTime + timeMs;
+    } else {
+      const now = performance.now();
+      // Clamp: a long stall must not become a giant time step. This is the
+      // general guard -- lifecycle resume() rebases the stalls the host knows
+      // about, but a GC pause, a disk hit or a debugger breakpoint produces
+      // exactly the same spike with no event to hang a fix on.
+      const raw = now - this.lastFrameTime;
+      deltaMs = raw > MAX_DELTA_MS ? MAX_DELTA_MS : raw;
+      // Absorb the discarded time into startTime so time_ms stays consistent
+      // with the deltas the cart was actually handed. Otherwise a cart summing
+      // delta_ms and a cart reading time_ms disagree by the length of the
+      // stall, and the two clocks drift apart for the rest of the session.
+      if (raw > MAX_DELTA_MS) this.startTime += raw - MAX_DELTA_MS;
+      timeMs = now - this.startTime;
+      this.lastFrameTime = now;
+    }
+
+    this._updateViews(); // in case memory grew
+
+    // Write time
+    this._writeTime(timeMs, deltaMs, this.frameCount);
+
+    // Write input pads
+    this._writePads(pads || []);
+
+    // Write pointer/keyboard state and deliver events before render.
+    //
+    // The wheel is written here and CLEARED right after wc_render returns
+    // (see below): it is a per-frame delta, so a flick that survived into
+    // the next frame would keep scrolling on its own.
+    this._writePointerState();
+    this._writeWheelState();
+    this._writeKeyState();
+    this._deliverNetEvents();
+    this._deliverPointerEvents();
+    this._deliverKeyEvents();
+    this._deliverTextEvents();
+
+    // Call wc_render (with asyncify resume/suspend for loop-owning carts)
+    const asyncEx = this.instance.exports;
+    if (this._asyncify.suspended) {
+      asyncEx.asyncify_start_rewind(this._asyncify.buf);
+      this._asyncify.rewinding = true;
+      this._asyncify.suspended = false;
+    }
+    asyncEx.wc_render();
+    if (this._asyncify.unwound) {
+      asyncEx.asyncify_stop_unwind();
+      this._asyncify.suspended = true;
+      this._asyncify.unwound = false;
+    }
+    this._updateViews(); // in case memory grew during render
+    this._wgpu?.endFrame(); // after the frame's last submit: destroy what the cart released
+
+    // Re-read width/height from WASM memory (cart may update during deferred init)
+    const base = this._infoPtr >> 2;
+    const newW = this._u32[base + 1];
+    const newH = this._u32[base + 2];
+    if (newW > 0 && newH > 0 && (newW !== this.info.width || newH !== this.info.height)) {
+      this._applyResize(newW, newH);
+    }
+
+    // The wheel delta belonged to the frame just rendered.
+    this._clearWheelState();
+    this.frameCount++;
+
+    // Read framebuffer
+    const fbSize = this.info.width * this.info.height * 4;
+    const framebuffer = this._u8.subarray(this.info.fbPtr, this.info.fbPtr + fbSize);
+
+    // Drain audio ring buffer
+    const audio = this._drainAudio();
+
+    this._lastFrame = {
+      framebuffer,
+      width: this.info.width,
+      height: this.info.height,
+      audio,
+    };
+    return this._lastFrame;
+  }
+
+  /**
+   * Enable (or disable) the deterministic fixed-step clock. When set to a
+   * positive value, each runFrame() advances exactly that many virtual ms and
+   * reports timeMs = frameCount * stepMs — so a host driving frames gets
+   * reproducible timing independent of real elapsed time. Pass 0 (or nothing) to
+   * return to wall-clock timing. Optional; standalone hosts never call this.
+   * @param {number} [stepMs=1000/60] virtual ms per frame (default ~16.667 for 60fps)
+   */
+  /**
+   * Unlink every runtime-generated function of the cart. A host that restores
+   * a save state or rewinds calls this after writing memory back: JIT slots
+   * are never carried across a restore, and the restore generation
+   * (wc_jit_config key 7, a hash of the restored memory) changes in the same
+   * step so the cart's engine sees it (SPEC.md, "Runtime code generation").
+   */
+  jitUnlinkAll() {
+    this._jit?.unlinkAll();
+  }
+
+  setFixedStep(stepMs = 1000 / 60) {
+    this._fixedStepMs = stepMs > 0 ? stepMs : 0;
+  }
+
+  /**
+   * Get the current save data.
+   * @returns {Uint8Array|null}
+   */
+  getSaveData() {
+    if (!this.info || this.info.saveSize === 0) return null;
+    // Return a copy so caller owns the buffer
+    return new Uint8Array(
+      this._u8.slice(this.info.savePtr, this.info.savePtr + this.info.saveSize)
+    );
+  }
+
+  /**
+   * Get cart info (dimensions, save size, etc.)
+   */
+  /**
+   * The live WebGL2 context this cart is rendering through, or null for a 2D
+   * cart. Covers BOTH cases: one the host created for itself and one the
+   * caller supplied via `glBackend`. Readback (screenshots, terminal output,
+   * frame hashing) needs the context regardless of who made it, so keying off
+   * the host-created one alone silently disables readback whenever a caller
+   * passes its own — which is exactly the shape of bug this returns.
+   */
+  getGlContext() {
+    return this._ownedGl || this._callerGl || null;
+  }
+
+  /**
+   * True if this cart renders into an offscreen redirect FBO rather than
+   * straight into the GL context's default framebuffer. Hosts that present to
+   * a window need this: it is what makes presentToSurface() possible.
+   */
+  get glRedirected() {
+    return !!this._glRedirected;
+  }
+
+  /**
+   * Present the cart's rendered frame to the GL context's default framebuffer
+   * (for an attached context, that is the window surface).
+   *
+   * Only meaningful for a GL cart with the FBO redirect active. Without a
+   * `dst` the cart is stretched across the whole surface; pass a letterbox
+   * rect to preserve its aspect ratio in a window of a different size.
+   *
+   * @param {{x:number,y:number,w:number,h:number,winW:number,winH:number}} [dst]
+   *   Destination in top-down window coordinates; see _blitRedirectToCanvas.
+   * @returns {boolean} false if there is nothing to present.
+   */
+  presentToSurface(dst) {
+    if (!this._glRedirected || typeof this._glFuncs?._blitToCanvas !== 'function') return false;
+    this._glFuncs._blitToCanvas(dst);
+    return true;
+  }
+
+  /**
+   * Run `fn(width, height)` with the cart's redirect FBO bound as the GL READ
+   * source, then restore the previous binding.
+   *
+   * This is how a host reads the cart's pixels (screenshot, frame hash). It
+   * matters most when the context is attached to a window: the default
+   * framebuffer is then the window surface, whose contents are UNDEFINED after
+   * a swap, so a plain glReadPixels returns black. The redirect FBO always
+   * holds the frame the cart drew.
+   *
+   * @param {(w:number,h:number)=>void} fn
+   * @returns {boolean} false if this cart has no redirect FBO to read.
+   */
+  withRenderedFrame(fn) {
+    if (!this._glRedirected || typeof this._glFuncs?._withRedirectRead !== 'function') return false;
+    return this._glFuncs._withRedirectRead(fn);
+  }
+
+  /**
+   * The last frame a WebGPU cart rendered, as top-down RGBA:
+   * `{ width, height, data }`, or null before the cart configured its canvas.
+   * Asynchronous because GPU readback is. Call it between runFrame() calls.
+   */
+  async readGpuFrame() {
+    if (!this._wgpu) throw new Error('readGpuFrame: this cart is not running on WebGPU');
+    return this._wgpu.readFrame();
+  }
+
+  /**
+   * Draw the WebGPU cart's last frame into another canvas context (a window),
+   * scaled into `dst` (top-down pixels; the whole target if omitted). The
+   * caller presents the target. Returns false if there is nothing to draw.
+   * @param {GPUCanvasContext} target - configured with getGpuDevice()
+   */
+  presentWgpuTo(target, dst) {
+    if (!this._wgpu) return false;
+    return this._wgpu.drawTo(target, dst);
+  }
+
+  /** The GPUDevice a WebGPU cart runs on (null for other carts). */
+  getGpuDevice() {
+    return this._wgpu?.device || null;
+  }
+
+  /**
+   * Which GPU a WebGPU cart runs on ({vendor, architecture, device,
+   * description, featureLevel, powerPreference}), null for other carts. Pick
+   * the GPU with adapterOptions.powerPreference or WASMCART_WGPU_POWER.
+   */
+  getGpuAdapterInfo() {
+    return this._wgpu ? { ...this._wgpu.adapterInfo } : null;
+  }
+
+  // gpu_api is checked the moment the cart reports it: a value this host
+  // cannot honour is a load error, not something to guess at.
+  _checkGpuApi(gpuApi) {
+    if (gpuApi === GPU_API_WEBGPU && !this._cartImportsWgpu) {
+      throw new Error('cart declares gpu_api 2 (WebGPU) but imports no WebGPU functions');
+    }
+    if (gpuApi > GPU_API_WEBGPU) {
+      throw new Error(`cart declares gpu_api ${gpuApi}, which this host does not support (0 = 2D, 1 = GL, 2 = WebGPU)`);
+    }
+  }
+
+  // Can this host give a cart WebGPU? An embedder may pass its own `gpu` (a
+  // navigator.gpu-shaped object), or turn it off with wgpu: false; otherwise
+  // webgpu-node (a dependency, as webgl-node is for GL) provides it, loaded
+  // only when a WebGPU cart arrives. The cart renders into a
+  // host-owned texture (createTextureCanvas) unless the embedder passes
+  // `createCanvas`.
+  async _wgpuAvailability(options) {
+    if (options.wgpu === false) return { ok: false, reason: 'the embedder disabled it (wgpu: false)' };
+    let gpu = options.gpu || null;
+    let globals = options.gpuGlobals || null;
+    const createCanvas = options.createCanvas || undefined;
+    let wasmImports = null;
+    if (!gpu || !globals) {
+      let mod;
+      try { mod = await import('webgpu-node'); } catch (e) {
+        if (!gpu) return { ok: false, reason: `webgpu-node is not installed or failed to load (${e.message})` };
+      }
+      if (!gpu) {
+        gpu = mod.createGPU();
+        // The hot WebGPU imports as direct calls into Dawn, for objects of
+        // this GPU (native-dawn, the Dawn build under webgpu-node).
+        wasmImports = (await import('native-dawn')).default.wasmImports;
+      }
+      // The WebGPU classes (GPUValidationError, ...) the glue checks errors
+      // against; Node has none on globalThis.
+      globals ||= mod?.globals || globalThis;
+    }
+    let adapter = null;
+    try { adapter = await gpu.requestAdapter(wgpuAdapterOptions(options.adapterOptions)); } catch (e) {
+      return { ok: false, reason: `requesting a WebGPU adapter failed (${e.message})` };
+    }
+    if (!adapter) return { ok: false, reason: 'no WebGPU adapter is available (check the GPU driver)' };
+    return { ok: true, gpu, adapter, createCanvas, globals, wasmImports };
+  }
+
+  getInfo() {
+    return this.info ? { ...this.info } : null;
+  }
+
+  /**
+   * Get the parsed manifest (includes players, net, etc.)
+   */
+  getManifest() {
+    return this._manifest ? { ...this._manifest } : null;
+  }
+
+  // ── Debug ABI (OPT-IN, PULL-ONLY) ────────────────────────────────────
+  // Read on demand only, never per frame (SPEC.md, "Debug state"). Shared
+  // with the other host in debugState.js, which bounds-checks every pointer.
+
+  /**
+   * Read the cart's debug-state descriptor table (the fields it chose to
+   * expose by name). Returns null if the cart didn't opt in (no FLAG_DEBUG /
+   * no wc_debug_state export). Pull-only — call when a debug consumer asks.
+   * @returns {Array<{name,type,typeName,valuePtr,len}> | null}
+   */
+  readDebugState() {
+    return readDebugState(this);
+  }
+
+  /**
+   * Read a named debug value, decoded per its declared type. Scalars return
+   * {value}, arrays {len, values}, BYTES a copy in {bytes}. Throws a clear
+   * error if the name isn't in the table.
+   */
+  readDebugValue(name) {
+    return readDebugValue(this, name);
+  }
+
+  /** Write a named scalar debug value (BYTES/arrays not supported — use write). */
+  writeDebugValue(name, value) {
+    return writeDebugValue(this, name, value);
+  }
+
+  /** Capped push for the debug event rings (oldest entries drop past the cap). */
+  _pushDebugEvent(ring, ev) {
+    pushDebugEvent(ring, ev, CartHost.MAX_DEBUG_EVENTS);
+  }
+
+  /**
+   * Drain captured debug events — wc_log lines and wc_debug_mark(id)
+   * annotations, each stamped with the frame it occurred on — clearing the
+   * rings. Pull-model: the host stores what the cart emitted; nothing is
+   * read or computed per frame.
+   * @returns {{log: {frame:number, text:string}[], marks: {frame:number, id:number}[]}}
+   */
+  drainDebugEvents() {
+    const log = this.debugLog;
+    const marks = this.debugMarks;
+    this.debugLog = [];
+    this.debugMarks = [];
+    return { log, marks };
+  }
+
+  /**
+   * A cart thread died after it was spawned (it trapped, or its worker failed
+   * or exited without returning). The cart's thread pool is then a worker
+   * short, and a pool waiting on it can hang, so this is an error, not a log
+   * line: logged at once, and thrown from the next runFrame(), which stops
+   * the cart with it.
+   */
+  _threadDied(tid, reason) {
+    const err = new Error(`wasmcart: cart thread ${tid} died (${reason}); the cart's thread pool is a worker short, so the cart is stopped`);
+    console.error(err.message);
+    this._threadFatal ??= err;
+  }
+
+  /**
+   * Spawn a thread for WASI threads model.
+   * Called when the cart invokes wasi.thread-spawn(start_arg).
+   * Returns a positive tid on success, or negative on error.
+   */
+  _spawnThread(startArg) {
+    if (!this.isThreaded || !this._compiledModule || !this._sharedMemory) return -1;
+
+    const tid = this._nextTid++;
+
+    // Serialize asset config for the worker (so it can do its own asset reads)
+    const assetConfig = {};
+    if (this._assetFd !== null) {
+      // ZIP-based .wasc - pass file path and serialized index
+      assetConfig.type = 'zip';
+      assetConfig.filePath = this._assetFilePath;
+      assetConfig.index = this._assetIndex ? [...this._assetIndex.entries()] : [];
+    } else if (this._assetBuf) {
+      // In-memory buffer - pass the buffer (SharedArrayBuffer compatible)
+      assetConfig.type = 'buffer';
+      assetConfig.buffer = this._assetBuf;
+      assetConfig.index = this._assetIndex ? [...this._assetIndex.entries()] : [];
+    } else if (this._assetDir) {
+      assetConfig.type = 'dir';
+      assetConfig.dir = this._assetDir;
+    }
+
+    const workerURL = new URL('./cartWorker.js', import.meta.url);
+    const worker = new Worker(workerURL, {
+      workerData: {
+        module: this._compiledModule,
+        memory: this._sharedMemory,
+        tid,
+        startArg,
+        assetConfig,
+        jitDisabled: this._jitDisabled,
+      },
+    });
+
+    let exited = false;
+    worker.on('message', (msg) => {
+      if (msg.type === 'spawn') {
+        // Nested thread spawning: worker thread requested a new thread
+        const nestedTid = this._spawnThread(msg.startArg);
+        worker.postMessage({ type: 'spawned', tid: nestedTid, requestId: msg.requestId });
+      } else if (msg.type === 'exit') {
+        exited = true;
+        this._workers.delete(msg.tid);
+        if (msg.error) this._threadDied(tid, msg.error);
+      }
+    });
+
+    worker.on('error', (err) => {
+      this._workers.delete(tid);
+      this._threadDied(tid, err?.message || String(err));
+    });
+
+    worker.on('exit', (code) => {
+      // a thread that returned says so first; any other exit is a death
+      if (this._workers.delete(tid) && !exited) this._threadDied(tid, `its worker exited (code ${code})`);
+    });
+
+    this._workers.set(tid, worker);
+    return tid;
+  }
+
+  /**
+   * Clean up resources (close file descriptor if open, terminate threads)
+   */
+  destroy() {
+    // A compile still in flight for this cart is dropped, never installed.
+    try { this._jit?.dispose(); } catch { /* teardown never throws */ }
+
+    // Delete every GL object this cart created BEFORE any context teardown.
+    // On an owned context this is redundant (destroying the context frees
+    // everything) but harmless; on a BORROWED context it is the only cleanup
+    // there is -- the shared context outlives every cart, so objects nobody
+    // deletes accumulate for the life of the process. That was a measured
+    // 26.69 GB GTT leak (GPU-mapped SYSTEM RAM) on a server driving repeated
+    // cart loads through one shared context. See _releaseAll in
+    // webgl_imports.js for the full story.
+    try { this._glFuncs?._releaseAll?.(); } catch { /* teardown never throws */ }
+
+    try { this._wgpu?.destroy(); } catch { /* teardown never throws */ }
+    this._wgpu = null;
+
+    // Release a GL context this host created itself (a caller-supplied
+    // glBackend belongs to the caller and is left alone).
+    if (this._ownedGl) {
+      try { this._ownedGl.getExtension('WEBGL_lose_context')?.loseContext(); } catch {}
+      // Release the native EGL context by ITS handle (webgl-node binds
+      // destroy() to it); the old no-arg destroy tore down whichever context
+      // happened to be current, potentially another host's.
+      try { this._ownedGlCtx?.destroy?.(); } catch {}
+      this._ownedGl = null;
+      this._ownedGlCtx = null;
+    }
+
+    // Terminate all worker threads
+    for (const [tid, worker] of this._workers) {
+      worker.terminate();
+    }
+    this._workers.clear();
+
+    // Close only transports this host created. A channel the embedder supplied
+    // via addPeer() belongs to the embedder: closing it breaks any host that
+    // outlives a single cart instance, and for a real RTCDataChannel it is
+    // unrecoverable -- once closed the peer connection must renegotiate.
+    for (const [, peer] of this._peers) {
+      if (!peer.hostOwned) {
+        // Detach our handlers so a destroyed host stops queueing events into
+        // an object nobody reads any more.
+        if (peer.dc) {
+          try { peer.dc.onmessage = null; peer.dc.onclose = null; } catch {}
+        }
+        continue;
+      }
+      try {
+        if (peer.ws) peer.ws.close();
+        else if (peer.dc && peer.dc.close) peer.dc.close();
+      } catch {}
+    }
+    // Clearing is what stops delivery: _deliverNetEvents() iterates this map.
+    this._peers.clear();
+
+    if (this._assetFd !== null) {
+      try { closeSync(this._assetFd); } catch {}
+      this._assetFd = null;
+    }
+    this._assetIndex = null;
+    this._assetBuf = null;
+    this._assetDir = null;
+    this._sharedMemory = null;
+    this._compiledModule = null;
+  }
+
+  // --- .wasc loading ---
+
+  async _loadFromWasc(filePath) {
+    const fd = openSync(filePath, 'r');
+    const fileStats = statSync(filePath);
+    const fileSize = fileStats.size;
+
+    // Parse ZIP central directory
+    const index = parseZipCentralDirectory(fd, fileSize);
+
+    if (index.size > MAX_ARCHIVE_ENTRIES) {
+      closeSync(fd);
+      throw new Error(`Archive has too many entries (${index.size} > ${MAX_ARCHIVE_ENTRIES})`);
+    }
+
+    // Read manifest.json
+    const manifestEntry = index.get('manifest.json');
+    // The manifest is OPTIONAL (SPEC: "a host MUST NOT refuse a cart for
+    // lacking one"). Absent it, every field takes its default and `entry`
+    // falls back to cart.wasm.
+    let manifest = {};
+    if (manifestEntry) {
+      const manifestBuf = readZipEntry(fd, manifestEntry);
+      manifest = JSON.parse(manifestBuf.toString('utf8'));
+    }
+    this._manifest = manifestEntry ? manifest : null;
+
+    // Read cart.wasm (or whatever entry is specified)
+    const wasmName = manifest.entry || 'cart.wasm';
+    const wasmEntry = index.get(wasmName);
+    if (!wasmEntry) {
+      closeSync(fd);
+      throw new Error(`.wasc archive missing ${wasmName}`);
+    }
+    const wasmBytes = readZipEntry(fd, wasmEntry);
+
+    // Build asset index (strip 'assets/' prefix if the manifest specifies an assets root)
+    const assetsPrefix = assetPrefixOf(manifest);
+    this._assetIndex = new Map();
+    const assetNames = new Set();
+    for (const [path, entry] of index) {
+      if (path === 'manifest.json' || path === wasmName) continue;
+
+      // Validate entry sizes
+      if (entry.uncompressedSize > MAX_ASSET_SIZE) continue;
+
+      // Store with prefix stripped for lookup
+      let assetPath = path;
+      if (assetsPrefix && path.startsWith(assetsPrefix)) {
+        assetPath = path.slice(assetsPrefix.length);
+      }
+      this._assetIndex.set(assetPath, entry);
+      // Also store with full path for carts that use full paths
+      if (assetPath !== path) {
+        this._assetIndex.set(path, entry);
+      }
+      // The listing carries each asset ONCE, under the same prefix-stripped
+      // name a cart passes to wc_load_asset. The index deliberately holds
+      // both spellings so either lookup resolves; a cart enumerating "roms/*"
+      // must not see every ROM twice, nor a path that differs from the
+      // dev-directory spelling of the same cart.
+      assetNames.add(assetPath);
+    }
+
+    // Generate virtual _filelist.txt with all asset paths
+    const fileList = [...assetNames].filter(p => !p.startsWith('assets/')).join('\n');
+    this._fileListBuf = Buffer.from(fileList, 'utf8');
+
+    this._assetFd = fd;
+    this._assetFilePath = filePath; // stored for worker thread asset access
+    this._hasAssets = this._assetIndex.size > 0;
+
+    return wasmBytes;
+  }
+
+  _loadFromWascBuffer(buf) {
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    const index = parseZipFromBuffer(u8);
+
+    if (index.size > MAX_ARCHIVE_ENTRIES) {
+      throw new Error(`Archive has too many entries (${index.size} > ${MAX_ARCHIVE_ENTRIES})`);
+    }
+
+    // Read manifest
+    const manifestEntry = index.get('manifest.json');
+    // Optional — see the note in the fd-based loader above.
+    let manifest = {};
+    if (manifestEntry) {
+      const manifestBuf = readZipEntryFromBuffer(u8, manifestEntry);
+      manifest = JSON.parse(new TextDecoder().decode(manifestBuf));
+    }
+    this._manifest = manifestEntry ? manifest : null;
+
+    // Read wasm
+    const wasmName = manifest.entry || 'cart.wasm';
+    const wasmEntry = index.get(wasmName);
+    if (!wasmEntry) throw new Error(`.wasc archive missing ${wasmName}`);
+    const wasmBytes = readZipEntryFromBuffer(u8, wasmEntry);
+
+    // Build asset index
+    const assetsPrefix = assetPrefixOf(manifest);
+    this._assetIndex = new Map();
+    const assetNames = new Set();
+    for (const [path, entry] of index) {
+      if (path === 'manifest.json' || path === wasmName) continue;
+      if (entry.uncompressedSize > MAX_ASSET_SIZE) continue;
+
+      let assetPath = path;
+      if (assetsPrefix && path.startsWith(assetsPrefix)) {
+        assetPath = path.slice(assetsPrefix.length);
+      }
+      this._assetIndex.set(assetPath, entry);
+      if (assetPath !== path) {
+        this._assetIndex.set(path, entry);
+      }
+      // The listing carries each asset ONCE, under the same prefix-stripped
+      // name a cart passes to wc_load_asset. The index deliberately holds
+      // both spellings so either lookup resolves; a cart enumerating "roms/*"
+      // must not see every ROM twice, nor a path that differs from the
+      // dev-directory spelling of the same cart.
+      assetNames.add(assetPath);
+    }
+
+    // Generate virtual _filelist.txt with all asset paths
+    const fileList = [...assetNames].filter(p => !p.startsWith('assets/')).join('\n');
+    this._fileListBuf = new TextEncoder().encode(fileList);
+
+    this._assetBuf = u8;
+    this._hasAssets = this._assetIndex.size > 0;
+
+    return wasmBytes;
+  }
+
+  async _loadFromDirectory(dirPath) {
+    // Dev mode: load manifest.json + cart.wasm + assets from a directory
+    // The manifest is optional here too (SPEC), as it already was for a .wasc
+    // and for a directory served to the web host: absent, every field takes
+    // its default and the entry is cart.wasm.
+    const manifestPath = join(dirPath, 'manifest.json');
+    let manifest = {};
+    try {
+      manifest = JSON.parse((await readFile(manifestPath)).toString('utf8'));
+      this._manifest = manifest;
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+
+    const wasmName = manifest.entry || 'cart.wasm';
+    const wasmBytes = await readFile(join(dirPath, wasmName));
+
+    // Set up directory-based asset loading
+    const assetsDir = join(dirPath, assetPrefixOf(manifest));
+    this._assetDir = assetsDir;
+    this._hasAssets = true;
+    // No index needed - we'll read files directly from disk.
+
+    // _filelist.txt still has to exist here. Both archive loaders build it
+    // from their entry index, and a cart that enumerates its assets (a ROM
+    // picker, a bezel picker) would otherwise work when packed and silently
+    // see nothing in dev mode, which is the same bug class as an asset that
+    // loads but renders black: the failure looks like "no ROMs" rather than
+    // like a missing feature.
+    const onDisk = listDirRelative(assetsDir);
+    this._fileListBuf = new TextEncoder().encode(onDisk.join('\n'));
+
+    // The manifest's optional `files` list is what a WEB host serves as
+    // _filelist.txt for this same directory, since HTTP cannot list it. Here
+    // the real directory wins, so a stale list would only show up once the
+    // cart is deployed -- as files that load by name but are missing from the
+    // listing. Catch it now, by name.
+    if (Array.isArray(manifest.files)) warnStaleFileList(manifest.files, onDisk, dirPath);
+
+    return wasmBytes;
+  }
+
+  // --- Asset API implementation ---
+
+  _readPath(pathPtr, pathLen) {
+    this._updateViews();
+    if (!this._u8 || pathLen === 0 || pathLen > 4096) return null;
+    const bytes = this._u8.slice(pathPtr, pathPtr + pathLen);
+    const path = new TextDecoder().decode(bytes);
+    if (!validateAssetPath(path)) return null;
+    return path;
+  }
+
+  _assetSize(pathPtr, pathLen) {
+    if (!this._hasAssets) return -1;
+    const path = this._readPath(pathPtr, pathLen);
+    if (!path) return -1;
+
+    // Virtual _filelist.txt
+    if (path === '_filelist.txt' && this._fileListBuf) {
+      return this._fileListBuf.length;
+    }
+
+    // Directory-based dev mode
+    if (this._assetDir) {
+      try {
+        const s = statSync(join(this._assetDir, path));
+        return s.size;
+      } catch {
+        return -1;
+      }
+    }
+
+    // ZIP-based
+    const entry = this._assetIndex.get(path);
+    if (!entry) return -1;
+    return entry.uncompressedSize;
+  }
+
+  _loadAsset(pathPtr, pathLen, destPtr, maxSize) {
+    if (!this._hasAssets) return -1;
+    const path = this._readPath(pathPtr, pathLen);
+    if (!path) return -1;
+
+    let data;
+
+    // Virtual _filelist.txt
+    if (path === '_filelist.txt' && this._fileListBuf) {
+      data = this._fileListBuf;
+    } else if (this._assetDir) {
+      // Directory-based dev mode - read file directly
+      try {
+        const filePath = join(this._assetDir, path);
+        const fd = openSync(filePath, 'r');
+        const s = statSync(filePath);
+        const size = Math.min(s.size, maxSize);
+        const buf = Buffer.alloc(size);
+        readSync(fd, buf, 0, size, 0);
+        closeSync(fd);
+        data = buf;
+      } catch {
+        return -1;
+      }
+    } else if (this._assetFd !== null) {
+      // On-disk ZIP - read just the requested entry
+      const entry = this._assetIndex.get(path);
+      if (!entry) return -1;
+      try {
+        data = readZipEntry(this._assetFd, entry);
+      } catch {
+        return -1;
+      }
+    } else if (this._assetBuf) {
+      // In-memory ZIP
+      const entry = this._assetIndex.get(path);
+      if (!entry) return -1;
+      try {
+        data = readZipEntryFromBuffer(this._assetBuf, entry);
+      } catch {
+        return -1;
+      }
+    } else {
+      return -1;
+    }
+
+    // Copy into cart memory
+    const copyLen = Math.min(data.length, maxSize);
+    this._updateViews();
+    this._u8.set(data.subarray ? data.subarray(0, copyLen) : new Uint8Array(data.buffer || data, 0, copyLen), destPtr);
+
+    return copyLen;
+  }
+
+  // --- Private ---
+
+  /**
+   * Analyze module for threading support (WASI threads model).
+   * Returns { isThreaded, importsMemory } without throwing.
+   */
+  _analyzeModule(module) {
+    const imports = WebAssembly.Module.imports(module);
+    const exports = WebAssembly.Module.exports(module);
+
+    const hasThreadSpawn = imports.some(
+      i => i.module === 'wasi' && i.name === 'thread-spawn' && i.kind === 'function'
+    );
+    const hasThreadStart = exports.some(
+      e => e.name === 'wasi_thread_start' && e.kind === 'function'
+    );
+    const importsMemory = imports.some(i => i.kind === 'memory');
+
+    // Detect Emscripten pthreads (different from WASI threads)
+    const hasEmscriptenThreads = imports.some(
+      i => i.module === 'env' && i.name === '_emscripten_thread_init' && i.kind === 'function'
+    );
+
+    // Validate: thread-spawn and wasi_thread_start must come in pairs
+    if (hasThreadSpawn && !hasThreadStart) {
+      throw new Error(
+        'Cart imports wasi.thread-spawn but does not export wasi_thread_start. ' +
+        'Both are required for WASI threads.'
+      );
+    }
+    if (hasThreadStart && !hasThreadSpawn) {
+      throw new Error(
+        'Cart exports wasi_thread_start but does not import wasi.thread-spawn. ' +
+        'Both are required for WASI threads.'
+      );
+    }
+
+    return {
+      isThreaded: (hasThreadSpawn && hasThreadStart) || hasEmscriptenThreads,
+      importsMemory,
+    };
+  }
+
+  _validateModule(module) {
+    const moduleImports = WebAssembly.Module.imports(module);
+    const moduleExports = WebAssembly.Module.exports(module);
+
+    // Check imports - allow env, WASI stubs, and gl
+    for (const imp of moduleImports) {
+      if (imp.module === 'wasi_snapshot_preview1' || imp.module === 'wasi') {
+        // Allow WASI imports - we provide safe no-op stubs
+        continue;
+      }
+      if (imp.module === 'gl') {
+        // Allow GL imports - provided by createWebGLImports()
+        continue;
+      }
+      if (imp.module === 'wgpu' && isWgpuImportName(imp.name)) {
+        // WebGPU functions under their own module name (src/wgpu/host.js)
+        continue;
+      }
+      if (imp.module !== 'env') {
+        throw new Error(`Cart imports unknown module: "${imp.module}"`);
+      }
+      // Allow memory imports (used by threaded carts with shared memory)
+      if (imp.kind === 'memory') continue;
+      // Allow known env imports + GL/emscripten functions (for gl4es carts)
+      if (imp.kind === 'function') {
+        // GL, emscripten GL, gl4es-internal, syscalls, emscripten, and
+        // common libc functions are all allowed under env
+        if (imp.name.startsWith('gl') || imp.name.startsWith('gles_')
+            || imp.name.startsWith('emscripten_gl')
+            || imp.name.startsWith('emscripten_')
+            || imp.name.startsWith('__syscall_')
+            || imp.name.startsWith('wc_')
+            || imp.name.startsWith('memfs_')
+            || imp.name.startsWith('pthread_')
+            || ['getaddrinfo', 'getnameinfo'].includes(imp.name)) {
+          continue;
+        }
+        // For large engine carts (Godot, etc.), allow any env function  - 
+        // we auto-stub unknowns below
+      }
+    }
+
+    // Require wc_render export
+    const exportNames = moduleExports.map(e => e.name);
+    if (!exportNames.includes('wc_render')) {
+      throw new Error('Cart must export wc_render');
+    }
+    if (!exportNames.includes('wc_get_info')) {
+      throw new Error('Cart must export wc_get_info');
+    }
+    // Threaded carts may import memory instead of exporting it
+    // (they can also re-export it, but it's not required)
+    const analysis = this._analyzeModule(module);
+    if (!exportNames.includes('memory') && !analysis.importsMemory) {
+      throw new Error('Cart must export memory');
+    }
+  }
+
+  /**
+   * Parse WASM binary import section to find memory import limits.
+   * Returns { initial, maximum, shared } or null if no memory import.
+   */
+  static _parseMemoryImportLimits(wasmBytes) {
+    const buf = wasmBytes instanceof Uint8Array ? wasmBytes : new Uint8Array(wasmBytes);
+    let pos = 8; // skip 8-byte header (magic + version)
+
+    function readLEB128() {
+      let result = 0, shift = 0;
+      while (pos < buf.length) {
+        const byte = buf[pos++];
+        result |= (byte & 0x7F) << shift;
+        if (!(byte & 0x80)) break;
+        shift += 7;
+      }
+      return result;
+    }
+
+    function skipBytes(n) { pos += n; }
+
+    while (pos < buf.length) {
+      const sectionId = buf[pos++];
+      const sectionSize = readLEB128();
+      const sectionEnd = pos + sectionSize;
+
+      if (sectionId === 2) { // Import section
+        const count = readLEB128();
+        for (let i = 0; i < count; i++) {
+          const modLen = readLEB128();
+          skipBytes(modLen); // module name
+          const fieldLen = readLEB128();
+          skipBytes(fieldLen); // field name
+          const kind = buf[pos++];
+
+          if (kind === 0x02) { // memory import
+            const flags = buf[pos++];
+            const shared = !!(flags & 0x02);
+            const hasMax = !!(flags & 0x01);
+            const initial = readLEB128();
+            const maximum = hasMax ? readLEB128() : undefined;
+            return { initial, maximum, shared };
+          } else if (kind === 0x00) { // function import
+            readLEB128(); // type index
+          } else if (kind === 0x01) { // table import
+            pos++; // reftype
+            const tFlags = buf[pos++];
+            readLEB128(); // initial
+            if (tFlags & 0x01) readLEB128(); // maximum
+          } else if (kind === 0x03) { // global import
+            pos++; // valtype
+            pos++; // mutability
+          }
+        }
+        return null; // no memory import in section
+      }
+
+      pos = sectionEnd; // skip to next section
+    }
+    return null;
+  }
+
+  _updateViews() {
+    const buf = this.memory.buffer;
+    // For SharedArrayBuffer, reference stays the same after grow but byteLength changes
+    if (buf === this._lastBuffer && buf.byteLength === this._lastByteLength) return;
+    this._lastBuffer = buf;
+    this._lastByteLength = buf.byteLength;
+    this._u8 = new Uint8Array(buf);
+    this._u16 = new Uint16Array(buf);
+    this._i16 = new Int16Array(buf);
+    this._i32 = new Int32Array(buf);
+    this._u32 = new Uint32Array(buf);
+    this._f32 = new Float32Array(buf);
+    this._f64 = new Float64Array(buf);
+  }
+
+  // --- Networking (ABI v3) ---
+
+  /**
+   * Copy `data` into a cart allocation (wc_alloc, src/cartMemory.js), call
+   * `callback(ptr, len)`, then free it. The pointer is valid only for the
+   * call. A cart without an allocator gets a CartMemoryError naming `what`.
+   */
+  _withTempWasmData(data, what, callback) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const len = bytes.length;
+    const ptr = this._alloc.allocBytes(bytes, what);
+    this._updateViews();
+    try { callback(ptr, len); } finally { this._alloc.free(ptr); }
+  }
+
+  /**
+   * Open a peer connection. `addr` is host-interpreted - this host understands
+   * ws:// and wss:// URLs. A host that does not understand an address, or whose
+   * manifest grant does not cover its transport class, fails the open.
+   */
+  _peerOpen(addrPtr, addrLen) {
+    // Dual gate: the cart's flag requests networking, the manifest grants it.
+    // Fail closed if either is missing.
+    if (!this.info?.wantsNet) return -1;
+    if (!this._manifest?.net) return -1;
+
+    this._updateViews();
+    const addr = new TextDecoder().decode(this._u8.slice(addrPtr, addrPtr + addrLen));
+
+    // Domain-granted transports: only ws/wss are implemented here. LAN and
+    // serial addresses would be gated by net.lan / net.serial respectively.
+    let url;
+    try {
+      url = new URL(addr);
+    } catch {
+      return -1;
+    }
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') return -1;
+
+    // net.domains is the allowlist; net.websocket is the superseded spelling,
+    // still read so older manifests keep working.
+    const allowlist = this._manifest?.net?.domains ?? this._manifest?.net?.websocket;
+    if (!allowlist) return -1;
+    if (!allowlist.includes(url.hostname)) return -1;
+    if (!this._WebSocketImpl) return -1;
+
+    const id = this._peerNextId++;
+    try {
+      const ws = new this._WebSocketImpl(addr);
+      if (ws.binaryType !== undefined) ws.binaryType = 'arraybuffer';
+
+      // name defaults to the hostname: display-only, never a handle.
+      const peer = {
+        ws,
+        name: url.hostname,
+        transport: TRANSPORT_WS,
+        // The host dialled this socket, so the host closes it on destroy().
+        hostOwned: true,
+        eventQueue: [],
+      };
+      ws.onopen = () => peer.eventQueue.push({ type: 'connect' });
+      ws.onmessage = (e) => {
+        // Binary only. A text frame from the server is delivered as its UTF-8
+        // bytes: framing is the cart's business, so we never drop the payload.
+        const data = typeof e.data === 'string'
+          ? new TextEncoder().encode(e.data)
+          : e.data;
+        peer.eventQueue.push({ type: 'message', data });
+      };
+      ws.onclose = () => peer.eventQueue.push({ type: 'disconnect' });
+      ws.onerror = () => peer.eventQueue.push({ type: 'error' });
+
+      this._peers.set(id, peer);
+      return id;
+    } catch {
+      return -1;
+    }
+  }
+
+  _peerClose(peerId) {
+    const peer = this._peers.get(peerId);
+    if (!peer) return;
+    try {
+      if (peer.ws) peer.ws.close(1000);
+      else if (peer.dc && peer.dc.close) peer.dc.close();
+    } catch {}
+  }
+
+  _peerSend(peerId, dataPtr, len) {
+    const peer = this._peers.get(peerId);
+    if (!peer) return -1;
+    try {
+      this._updateViews();
+      const bytes = this._u8.slice(dataPtr, dataPtr + len);
+      if (peer.ws) {
+        if (peer.ws.readyState !== 1) return -1; // not OPEN
+        peer.ws.send(bytes);
+      } else if (peer.dc) {
+        peer.dc.send(bytes);
+      } else {
+        return -1;
+      }
+      return len;
+    } catch {
+      return -1;
+    }
+  }
+
+  _peerBroadcast(dataPtr, len) {
+    this._updateViews();
+    const bytes = this._u8.slice(dataPtr, dataPtr + len);
+    let count = 0;
+    for (const [, peer] of this._peers) {
+      try {
+        if (peer.ws) {
+          if (peer.ws.readyState !== 1) continue;
+          peer.ws.send(bytes);
+        } else if (peer.dc) {
+          peer.dc.send(bytes);
+        } else {
+          continue;
+        }
+        count++;
+      } catch {}
+    }
+    return count || -1;
+  }
+
+  _peerState(peerId) {
+    const peer = this._peers.get(peerId);
+    if (!peer) return PEER_CLOSED;
+    if (peer.ws) return peer.ws.readyState;
+    // Host-registered peers are live from the moment they are added.
+    return peer.closed ? PEER_CLOSED : PEER_OPEN;
+  }
+
+  /** Connection ID at an index, so a cart can enumerate without tracking events. */
+  _peerIdAt(index) {
+    const ids = [...this._peers.keys()];
+    if (index >= ids.length) return -1;
+    return ids[index];
+  }
+
+  /** Write the peer's display name. DISPLAY-ONLY - the id is the handle. */
+  _peerName(peerId, destPtr, maxLen) {
+    const peer = this._peers.get(peerId);
+    if (!peer) return -1;
+    if (maxLen === 0) return -1;
+    this._updateViews();
+    const nameBytes = new TextEncoder().encode(String(peer.name ?? ''));
+    // Always NUL-terminate: truncate the text, never the terminator.
+    const copyLen = Math.min(nameBytes.length, maxLen - 1);
+    this._u8.set(nameBytes.subarray(0, copyLen), destPtr);
+    this._u8[destPtr + copyLen] = 0;
+    return copyLen + 1;
+  }
+
+  _peerTransport(peerId) {
+    const peer = this._peers.get(peerId);
+    if (!peer) return TRANSPORT_UNKNOWN;
+    return peer.transport ?? TRANSPORT_UNKNOWN;
+  }
+
+  /**
+   * Deliver buffered network events as callbacks into WASM.
+   * Called before each wc_render().
+   */
+  _deliverNetEvents() {
+    const exports = this.instance.exports;
+
+    for (const [peerId, peer] of this._peers) {
+      while (peer.eventQueue.length > 0) {
+        const evt = peer.eventQueue.shift();
+        if (evt.type === 'connect' && exports.wc_peer_on_connect) {
+          const nameBytes = new TextEncoder().encode(String(peer.name ?? ''));
+          this._withTempWasmData(nameBytes, 'wc_peer_on_connect', (ptr, len) => {
+            exports.wc_peer_on_connect(peerId, ptr, len);
+          });
+        } else if (evt.type === 'message' && exports.wc_peer_on_message) {
+          const buf = evt.data instanceof ArrayBuffer ? new Uint8Array(evt.data)
+            : evt.data instanceof Uint8Array ? evt.data
+            : new Uint8Array(evt.data);
+          this._withTempWasmData(buf, 'wc_peer_on_message', (ptr, len) => {
+            exports.wc_peer_on_message(peerId, ptr, len);
+          });
+        } else if (evt.type === 'disconnect') {
+          peer.closed = true;
+          if (exports.wc_peer_on_disconnect) exports.wc_peer_on_disconnect(peerId);
+        } else if (evt.type === 'error' && exports.wc_peer_on_error) {
+          exports.wc_peer_on_error(peerId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Register a peer whose connection this host application manages (WebRTC data
+   * channel, LAN socket, serial link - the cart cannot tell which).
+   * @param {number} peerId - unique peer ID
+   * @param {string} name - display name; NOT a handle, NOT trusted
+   * @param {object} channel - object with send(), onmessage, onclose
+   * @param {number} [transport] - TRANSPORT_* bitmask, 0 if uncharacterized
+   */
+  addPeer(peerId, name, channel, transport = TRANSPORT_UNKNOWN) {
+    const peer = {
+      dc: channel,
+      // Borrowed: the embedder handed this over and still owns it. destroy()
+      // forgets it without closing, so a lobby socket or a data channel can
+      // outlive one cart instance -- which is what makes swapping carts on a
+      // live session free. Same ownership line the GL context already draws
+      // (_ownedGl vs _callerGl).
+      hostOwned: false,
+      name,
+      transport,
+      closed: false,
+      eventQueue: [{ type: 'connect' }],
+    };
+    channel.onmessage = (e) => {
+      peer.eventQueue.push({ type: 'message', data: e.data });
+    };
+    channel.onclose = () => {
+      peer.eventQueue.push({ type: 'disconnect' });
+    };
+    this._peers.set(peerId, peer);
+  }
+
+  /** Remove a host-managed peer. */
+  removePeer(peerId) {
+    const peer = this._peers.get(peerId);
+    if (peer) {
+      peer.eventQueue.push({ type: 'disconnect' });
+    }
+  }
+
+  // --- Pointer Input (ABI v3) ---
+
+  /**
+   * Update pointer state. Called by the host application.
+   * @param {number} id - pointer index (0=mouse, 1+=touch)
+   * @param {number} x - cart-space X
+   * @param {number} y - cart-space Y
+   * @param {number} buttons - button bitmask
+   * @param {boolean} active - whether pointer exists
+   */
+  setPointer(id, x, y, buttons, active) {
+    if (id < 0 || id >= MAX_POINTERS) return;
+    this._pointerState[id] = { x, y, buttons, active: active ? 1 : 0 };
+  }
+
+  /**
+   * Queue a pointer event. Called by the host application.
+   */
+  pointerDown(id, x, y, button) {
+    if (id < 0 || id >= MAX_POINTERS) return;
+    this._pointerState[id].active = 1;
+    this._pointerState[id].x = x;
+    this._pointerState[id].y = y;
+    this._pointerState[id].buttons |= (1 << button);
+    this._pointerEvents.push({ type: 'down', id, x, y, button });
+  }
+
+  pointerMove(id, x, y) {
+    if (id < 0 || id >= MAX_POINTERS) return;
+    this._pointerState[id].x = x;
+    this._pointerState[id].y = y;
+    this._pointerEvents.push({ type: 'move', id, x, y });
+  }
+
+  pointerUp(id, button) {
+    if (id < 0 || id >= MAX_POINTERS) return;
+    this._pointerState[id].buttons &= ~(1 << button);
+    if (this._pointerState[id].buttons === 0 && id > 0) {
+      // Touch: deactivate when all buttons released
+      this._pointerState[id].active = 0;
+    }
+    this._pointerEvents.push({ type: 'up', id, button });
+  }
+
+  // ── scroll wheel ──────────────────────────────────────────────────────
+  //
+  // ACCUMULATE NOW, DELIVER ONCE PER FRAME. Wheel events arrive in bursts
+  // (a trackpad flick is dozens of them) and a cart that read them live
+  // would see a different count depending on how long its frame took.
+  // Adding them up and handing over one delta per frame makes the input
+  // frame-rate independent, which is the same reason wc_time carries
+  // delta_ms rather than a tick count.
+  //
+  // `dy` is POSITIVE UP, matching every platform's "scroll away from you"
+  // and LOVE's wheelmoved. Hosts that receive the opposite convention
+  // (browsers: deltaY grows downward) flip it before calling this.
+  wheel(dx, dy) {
+    this._wheelAccum.dx += dx || 0;
+    this._wheelAccum.dy += dy || 0;
+  }
+
+  _writeWheelState() {
+    if (!this.info || !this.info.wheelPtr || !this.info.wantsPointer) return;
+    this._updateViews();
+    const base = this.info.wheelPtr;
+    this._i32[base >> 2] = this._wheelAccum.dx | 0;
+    this._i32[(base + 4) >> 2] = this._wheelAccum.dy | 0;
+  }
+
+  // Called after the frame: the delta belonged to THAT frame only. Without
+  // this the cart keeps zooming forever off one flick.
+  _clearWheelState() {
+    this._wheelAccum.dx = 0;
+    this._wheelAccum.dy = 0;
+  }
+
+  _writePointerState() {
+    if (!this.info || !this.info.pointerPtr || !this.info.wantsPointer) return;
+    // The cart's WC_FLAG_POINTER is the ground truth — a manifest field
+    // never gates a capability the cart already declares (the double-gate
+    // lesson that GL detection already learned).
+    if (!this.info?.wantsPointer) return;
+    this._updateViews();
+    const base = this.info.pointerPtr;
+    for (let i = 0; i < MAX_POINTERS; i++) {
+      const p = this._pointerState[i];
+      const off = base + i * POINTER_SIZE;
+      this._i16[off >> 1] = p.x;
+      this._i16[(off + 2) >> 1] = p.y;
+      this._u8[off + 4] = p.buttons;
+      this._u8[off + 5] = p.active;
+      this._u8[off + 6] = 0;
+      this._u8[off + 7] = 0;
+    }
+  }
+
+  _deliverPointerEvents() {
+    if (!this.info?.wantsPointer) return;
+    const exports = this.instance.exports;
+    while (this._pointerEvents.length > 0) {
+      const evt = this._pointerEvents.shift();
+      if (evt.type === 'down' && exports.wc_ptr_on_down) {
+        exports.wc_ptr_on_down(evt.id, evt.x, evt.y, evt.button);
+      } else if (evt.type === 'move' && exports.wc_ptr_on_move) {
+        exports.wc_ptr_on_move(evt.id, evt.x, evt.y);
+      } else if (evt.type === 'up' && exports.wc_ptr_on_up) {
+        exports.wc_ptr_on_up(evt.id, evt.button);
+      }
+    }
+  }
+
+  // --- Keyboard Input (ABI v3) ---
+
+  /**
+   * Queue a key down event. Called by the host application.
+   * @param {number} keycode - USB HID scancode
+   * @param {number} modifiers - modifier bitmask
+   */
+  keyDown(keycode, modifiers) {
+    if (keycode < 0 || keycode > 255) return;
+    this._keyState[keycode >> 3] |= (1 << (keycode & 7));
+    this._keyEvents.push({ type: 'down', keycode, modifiers: modifiers || 0 });
+  }
+
+  /**
+   * Queue a key up event. Called by the host application.
+   */
+  keyUp(keycode, modifiers) {
+    if (keycode < 0 || keycode > 255) return;
+    this._keyState[keycode >> 3] &= ~(1 << (keycode & 7));
+    this._keyEvents.push({ type: 'up', keycode, modifiers: modifiers || 0 });
+  }
+
+  /**
+   * Queue committed text. Called by the host application with whatever the
+   * platform produced (SDL textInput, a browser keypress/beforeinput, an IME
+   * commit). Already layout-processed -- the host never synthesizes this from
+   * scancodes, because that is exactly the job the OS does better.
+   */
+  textInput(text) {
+    // Ignored unless the cart asked for text. A cart that never calls
+    // wc_text_input_begin() cannot be surprised by text events, and a host
+    // that always forwards platform text costs nothing.
+    if (!this._textActive || typeof text !== 'string' || text.length === 0) return;
+    this._textEvents.push(text);
+  }
+
+  /** True while the cart has text input active -- hosts use this to decide
+   *  whether to also treat the keystroke as gameplay input, and (on mobile)
+   *  whether the on-screen keyboard should be up. */
+  get textInputActive() { return this._textActive; }
+
+  // --- Input actions (SPEC.md, "Input actions"; src/actions.js) ---
+  // The cart declares actions; the embedder owns how physical inputs reach
+  // them. A describer maps (player, IN.* input, device) to {label, glyph}
+  // (null: not on this device; undefined: unknown). Every setter bumps the
+  // revision the cart polls, so its prompts follow device switches and remaps.
+
+  /** @param {((player:number, input:number, device:number) => ({label:string, glyph?:number}|null|undefined))|null} fn */
+  setInputDescriber(fn) { this._inputOwned = true; this._actions.setDescriber(fn); }
+
+  /** The device a player is using now (DEVICE.*): call on the last-used change. */
+  setInputDevice(player, device) { this._inputOwned = true; this._actions.setDevice(player, device); }
+
+  /** Remap an action for a player: an IN.* id, null unbound, undefined default. */
+  setActionBinding(player, action, input) { this._actions.setBinding(player, action, input); }
+
+  /** The embedder's own key or pad mapping changed: carts re-read prompts. */
+  inputChanged() { this._actions.bump(); }
+
+  /** The cart's declared actions with the binding in effect, for remap/help UI. */
+  getActions(player = 0) { return this._actions.list(player); }
+
+  /** Current input revision (what wc_input_revision returns). */
+  get inputRevision() { return this._actions.revision; }
+
+  _deliverTextEvents() {
+    if (this._textEvents.length === 0) return;
+    const fn = this.instance?.exports?.wc_on_text;
+    // A cart can enable text input without exporting the handler (it may only
+    // want the mobile keyboard raised). Drop the queue rather than growing it.
+    if (typeof fn !== 'function') { this._textEvents.length = 0; return; }
+
+    while (this._textEvents.length > 0) {
+      const bytes = new TextEncoder().encode(this._textEvents.shift());
+      if (bytes.length === 0) continue;
+      // Same temp-memory contract as the WebSocket message path: the pointer
+      // is valid only for the duration of the call, so the cart must copy.
+      this._withTempWasmData(bytes, 'wc_on_text', (ptr, len) => {
+        try {
+          fn(ptr, len);
+        } catch (e) {
+          console.warn("wasmcart: cart's wc_on_text() threw:", e?.message ?? e);
+        }
+      });
+    }
+  }
+
+  _writeKeyState() {
+    if (!this.info || !this.info.keysPtr || !this.info.wantsKeyboard) return;
+    // WC_FLAG_KEYBOARD is the ground truth; see the pointer note above.
+    if (!this.info?.wantsKeyboard) return;
+    this._updateViews();
+    this._u8.set(this._keyState, this.info.keysPtr);
+  }
+
+  _deliverKeyEvents() {
+    if (!this.info?.wantsKeyboard) return;
+    const exports = this.instance.exports;
+    while (this._keyEvents.length > 0) {
+      const evt = this._keyEvents.shift();
+      if (evt.type === 'down' && exports.wc_kb_on_down) {
+        exports.wc_kb_on_down(evt.keycode, evt.modifiers);
+      } else if (evt.type === 'up' && exports.wc_kb_on_up) {
+        exports.wc_kb_on_up(evt.keycode, evt.modifiers);
+      }
+    }
+  }
+
+  _readInfo(ptr) {
+    const u32 = this._u32;
+    const base = ptr >> 2; // byte offset to u32 index
+
+    const info = {
+      version:    u32[base + 0],
+      width:      u32[base + 1],
+      height:     u32[base + 2],
+      fbPtr:      u32[base + 3],
+      audioPtr:   u32[base + 4],
+      audioCap:   u32[base + 5],
+      audioWritePtr: u32[base + 6], // pointer to cart's write cursor
+      inputPtr:   u32[base + 7],
+      savePtr:    u32[base + 8],
+      saveSize:   u32[base + 9],
+      timePtr:    u32[base + 10],
+      hostInfoPtr: 0,
+    };
+
+    // Read host_info_ptr if cart provides it (ABI v2+, field at offset 44)
+    // Validate: must be non-zero, 4-byte aligned, reasonable WASM address
+    if (info.version >= 2) {
+      const hip = u32[base + 11];
+      if (hip > 0 && hip < 0x10000000 && (hip & 3) === 0) {
+        info.hostInfoPtr = hip;
+      }
+    }
+
+    // Read flags (offset 48, u32 index 12) - 0 for old carts (WASM zero-init)
+    info.flags = u32[base + 12] || 0;
+    info.audioIsF32 = !!(info.flags & FLAG_AUDIO_F32);
+
+    // Read audio_sample_rate (offset 52, u32 index 13) - 0 = host decides
+    info.audioSampleRate = u32[base + 13] || 0;
+
+    // Read v3 fields (offset 56, 60)
+    info.pointerPtr = 0;
+    info.keysPtr = 0;
+    info.wheelPtr = 0;
+    if (info.version >= 3) {
+      const pp = u32[base + 14];
+      if (pp > 0 && pp < 0x10000000 && (pp & 1) === 0) {
+        info.pointerPtr = pp;
+      }
+      const kp = u32[base + 15];
+      if (kp > 0 && kp < 0x10000000) {
+        info.keysPtr = kp;
+      }
+      // v3.1: the wheel. Absent in every cart built before it existed,
+      // which is exactly why it is read defensively and defaults to 0 --
+      // an older cart has whatever was in memory at index 17, so the
+      // range check is what keeps this from writing into its heap.
+      const wp = u32[base + 17];
+      if (wp > 0 && wp < 0x10000000 && (wp & 3) === 0) {
+        info.wheelPtr = wp;
+      }
+    }
+    info.wantsPointer = !!(info.flags & FLAG_POINTER);
+    info.wantsKeyboard = !!(info.flags & FLAG_KEYBOARD);
+    // Networking is the one dual gate: the flag REQUESTS it, the manifest
+    // GRANTS it, and both are required. Reaching a remote machine is a
+    // permission the packager gives, not one the cart may assert.
+    info.wantsNet = !!(info.flags & FLAG_NET_PEER);
+
+    // Read gpu_api (offset 64, u32 index 16) - 0=2D, 1=WebGL2, 2=WebGPU, 3=Vulkan
+    info.gpuApi = u32[base + 16] || 0;
+
+    // Debug ABI (OPT-IN, ABI 3): a cart sets FLAG_DEBUG and exports wc_debug_state().
+    // We do NOT read the table here — it's pull-only (readDebugState on demand),
+    // so a debug cart pays nothing per frame and a non-debug cart is untouched.
+    info.hasDebug = !!(info.flags & FLAG_DEBUG);
+
+    // Deterministic replay (OPT-IN, ABI 3): the cart declares it honors
+    // deterministic mode (host-seeded RNG + wc_time-only timing).
+    info.hasDeterministic = !!(info.flags & FLAG_DETERMINISTIC);
+
+    // The cart's host-info struct has hardware_threads (offset 20): only then
+    // may the host write it (an older cart's struct ends at 20 bytes).
+    info.wantsHostThreads = !!(info.flags & FLAG_HOST_THREADS);
+
+    return info;
+  }
+
+  _writeHostInfo(hostInfoPtr, options) {
+    if (!hostInfoPtr) return;
+    const u32 = this._u32;
+    const base = hostInfoPtr >> 2;
+    // A manifest width/height is the cart author stating the size the cart
+    // wants, so pass it along as the host's preference when the caller has no
+    // opinion of its own. Without this a runtime that sizes itself from
+    // preferred_width -- Godot reads it to pick its viewport -- ignores the
+    // declaration entirely and falls back to its own default. An explicit
+    // preferredWidth from the caller still wins: that is the host asking.
+    const m = this._manifest || {};
+    u32[base + 0] = options.preferredWidth || m.width || 0;
+    u32[base + 1] = options.preferredHeight || m.height || 0;
+    u32[base + 2] = 0; // reserved (was hostFps - unused, carts use delta_ms)
+    u32[base + 3] = options.audioSampleRate || 48000;
+    u32[base + 4] = options.flags || 0;
+    // the machine's hardware threads, for a cart that sizes a thread pool
+    if (this.info.wantsHostThreads) u32[base + 5] = availableParallelism();
+  }
+
+  _writeTime(timeMs, deltaMs, frame) {
+    const ptr = this.info.timePtr;
+    // f64 at byte offset requires 8-byte alignment
+    const f64Base = ptr >> 3;
+    this._f64[f64Base + 0] = timeMs;
+    this._f64[f64Base + 1] = deltaMs;
+    // u32 frame at byte offset ptr + 16
+    this._u32[(ptr + 16) >> 2] = frame;
+  }
+
+  /**
+   * Adopt a cart-requested resolution, but only if the cart's framebuffer
+   * actually backs it.
+   *
+   * The cart writes width/height into its own memory, so the numbers are
+   * untrusted input: they may be larger than the buffer at fb_ptr, or large
+   * enough to overflow when multiplied. Taking them on faith is worse than it
+   * looks -- subarray() silently CLAMPS to the end of memory, so the host would
+   * report e.g. 4096x4096 while handing back a quarter of the pixels, and any
+   * consumer indexing by the reported width reads far past the real data.
+   *
+   * So the reported size and the returned bytes must agree by construction:
+   * either the memory backs the new size and we take it, or we keep the old
+   * one. Rejecting is the safe direction -- the cart keeps rendering at a size
+   * that works rather than the host describing a frame that does not exist.
+   */
+  _applyResize(newW, newH) {
+    // Multiply in floats first: w*h*4 can exceed 2^32 and wrap in int math,
+    // which would turn an absurd size into a small, plausible-looking one.
+    const needed = newW * newH * 4;
+    const available = this._u8.length - this.info.fbPtr;
+    if (!Number.isFinite(needed) || needed > available) {
+      if (!this._resizeRejected) {
+        // Warn once: a cart doing this every frame must not flood the log.
+        this._resizeRejected = true;
+        console.warn(
+          `wasmcart: cart requested ${newW}x${newH} (${needed} bytes) but its ` +
+          `framebuffer only has ${available} bytes at fb_ptr; keeping ` +
+          `${this.info.width}x${this.info.height}. The cart must grow its ` +
+          `framebuffer before changing resolution.`
+        );
+      }
+      return false;
+    }
+    this.info.width = newW;
+    this.info.height = newH;
+    return true;
+  }
+
+  /**
+   * Suspend the cart: the host is about to stop driving frames (tab hidden,
+   * window minimized, handheld sleep).
+   *
+   * The host owns this, not the cart. Once suspended, runFrame() is a no-op --
+   * a cart that never implements a single lifecycle export still behaves
+   * correctly, because it simply is not running. That is the whole point: the
+   * naive cart must not be breakable by a suspend it never handled.
+   *
+   * This is also the moment to persist: a save that only survives a graceful
+   * quit is no use when the OS kills a backgrounded app.
+   *
+   * Idempotent -- hosts get duplicate visibility events all the time.
+   */
+  suspend() {
+    if (this._suspended) return false;
+    this._suspended = true;
+    // A suspended cart is not the focused one either. Emit focus loss first so
+    // a cart handling only focus still pauses, and so the pair stays ordered.
+    if (this._focused) this.blur();
+    this._callLifecycle('wc_on_suspend');
+    return true;
+  }
+
+  /**
+   * Resume: the host is about to start driving frames again.
+   *
+   * Crucially this rebases the clock. `delta_ms` is `now - lastFrameTime`, so
+   * without this the first resumed frame reports the entire suspended gap --
+   * ten minutes in a background tab becomes a 600000ms delta, and any cart
+   * integrating velocity by dt teleports through the world. The gap is not
+   * elapsed GAME time; nothing ran during it.
+   */
+  resume() {
+    if (!this._suspended) return false;
+    this._suspended = false;
+    // Rebase before notifying, so a cart that inspects wc_time_t inside
+    // wc_on_resume sees the corrected clock rather than the spike.
+    this._rebaseClock();
+    this._callLifecycle('wc_on_resume');
+    // suspend() implies focus loss, so resume() must restore it -- otherwise a
+    // cart is left permanently unfocused after a suspend/resume round trip,
+    // having seen wc_on_focus_lost with no matching gained. A host that knows
+    // it resumed WITHOUT focus (restored to a background window) calls blur()
+    // straight after; that is the rarer case and it can say so explicitly.
+    this.focus();
+    return true;
+  }
+
+  /** The cart is running but is no longer the active window (alt-tab). */
+  blur() {
+    if (!this._focused) return false;
+    this._focused = false;
+    this._callLifecycle('wc_on_focus_lost');
+    return true;
+  }
+
+  /** The cart is the active window again. */
+  focus() {
+    if (this._focused) return false;
+    this._focused = true;
+    this._callLifecycle('wc_on_focus_gained');
+    return true;
+  }
+
+  /** True while the host has stopped driving frames. */
+  get suspended() { return this._suspended; }
+
+  /** True while the cart is the active window. */
+  get focused() { return this._focused; }
+
+  /**
+   * Discount elapsed wall-clock that the cart did not run through, so the next
+   * frame reports a normal delta instead of the whole gap.
+   */
+  _rebaseClock() {
+    if (this._fixedStepMs > 0) return; // deterministic clock has no wall-clock gap
+    const now = performance.now();
+    const gap = now - this.lastFrameTime;
+    if (gap > 0) {
+      // Shift startTime by the same amount so time_ms stays continuous: it is
+      // "time the cart has been running", and it did not run during the gap.
+      this.startTime += gap;
+      this.lastFrameTime = now;
+    }
+  }
+
+  /**
+   * Call an optional lifecycle export. All are optional, matching every other
+   * cart-side callback in the ABI, and a throwing cart must not take the host
+   * down mid-transition.
+   */
+  _callLifecycle(name) {
+    const fn = this.instance?.exports?.[name];
+    if (typeof fn !== 'function') return;
+    try {
+      fn();
+    } catch (e) {
+      console.warn(`wasmcart: cart's ${name}() threw:`, e?.message ?? e);
+    }
+  }
+
+  _writePads(pads) {
+    const basePtr = this.info.inputPtr;
+    this._lastPads = pads;
+
+    for (let i = 0; i < MAX_PADS; i++) {
+      const pad = pads[i];
+      const offset = basePtr + (i * PAD_SIZE);
+
+      // Capture pad name (if provided by caller)
+      const padName = (pad && pad.name) ? pad.name : '';
+      if (padName !== this._padNames[i]) this._actions.bump(); // a different device: prompts may change
+      this._padNames[i] = padName;
+
+      if (!pad || !pad.connected) {
+        // Zero the pad
+        this._u8.fill(0, offset, offset + PAD_SIZE);
+        continue;
+      }
+
+      // u32 as of ABI v4: 21 button bits, so the paddles and touchpad fit.
+      this._u32[offset >> 2] = pad.buttons >>> 0 || 0;
+      this._i16[(offset + 4) >> 1] = pad.leftX || 0;
+      this._i16[(offset + 6) >> 1] = pad.leftY || 0;
+      this._i16[(offset + 8) >> 1] = pad.rightX || 0;
+      this._i16[(offset + 10) >> 1] = pad.rightY || 0;
+      // int16 as of ABI v4, 0..32767. Clamped rather than truncated: a caller
+      // handing over a stick-scaled value used to silently wrap the old byte.
+      this._i16[(offset + 12) >> 1] = clampTrigger(pad.leftTrigger);
+      this._i16[(offset + 14) >> 1] = clampTrigger(pad.rightTrigger);
+      this._u8[offset + 16] = 1; // connected
+      this._u8[offset + 17] = 0; // padding
+      this._u8[offset + 18] = 0;
+      this._u8[offset + 19] = 0;
+    }
+  }
+
+  _padName(padId, bufPtr, bufLen) {
+    if (padId >= MAX_PADS || !bufLen) return 0;
+    const name = this._padNames[padId] || '';
+    if (!name.length) return 0;
+    this._updateViews();
+    const encoded = new TextEncoder().encode(name);
+    const len = Math.min(encoded.length, bufLen);
+    this._u8.set(encoded.subarray(0, len), bufPtr);
+    return len;
+  }
+
+  // --- Rumble ---
+  // Rumble runs the opposite way to the rest of input: the cart drives it, so
+  // it is an import rather than a field in the shared pad struct. The host
+  // supplies the actual device via setRumbleHandler(); with no handler wired
+  // (headless runs, --frames captures, tests) every call is a silent no-op and
+  // wc_pad_has_rumble reports 0, which is the honest answer.
+  //
+  // Capability is per-DEVICE, not per-platform: an X360 pad reports rumble but
+  // not trigger rumble, so a cart has to be able to ask rather than assume.
+  setRumbleHandler(handler) {
+    this._rumbleHandler = handler || null;
+  }
+
+  _padHasRumble(padId) {
+    if (padId >= MAX_PADS || !this._rumbleHandler) return 0;
+    try {
+      return this._rumbleHandler.hasRumble(padId) ? 1 : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  _padRumble(padId, low, high, durationMs) {
+    if (padId >= MAX_PADS || !this._rumbleHandler) return;
+    // Clamp rather than reject: a cart computing intensity from game state
+    // (distance, damage) will overshoot at the edges, and a dropped rumble is
+    // harder to notice than a saturated one. NaN clamps to 0.
+    const lo = clamp01(low);
+    const hi = clamp01(high);
+    // Cap duration so a cart cannot pin the motors indefinitely. SDL stops on
+    // its own timer, so even a cart that crashes mid-effect leaves a pad that
+    // goes quiet.
+    const dur = Math.min(Math.max(durationMs | 0, 0), MAX_RUMBLE_MS);
+    if (dur === 0) return;
+    try {
+      this._rumbleHandler.rumble(padId, lo, hi, dur);
+    } catch { /* a pad unplugged mid-effect must not fault the cart */ }
+  }
+
+  _padRumbleStop(padId) {
+    if (padId >= MAX_PADS || !this._rumbleHandler) return;
+    try {
+      this._rumbleHandler.stopRumble(padId);
+    } catch { /* as above */ }
+  }
+
+  _drainAudio() {
+    if (!this.info.audioPtr || this.info.audioCap === 0) return null;
+
+    // Read cart's write cursor
+    const writeCursor = this._u32[this.info.audioWritePtr >> 2];
+    const readCursor = this.audioReadCursor;
+
+    if (writeCursor === readCursor) return null; // nothing to drain
+
+    const cap = this.info.audioCap;
+    const audioBase = this.info.audioPtr;
+
+    // Calculate how many stereo frames to read
+    let available;
+    if (writeCursor >= readCursor) {
+      available = writeCursor - readCursor;
+    } else {
+      // Wrapped around
+      available = cap - readCursor + writeCursor;
+    }
+
+    if (available === 0) return null;
+
+    const needed = available * 2; // 2 samples per stereo frame
+
+    if (this.info.audioIsF32) {
+      // Float32 audio path
+      if (!this._audioBufF32 || this._audioBufF32.length < needed) {
+        this._audioBufF32 = new Float32Array(needed);
+      }
+      const samples = this._audioBufF32;
+      const ringF32Base = audioBase >> 2; // byte offset to f32 index
+
+      for (let i = 0; i < available; i++) {
+        const ringIdx = ((readCursor + i) % cap) * 2;
+        samples[i * 2] = this._f32[ringF32Base + ringIdx];
+        samples[i * 2 + 1] = this._f32[ringF32Base + ringIdx + 1];
+      }
+
+      this.audioReadCursor = writeCursor;
+      return samples.subarray(0, needed);
+    }
+
+    // Int16 audio path (default)
+    if (!this._audioBuf || this._audioBuf.length < needed) {
+      this._audioBuf = new Int16Array(needed);
+    }
+    const samples = this._audioBuf;
+    const ringI16Base = audioBase >> 1;
+
+    for (let i = 0; i < available; i++) {
+      const ringIdx = ((readCursor + i) % cap) * 2;
+      samples[i * 2] = this._i16[ringI16Base + ringIdx];
+      samples[i * 2 + 1] = this._i16[ringI16Base + ringIdx + 1];
+    }
+
+    this.audioReadCursor = writeCursor;
+
+    return samples.subarray(0, needed);
+  }
+}

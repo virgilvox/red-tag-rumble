@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#15120f">
+<title>RED TAG RUMBLE</title>
+<link rel="icon" href="hsl-mark-reverse.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@500;600;700&display=swap">
+<script type="importmap">
+{ "imports": { "fflate": "./vendor/fflate/browser.js" } }
+</script>
+<style>
+  :root {
+    --char: #15120f; --grime: #1d1915; --slab: #26211b; --steel: #3a342b; --steel-hi: #4a4338;
+    --bone: #ece3d3; --ash: #a79d8c; --smoke: #756c5e; --hazard: #f2ab1e; --rust: #c2542c; --live: #5fb892; --tape: #14110d;
+    --shadow: #0a0806;
+    --display: 'Archivo Black', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--char); color: var(--bone); font-family: var(--mono); }
+  .tape { height: 18px; background: repeating-linear-gradient(-45deg, var(--hazard) 0 18px, var(--tape) 18px 36px); border-bottom: 2px solid var(--tape); }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 16px; max-width: 1360px; margin: 0 auto; }
+  header img { width: 48px; height: 48px; }
+  header h1 { font: 400 32px/1 var(--display); margin: 0; letter-spacing: -0.01em; }
+  header h1 span { color: var(--hazard); }
+  .eyebrow { font: 600 11px/1 var(--mono); letter-spacing: 0.22em; text-transform: uppercase; color: var(--ash); }
+  header .grow { flex: 1; }
+  button { font: 700 13px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; padding: 12px 16px; border: 2px solid var(--tape); background: var(--hazard); color: var(--tape); box-shadow: 4px 4px 0 var(--shadow); cursor: pointer; }
+  button.ghost { background: var(--slab); color: var(--bone); border-color: var(--steel-hi); }
+  button:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--shadow); }
+  main { max-width: 1360px; margin: 0 auto; padding: 0 16px 32px; display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; }
+  .stage { position: relative; background: #000; border: 2px solid var(--steel-hi); box-shadow: 6px 6px 0 var(--shadow); aspect-ratio: 16 / 9; }
+  canvas { display: block; width: 100%; height: 100%; image-rendering: auto; }
+  #gate { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: rgba(21, 18, 15, 0.92); text-align: center; padding: 16px; }
+  #gate img { width: 120px; }
+  #gate h2 { font: 400 clamp(36px, 7vw, 84px)/0.9 var(--display); margin: 0; }
+  #gate h2 span { color: var(--hazard); display: block; }
+  #gate p { color: var(--ash); margin: 0; max-width: 46ch; line-height: 1.6; }
+  #gate .start { font-size: 18px; padding: 16px 28px; }
+  #status { margin-top: 10px; font-size: 12px; color: var(--smoke); min-height: 1.4em; }
+  aside { display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--slab); border: 2px solid var(--steel-hi); box-shadow: 6px 6px 0 var(--shadow); padding: 16px; }
+  .card h3 { font: 400 18px/1.1 var(--display); margin: 8px 0 10px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: 13px; }
+  dt { color: var(--hazard); font-weight: 700; }
+  dd { margin: 0; color: var(--bone); }
+  .fine { font-size: 12px; line-height: 1.6; color: var(--ash); margin: 0; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="tape"></div>
+<header>
+  <img src="hsl-mark-reverse.svg" alt="HeatSync Labs">
+  <div>
+    <div class="eyebrow">HeatSync Labs arcade cart</div>
+    <h1>RED TAG <span>RUMBLE</span></h1>
+  </div>
+  <div class="grow"></div>
+  <button class="ghost" id="fs">Fullscreen</button>
+</header>
+<main>
+  <div>
+    <div class="stage" id="stage">
+      <canvas id="screen" width="1280" height="720"></canvas>
+      <div id="gate">
+        <img src="hsl-mark-reverse.svg" alt="">
+        <h2>RED TAG <span>RUMBLE</span></h2>
+        <p>Fourteen days on the shelf, then it is free or it is trash. Build a bot from other people's abandoned projects and drive it into another one. One to four gamepads, split screen.</p>
+        <button class="start" id="start">Clock in</button>
+      </div>
+    </div>
+    <div id="status"></div>
+  </div>
+  <aside>
+    <div class="card">
+      <div class="eyebrow">Controls</div>
+      <h3>Pads and keys</h3>
+      <dl>
+        <dt>Pads</dt><dd>Plug in up to four. Left stick drives, A or the right trigger is the weapon, B brakes or rights you, X taunts, L boosts, Start pauses.</dd>
+        <dt>Keyboard</dt><dd>Pad 1. Arrows drive, Z weapon, X brake, A taunt, S controls card, Q boost, Enter start.</dd>
+        <dt>Garage</dt><dd>Up and down pick a row, left and right cycle a part, A locks, Start cycles presets, X rolls a random bot.</dd>
+      </dl>
+    </div>
+    <div class="card">
+      <div class="eyebrow">The rules</div>
+      <h3>Twenty tags</h3>
+      <p class="fine">Every part on the shelf is red tagged. Spend twenty tags on a chassis, a drive, a weapon and armour. Hit the side, not the front. Under 30 HP you hit harder for eight seconds. Dropped panels are HP for anyone who drives over them. If nobody hits anyone for twelve seconds, Operations clears the aisle.</p>
+    </div>
+    <p class="fine">A wasmcart cart: three.c for the 3D, Bellows for the sound. The same .wasc runs here, in RetroArch, and on the shop's game station.</p>
+  </aside>
+</main>
+
+<script type="module">
+import { CartHostWeb } from './vendor/wasmcart/web.js';
+
+const $ = (id) => document.getElementById(id);
+const status = (t) => ($('status').textContent = t);
+const canvas = $('screen');
+
+/* wc_pad_t button bits (wasmcart.h) */
+const BTN = { A: 1, B: 2, X: 4, Y: 8, L: 16, R: 32, START: 64, SELECT: 128, UP: 256, DOWN: 512, LEFT: 1024, RIGHT: 2048, L3: 4096, R3: 8192 };
+/* the keyboard is pad 1 on every host, with RetroArch's default binds */
+const KEYS = { ArrowUp: BTN.UP, ArrowDown: BTN.DOWN, ArrowLeft: BTN.LEFT, ArrowRight: BTN.RIGHT,
+  KeyZ: BTN.A, KeyX: BTN.B, KeyA: BTN.X, KeyS: BTN.Y, Enter: BTN.START, ShiftRight: BTN.SELECT, KeyQ: BTN.L, KeyW: BTN.R };
+let keyBits = 0;
+
+let host = null, audio = null, nextTime = 0;
+const axis = (v) => Math.round((v || 0) * 32767);
+const trig = (b) => b ? Math.round(Math.max(0, Math.min(1, b.value)) * 32767) : 0;
+
+function pads() {
+  const out = [];
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (let i = 0; i < 4; i++) {
+    const g = gps[i];
+    if (!g || !g.connected) { out.push(null); continue; }
+    const b = (k) => g.buttons[k] && g.buttons[k].pressed;
+    let bits = 0;
+    if (b(0)) bits |= BTN.A; if (b(1)) bits |= BTN.B; if (b(2)) bits |= BTN.X; if (b(3)) bits |= BTN.Y;
+    if (b(4)) bits |= BTN.L; if (b(5)) bits |= BTN.R; if (b(9)) bits |= BTN.START; if (b(8)) bits |= BTN.SELECT;
+    if (b(10)) bits |= BTN.L3; if (b(11)) bits |= BTN.R3;
+    if (b(12)) bits |= BTN.UP; if (b(13)) bits |= BTN.DOWN; if (b(14)) bits |= BTN.LEFT; if (b(15)) bits |= BTN.RIGHT;
+    out.push({ connected: true, buttons: bits, leftX: axis(g.axes[0]), leftY: axis(g.axes[1]), rightX: axis(g.axes[2]), rightY: axis(g.axes[3]),
+      leftTrigger: trig(g.buttons[6]), rightTrigger: trig(g.buttons[7]), name: g.id });
+  }
+  const res = out.map((p) => p || { connected: false, buttons: 0, leftX: 0, leftY: 0, rightX: 0, rightY: 0, leftTrigger: 0, rightTrigger: 0 });
+  res[0].buttons |= keyBits;
+  if (keyBits) res[0].connected = true;
+  return res;
+}
+
+function playAudio(samples) {
+  if (!audio || !samples || !samples.length) return;
+  const frames = samples.length / 2;
+  const buf = audio.createBuffer(2, frames, audio.sampleRate);
+  const l = buf.getChannelData(0), r = buf.getChannelData(1);
+  for (let i = 0; i < frames; i++) { l[i] = samples[i * 2]; r[i] = samples[i * 2 + 1]; }
+  const src = audio.createBufferSource();
+  src.buffer = buf;
+  src.connect(audio.destination);
+  const now = audio.currentTime;
+  if (nextTime < now + 0.02 || nextTime > now + 0.25) nextTime = now + 0.05;
+  src.start(nextTime);
+  nextTime += buf.duration;
+}
+
+async function start() {
+  $('start').disabled = true;
+  status('Loading the cart...');
+  try {
+    audio = new AudioContext({ sampleRate: 48000 });
+    await audio.resume();
+  } catch { audio = null; }
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, premultipliedAlpha: false });
+  if (!gl) { status('This browser has no WebGL2.'); return; }
+  host = new CartHostWeb();
+  try {
+    await host.load('red-tag-rumble.wasc', { glBackend: gl, audioSampleRate: audio ? audio.sampleRate : 48000 });
+  } catch (e) {
+    status('The cart did not load: ' + (e && e.message ? e.message : e));
+    $('start').disabled = false;
+    return;
+  }
+  host.autoWireLifecycle?.(window);
+  $('gate').style.display = 'none';
+  status('Running. Keyboard is pad 1: arrows, Z, X, A, S, Enter. Pads: press A to take a seat.');
+  canvas.focus?.();
+  const frame = async () => {
+    try {
+      const f = await host.runFrame(pads());
+      if (f && f.audio) playAudio(f.audio);
+    } catch (e) {
+      status('The cart stopped: ' + (e && e.message ? e.message : e));
+      return;
+    }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+$('start').addEventListener('click', start);
+$('fs').addEventListener('click', () => $('stage').requestFullscreen?.());
+
+window.addEventListener('keydown', (e) => {
+  if (!host) return;
+  const b = KEYS[e.code];
+  if (b) { e.preventDefault(); keyBits |= b; }
+});
+window.addEventListener('keyup', (e) => {
+  const b = KEYS[e.code];
+  if (b) keyBits &= ~b;
+});
+/* a key held while the tab loses focus would stay down forever */
+window.addEventListener('blur', () => { keyBits = 0; });
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+build/
+build*/
+_wt
+node_modules/
+.DS_Store
+*.log

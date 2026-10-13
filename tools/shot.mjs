@@ -1,0 +1,109 @@
+// Headless test rig: runs the cart in wasmcart's Node host on webgl-node
+// (the same native GL path the game station uses), with scripted input, and
+// writes PNG screenshots of chosen frames.
+//
+//   node tools/shot.mjs build/red-tag-rumble.wasc out/prefix 60,300 [script.json]
+//   STATION=1 node tools/shot.mjs ...    # only pad 0 reports connected, as the RetroArch core does
+//   WAV=build/out.wav node tools/shot.mjs ...   # also writes the audio the cart played
+//   PACE=1 node tools/shot.mjs ...       # real time, non-deterministic
+//
+// script.json entries, frame ranges inclusive:
+//   { "from": 0, "to": 30, "pad": 0, "buttons": ["A"], "lx": 0, "ly": -32767, "rx": 0, "ry": 0, "lt": 0, "rt": 32767 }
+// sticks are -32767..32767 (y positive is down), triggers 0..32767.
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const WASMCART = join(ROOT, 'third_party', 'wasmcart');
+const { CartHost } = await import(pathToFileURL(join(WASMCART, 'src', 'CartHost.js')));
+const { createWebGL2Context } = await import(pathToFileURL(join(WASMCART, 'node_modules', 'webgl-node', 'index.mjs')));
+import { deflateSync, crc32 } from 'node:zlib';
+
+function encodePng(rgba, w, h) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td) >>> 0);
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
+  const raw = Buffer.alloc((w * 4 + 1) * h);
+  for (let y = 0; y < h; y++) Buffer.from(rgba.buffer, rgba.byteOffset + y * w * 4, w * 4).copy(raw, y * (w * 4 + 1) + 1);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+const [cart, prefix, framesArg, scriptPath] = process.argv.slice(2);
+if (!cart || !prefix || !framesArg) {
+  console.error('usage: node tools/shot.mjs <cart.wasc> <out/prefix> <frame,frame,...> [script.json]');
+  process.exit(2);
+}
+const shots = new Set(framesArg.split(',').map(Number));
+const last = Math.max(...shots);
+const script = scriptPath ? JSON.parse(readFileSync(scriptPath, 'utf8')) : [];
+// wc_pad_t button bits (wasmcart.h)
+const BTN = { A: 1, B: 2, X: 4, Y: 8, L: 16, R: 32, START: 64, SELECT: 128,
+              UP: 256, DOWN: 512, LEFT: 1024, RIGHT: 2048, L3: 4096, R3: 8192 };
+for (const s of script) for (const b of s.buttons ?? []) if (!(b in BTN)) { console.error(`unknown button ${b} in ${scriptPath}`); process.exit(2); }
+
+const W = 1280, H = 720;
+const { gl } = createWebGL2Context(W, H);
+const host = new CartHost();
+await host.load(new Uint8Array(readFileSync(cart)), { glBackend: gl, ...(process.env.PACE ? {} : { deterministic: { seed: 7 } }) });
+
+// STATION=1 reports only pad 0 connected, which is what the RetroArch core does
+// (libretro.c writes every pad's buttons and sticks but sets connected only on
+// port 0). CartHost zeroes a pad whose JS object says connected: false, so the
+// rig passes every pad as connected and clears the connected byte of pads 1 to
+// 3 in cart memory after the host writes them. A cart must seat players on
+// button edges, never on this flag.
+const station = !!process.env.STATION;
+if (station) {
+  const PAD_SIZE = 20, CONNECTED = 16;
+  const orig = host._writePads.bind(host);
+  host._writePads = (p) => { orig(p); const base = host.info.inputPtr; for (let i = 1; i < 4; i++) host._u8[base + i * PAD_SIZE + CONNECTED] = 0; };
+}
+const audioChunks = [];
+for (let f = 0; f <= last; f++) {
+  const pads = [0, 1, 2, 3].map(() => ({ connected: true, buttons: 0,
+    leftX: 0, leftY: 0, rightX: 0, rightY: 0, leftTrigger: 0, rightTrigger: 0 }));
+  for (const s of script) {
+    if (f < s.from || f > s.to) continue;
+    const p = pads[s.pad ?? 0];
+    for (const b of s.buttons ?? []) p.buttons |= BTN[b];
+    if (s.lx !== undefined) p.leftX = s.lx;
+    if (s.ly !== undefined) p.leftY = s.ly;
+    if (s.rx !== undefined) p.rightX = s.rx;
+    if (s.ry !== undefined) p.rightY = s.ry;
+    if (s.lt !== undefined) p.leftTrigger = s.lt;
+    if (s.rt !== undefined) p.rightTrigger = s.rt;
+  }
+  const fr = host.runFrame(pads);
+  if (process.env.WAV && fr?.audio) audioChunks.push(Float32Array.from(fr.audio));
+  // let the event loop breathe; PACE=1 runs in real time
+  await new Promise((r) => (process.env.PACE ? setTimeout(r, 16) : setImmediate(r)));
+  if (shots.has(f)) {
+    const px = new Uint8Array(W * H * 4);
+    host.withRenderedFrame(() => gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px));
+    // GL rows are bottom-up
+    const flipped = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) flipped.set(px.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);
+    for (let i = 3; i < flipped.length; i += 4) flipped[i] = 255;
+    writeFileSync(`${prefix}-${f}.png`, encodePng(flipped, W, H));
+    console.log(`shot ${prefix}-${f}.png`);
+  }
+}
+if (process.env.WAV) {
+  // 16-bit stereo 48 kHz WAV of everything the cart played
+  const n = audioChunks.reduce((a, c) => a + c.length, 0);
+  const buf = Buffer.alloc(44 + n * 2);
+  buf.write('RIFF', 0); buf.writeUInt32LE(36 + n * 2, 4); buf.write('WAVEfmt ', 8);
+  buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(2, 22); buf.writeUInt32LE(48000, 24);
+  buf.writeUInt32LE(48000 * 4, 28); buf.writeUInt16LE(4, 32); buf.writeUInt16LE(16, 34); buf.write('data', 36); buf.writeUInt32LE(n * 2, 40);
+  let o = 44;
+  for (const c of audioChunks) for (const v of c) { buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v * 32767))), o); o += 2; }
+  writeFileSync(process.env.WAV, buf);
+  console.log(`wav ${process.env.WAV}`);
+}
+process.exit(0);
