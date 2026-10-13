@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── draw side state ─────────────────────────────────────────────── */
+/* -- draw side state  -- */
 static float title_cursor_y = -1;
 static float lobby_lift[MODE_COUNT];
 static float lobby_empty_t, lobby_auto_t;
@@ -37,7 +37,7 @@ static const arena_def_t *VOTE_ARENAS = ARENAS;   /* the vote screen's arena tab
 static float flash_wipe;                /* 0..1 wipe between rules cards */
 static int   flash_last_step = -1;
 
-/* ── small helpers ───────────────────────────────────────────────── */
+/* -- small helpers  -- */
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 /* the y that centres a font's line box in a box */
@@ -140,7 +140,7 @@ static void marquee(void) {
   hud_text_sh(F_H1, 248, 156, S_TITLE_2, C_HAZARD, 255, AL_LEFT);
 }
 
-/* ── boot (10.1) ─────────────────────────────────────────────────── */
+/* -- boot (10.1)  -- */
 void boot_screen(float frac) {
   hud_rect(0, 0, 1280, 720, C_CHAR, 255);
   hud_tape(0, 0, 1280, 24, G.tape_phase);
@@ -156,7 +156,7 @@ void boot_screen(float frac) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── title and attract (10.7) ────────────────────────────────────── */
+/* -- title and attract (10.7)  -- */
 void attract_overlay(void) {
   if (!G.attract || M.nbots < 2) return;
   const int bx[2] = { 496, 1064 };
@@ -206,7 +206,7 @@ void title_screen(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── lobby (10.8) ────────────────────────────────────────────────── */
+/* -- lobby (10.8)  -- */
 static const int MODE_GLYPH[MODE_COUNT] = { GL_SPINNER, GL_FLIPPER, GL_SKULL, GL_CROWN, GL_TWO_BOTS, GL_BRACKET };
 static const int MODE_MIN[MODE_COUNT] = { 1, 2, 3, 2, 4, 3 };
 static const int MODE_MAX[MODE_COUNT] = { 4, 4, 4, 4, 4, 4 };
@@ -336,7 +336,7 @@ void lobby_screen(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── garage (10.9 to 10.11) ──────────────────────────────────────── */
+/* -- garage (10.9 to 10.11)  -- */
 void garage_hole(int compact, const rect_t *panel, rect_t *out) {
   if (compact) *out = (rect_t){ panel->x + 16, panel->y + 32, 300, 230 };
   else *out = (rect_t){ panel->x + 16, panel->y + 100, 608, 230 };
@@ -698,7 +698,7 @@ void bracket_card(const rect_t *r) {
   hud_dirty(x, y, r->w, r->h);
 }
 
-/* ── arena vote (10.12) ──────────────────────────────────────────── */
+/* -- arena vote (10.12)  -- */
 /* paint one arena's floor thumbnail from its arena_def_t with hud primitives:
  * the floor by style, the tile list, hazards, props, the OPS zone, open edges and spawns */
 static void thumb_paint(const arena_def_t *a, int tx, int ty, int tw, int th) {
@@ -868,7 +868,7 @@ void vote_screen(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── countdown (10.13) ───────────────────────────────────────────── */
+/* -- countdown (10.13)  -- */
 void countdown_overlay(const rect_t *vp, int n, float t) {
   int cx = vp->x + vp->w / 2, cy = vp->y + vp->h / 2;
   if (n > 0) {
@@ -909,7 +909,7 @@ void countdown_screen(float dt) {
   for (int i = 0; i < n; i++) countdown_overlay(&vp[i], G.countdown_n, t);
 }
 
-/* ── settings (10.22) ────────────────────────────────────────────── */
+/* -- settings (10.22)  -- */
 /* the row's value string from the save; STICKS lists one stepper per seated pad */
 static const char *setting_value(int row, char *buf, int n, int *idx, int *max) {
   *idx = 0; *max = 0;
@@ -977,7 +977,7 @@ void settings_screen(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── hall of fame (10.23) ────────────────────────────────────────── */
+/* -- hall of fame (10.23)  -- */
 void hall_screen(float dt) {
   (void)dt;
   hud_tape(0, 0, 1280, 24, G.tape_phase);
@@ -1048,7 +1048,7 @@ void hall_screen(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── controls card (10.24) ───────────────────────────────────────── */
+/* -- controls card (10.24)  -- */
 static void callout(int x, int y, int k, int compact) {
   int w = compact ? 112 : 120, h = compact ? 40 : 44;
   hud_rect(x + 4, y + 4, w, h, C_SHADOW, 255);
@@ -1125,7 +1125,7 @@ void controls_card(const rect_t *r, int compact, int seat) {
   hud_dirty(x, y, w + 6, h + 6);
 }
 
-/* ── rules flash (10.25) ─────────────────────────────────────────── */
+/* -- rules flash (10.25)  -- */
 static void keycap_press(int x, int y, const char *k, int pressed) {
   if (pressed) hud_keycap(x, y + 2, k, C_HAZARD, C_TAPE);
   else hud_keycap(x, y, k, C_BONE, C_TAPE);
@@ -1305,7 +1305,7 @@ void flash_card(int step, float t) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── pause (10.26) ───────────────────────────────────────────────── */
+/* -- pause (10.26)  -- */
 void pause_screen(void) { pause_screen_dt(1.0f / 60); }
 
 void pause_screen_dt(float dt) {
@@ -1324,7 +1324,7 @@ void pause_screen_dt(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* ── the dispatcher ──────────────────────────────────────────────── */
+/* -- the dispatcher  -- */
 int menus_draw(float dt) {
   int drew = 1;
   switch (G.phase) {
@@ -1343,7 +1343,7 @@ int menus_draw(float dt) {
   return drew;
 }
 
-/* ── the fake menu state (RTR_FAKE_MENUS) ────────────────────────── */
+/* -- the fake menu state (RTR_FAKE_MENUS)  -- */
 #ifdef RTR_FAKE_MENUS
 /* the six arenas with the 6.4 tile lists and the hazards of the 6.3 maps, so the
  * thumbnail painter can be looked at before the arena agent fills arena.c */

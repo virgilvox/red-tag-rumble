@@ -44,7 +44,7 @@ int wc_load_asset(const char *path, unsigned len, void *dest, unsigned max) {
   return (int)n;
 }
 
-/* ── a stored-deflate PNG writer ─────────────────────────────────── */
+/* -- a stored-deflate PNG writer  -- */
 static uint32_t crc_table[256];
 static void crc_init(void) {
   for (uint32_t n = 0; n < 256; n++) {
