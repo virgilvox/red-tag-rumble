@@ -1,5 +1,5 @@
-# Publishes web/ (the browser player, the phone controller and the cart) to
-# GitHub Pages, so the QR code on the cabinet has somewhere to send phones.
+# Publishes web/ (the browser player and the cart) to GitHub Pages at
+# https://virgilvox.github.io/red-tag-rumble/ on every push to main.
 name: pages
 on:
   push:

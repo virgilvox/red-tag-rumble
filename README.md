@@ -106,7 +106,7 @@ build/balance --robin 20                                       # every preset pa
 
 ## Deploy
 
-- Browser: `npm run serve` and open the page. The Pages workflow publishes `web/` on every push to main.
+- Browser: `npm run serve` and open the page. The Pages workflow publishes `web/` to https://virgilvox.github.io/red-tag-rumble/ on every push to main. Source: https://github.com/virgilvox/red-tag-rumble
 - Game station: copy `web/red-tag-rumble.wasc` to `/userdata/roms/wasmcart/` on the Batocera box and restart EmulationStation.
 
 ## Stack
