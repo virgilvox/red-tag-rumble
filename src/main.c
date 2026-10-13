@@ -30,6 +30,10 @@
 
 #define AUDIO_CAP 8192
 
+/* the sim's hit stop column must match the feel table */
+_Static_assert(STOP_TAP == J_STOP_TAP && STOP_HIT == J_STOP_HIT && STOP_HEAVY == J_STOP_HEAVY &&
+               STOP_HUGE == J_STOP_HUGE && STOP_CLASH == J_STOP_CLASH && STOP_KO == J_STOP_KO, "sim.h STOP_* must mirror juice.h J_STOP_*");
+
 static uint32_t framebuffer[4];          /* GL cart: the host presents the GL surface */
 static float audio_ring[AUDIO_CAP * 2];
 static uint32_t audio_cursor;
@@ -183,57 +187,150 @@ static void rumble(int pad, float lo, float hi, int ms) {
   wc_log(m, (unsigned)strlen(m));
 }
 
+/* the viewport that shows a match slot, or -1 (an AI seat without a view, OPS) */
+static int slot_view(int slot) {
+  if (slot < 0 || slot >= M.nbots || M.bots[slot].seat > 3) return -1;
+  return cam_viewport_of(M.bots[slot].seat);
+}
+static int slot_seat(int slot) { return slot >= 0 && slot < M.nbots && M.bots[slot].seat <= 3 ? M.bots[slot].seat : -1; }
+static uint32_t slot_colour(int slot, uint32_t fallback) { int s = slot_seat(slot); return s >= 0 ? seat_colour(s) : fallback; }
+
+/* stinger lines rotate through their pool; a local counter, never the sim's rng */
+static uint32_t sting_n;
+#define PICK(arr) (arr)[(sting_n++) % LEN(arr)]
+
+static void sting_slot(int slot, const char *s, uint32_t c) { int v = slot_view(slot); if (v >= 0) stinger(v, s, c); }
+
+/* a world anchored number in every live viewport (each clips its own) */
+static void number_all(float x, float y, float z, int value, uint32_t rgb, int big) {
+  rect_t vp[4]; int n = 0;
+  cam_current(vp, &n);
+  for (int i = 0; i < n && i < 4; i++) damage_number(i, x, y, z, value, rgb, big);
+}
+static void text_all(float x, float y, float z, const char *s, uint32_t rgb) {
+  rect_t vp[4]; int n = 0;
+  cam_current(vp, &n);
+  for (int i = 0; i < n && i < 4; i++) damage_text(i, x, y, z, s, rgb);
+}
+static int dmg_int(float d) { int v = (int)(d + 0.5f); return v < 1 ? 1 : v; }
+
+static void hit_log(const event_t *e, int band) {
+  char m[80];
+  snprintf(m, sizeof m, "[hit] f=%u sim=%d type=%d a=%d b=%d dmg=%.1f band=%d", G.frame, M.frame, e->type, e->a, e->b, e->dmg, band);
+  wc_log(m, (unsigned)strlen(m));
+}
+
 static void drain_events(void) {
   if (G.attract) {                       /* the title attract: sparks and smoke, no sound, no stingers */
     for (int i = 0; i < M.nev; i++) { const event_t *e = &M.ev[i]; if (e->type == EV_HIT || e->type == EV_RAM || e->type == EV_CLASH) fx_hit(e, e->type == EV_CLASH ? BAND_CLASH : hit_band(e->dmg)); else fx_event(e, &M); }
     M.nev = 0;
     return;
   }
+  int sfx_band_done = 0;                 /* one SFX per band per frame (5.1) */
   for (int i = 0; i < M.nev; i++) {
     const event_t *e = &M.ev[i];
     int band = -1;
     switch (e->type) {
-      case EV_HIT: case EV_RAM: band = hit_band(e->dmg); break;
+      case EV_HIT: case EV_RAM: band = e->dmg > 0 ? hit_band(e->dmg) : -1; break;
       case EV_CLASH: band = BAND_CLASH; break;
       case EV_KO: band = BAND_KO; break;
       default: break;
     }
     if (band >= 0) {
       const hit_band_t *hb = &HIT_BANDS[band];
+      hit_log(e, band);
       fx_hit(e, band);
-      int victim = e->b, attacker = e->a;
-      if (victim < M.nbots) {
-        int vs = M.bots[victim].seat;
-        if (vs <= 3) { cam_punch(vs, e->nx, e->nz, hb->punch); cam_shake(vs, hb->shake); }
-      }
-      if (attacker < M.nbots) {
-        int as = M.bots[attacker].seat;
-        if (as <= 3) cam_shake(as, hb->shake * 0.5f);
-      }
+      int victim = e->b < M.nbots ? e->b : -1, attacker = e->a < M.nbots ? e->a : -1;
+      int vs = slot_seat(victim), as = slot_seat(attacker);
       if (band == BAND_KO || band == BAND_CLASH) cam_shake_all(hb->shake);
-      audio_play(hb->sfx);
-      if (hb->crowd) audio_crowd(hb->crowd / 100.0f);
-      rumble(seat_pad(victim), hb->rum_lo, hb->rum_hi, hb->rum_ms);
-      rumble(seat_pad(attacker), 0, hb->rum_hi, hb->rum_ms / 2);
-      if (e->type == EV_HIT && e->dmg >= J_STINGER_BIGHIT_MIN && victim < M.nbots)
-        stinger(M.bots[victim].seat, ST_BIGHIT[M.rng % LEN(ST_BIGHIT)], seat_colour(attacker < M.nbots ? M.bots[attacker].seat : 0));
-      if (e->type == EV_CLASH) stinger_all(ST_CLASH[M.rng % LEN(ST_CLASH)], C_BONE);
-    } else {
-      fx_event(e, &M);
-      switch (e->type) {
-        case EV_LAUNCH: audio_play(SFX_LAUNCH); rumble(seat_pad(e->b), 0.3f, 0.7f, 80); break;
-        case EV_LAND: case EV_WALL: audio_play_var(SFX_HIT_LIGHT, SFXV_LOW); break;
-        case EV_SPIN_WALL: audio_play(SFX_CLASH); break;
-        case EV_INVERT: audio_play_var(SFX_KLAXON, SFXV_SHORT); break;
-        case EV_HAZ_TELL: audio_play_var(SFX_KLAXON, SFXV_TELL); break;
-        case EV_HAZ_HIT: audio_play(SFX_HIT_HEAVY); rumble(seat_pad(e->b), 0.6f, 0.6f, 100); break;
-        case EV_OPS_WAKE: audio_play_var(SFX_HORN, SFXV_LOW); cam_shake_all(J_OPS_SHAKE); for (int p = 0; p < 4; p++) rumble(p, 0.5f, 0, 200); break;
-        case EV_RED_TAG: audio_play_var(SFX_KLAXON, SFXV_TELL); rumble(seat_pad(e->a), 0.3f, 0.3f, 300); break;
-        case EV_PICKUP: case EV_TAUNT: audio_play_var(SFX_MENU_OK, SFXV_LOW); break;
-        case EV_MINI_KO: audio_play(SFX_KO); rumble(seat_pad(e->b), 1, 1, 300); break;
-        case EV_CLOSING: audio_music(MUSIC_OVERTIME); break;
-        default: break;
+      else {
+        if (vs >= 0) cam_shake(vs, hb->shake);
+        if (as >= 0) cam_shake(as, hb->shake * 0.5f);
       }
+      /* punch: the victim's camera along the hit normal, the attacker's a recoil half as far */
+      if (vs >= 0) cam_punch(vs, e->nx, e->nz, hb->punch);
+      if (as >= 0 && band >= BAND_HEAVY) cam_punch(as, -e->nx, -e->nz, hb->punch * 0.5f);
+      if (!(sfx_band_done & (1 << band))) {
+        audio_play(hb->sfx);
+        sfx_band_done |= 1 << band;
+      }
+      if (hb->crowd) audio_crowd(hb->crowd / 100.0f);
+      if (band == BAND_KO || band == BAND_CLASH) { rumble(seat_pad(victim), hb->rum_lo, hb->rum_hi, hb->rum_ms); rumble(seat_pad(attacker), hb->rum_lo, hb->rum_hi, hb->rum_ms); }
+      else { rumble(seat_pad(victim), hb->rum_lo, hb->rum_hi, hb->rum_ms); rumble(seat_pad(attacker), 0, hb->rum_hi, hb->rum_ms / 2); }
+      /* the number: bone, F_MONO_L for tap and hit, F_H2 from heavy up; CLASH is words (5.1) */
+      if (e->type == EV_CLASH) { text_all(e->x, e->y + 0.6f, e->z, ST_CLASH[0], C_BONE); sting_slot(victim, PICK(ST_CLASH), C_BONE); sting_slot(attacker, ST_CLASH[0], C_BONE); }
+      else if (band != BAND_KO) number_all(e->x, e->y + 0.6f, e->z, dmg_int(e->dmg), C_BONE, e->dmg >= J_NUMBER_BIG_MIN);
+      if (band != BAND_KO && band != BAND_CLASH && e->dmg >= J_STINGER_BIGHIT_MIN) sting_slot(victim, PICK(ST_BIGHIT), slot_colour(attacker, C_BONE));
+      game_on_event(e);
+      continue;
+    }
+    fx_event(e, &M);
+    int a = e->a < M.nbots ? e->a : -1;
+    switch (e->type) {
+      case EV_LAUNCH:
+        audio_play(SFX_LAUNCH); rumble(seat_pad(e->b), 0.3f, 0.7f, 80);
+        { const char *s = PICK(ST_AIRBORNE); sting_slot(e->b, s, slot_colour(a, C_BONE)); if (a != e->b) sting_slot(a, s, slot_colour(a, C_BONE)); }
+        break;
+      case EV_LAND:
+        audio_play_var(SFX_HIT_LIGHT, SFXV_LOW);
+        if (e->dmg > 0.5f) { cam_shake(slot_seat(e->b), J_LAND_SHAKE); number_all(e->x, e->y + 0.6f, e->z, dmg_int(e->dmg), C_BONE, 0); }
+        break;
+      case EV_WALL:
+        audio_play_var(SFX_HIT_LIGHT, SFXV_LOW);
+        cam_shake(slot_seat(a), J_WALL_SHAKE);
+        if (e->dmg > 0.5f) number_all(e->x, e->y + 0.4f, e->z, dmg_int(e->dmg), C_RUST, 0);
+        break;
+      case EV_SPIN_WALL:
+        audio_play(SFX_CLASH); cam_shake(slot_seat(a), J_SPINWALL_SHAKE);
+        number_all(e->x, e->y + 0.4f, e->z, dmg_int(e->dmg), C_RUST, 1);
+        break;
+      case EV_INVERT: audio_play_var(SFX_KLAXON, SFXV_SHORT); sting_slot(a, PICK(ST_INVERTED), slot_colour(e->b, C_BONE)); break;
+      case EV_COUNT_TICK:
+        if (a >= 0 && M.bots[a].deck_count == 60) { audio_play_var(SFX_KLAXON, SFXV_TELL); sting_slot(a, PICK(ST_DECK), C_RUST); }
+        else audio_play_var(SFX_COUNT, SFXV_SHORT);
+        break;
+      case EV_HAZ_TELL: audio_play_var(SFX_KLAXON, SFXV_TELL); break;
+      case EV_HAZ_HIT: {
+        int v = e->a < M.nbots ? e->a : -1;
+        int ht = e->b < ARENAS[M.arena].nhaz ? ARENAS[M.arena].haz[e->b].type : -1;
+        audio_play(SFX_HIT_HEAVY); rumble(seat_pad(v), 0.6f, 0.6f, 100);
+        cam_shake(slot_seat(v), J_HAZARD_SHAKE);
+        if (e->dmg > 0.5f) number_all(e->x, e->y + 0.6f, e->z, dmg_int(e->dmg), C_RUST, e->dmg >= 15);
+        if (e->zone == KO_PIT) sting_slot(v, PICK(ST_PIT), C_RUST);
+        else if (ht == HZ_LASER) sting_slot(v, PICK(ST_DUCK), C_RUST);
+        break; }
+      case EV_OPS_WAKE:
+        audio_play_var(SFX_HORN, SFXV_LOW); cam_shake_all(J_OPS_SHAKE);
+        for (int p = 0; p < 4; p++) rumble(p, 0.5f, 0, 200);
+        stinger_all(PICK(ST_OPS), C_HAZARD);
+        break;
+      case EV_OPS_LINE: speech_panel(-1, e->x, e->y, e->z, OPS_LINES[e->zone % LEN(OPS_LINES)]); break;
+      case EV_OPS_LEAVE: audio_play(SFX_MENU_BACK); break;
+      case EV_RED_TAG:
+        audio_play_var(SFX_KLAXON, SFXV_TELL); rumble(seat_pad(a), 0.3f, 0.3f, 300);
+        cam_shake(slot_seat(a), J_REDTAG_SHAKE); sting_slot(a, PICK(ST_REDTAG), C_RUST);
+        break;
+      case EV_PICKUP:
+        audio_play_var(SFX_MENU_OK, SFXV_LOW);
+        number_all(e->x, e->y + 0.6f, e->z, 6, C_LIVE, 0);
+        if (e->zone == 1) sting_slot(a, PICK(ST_PICKUP), C_LIVE);
+        break;
+      case EV_NOT_VACUUM: if (e->zone == 1) { audio_play(SFX_MENU_BACK); sting_slot(a, ST_VACUUM, C_HAZARD); } break;
+      case EV_TAUNT: audio_play_var(SFX_MENU_OK, SFXV_LOW); break;
+      case EV_HILL_MOVE: audio_play(SFX_MENU_MOVE); { const char *s = PICK(ST_HILL); rect_t vp[4]; int n = 0; cam_current(vp, &n); for (int k = 0; k < n; k++) stinger(k, s, C_HAZARD); } break;
+      case EV_RESPAWN: fx_dust(e->x, 0, e->z, J_LANDING_DUST); audio_play_var(SFX_HORN, SFXV_LOW); break;
+      case EV_MINI_KO: {
+        /* the KO band in the victim's and the attacker's viewports only (2.10) */
+        int v = e->b < M.nbots ? e->b : -1;
+        hit_log(e, BAND_KO);
+        fx_hit(e, BAND_KO);
+        cam_shake(slot_seat(v), HIT_BANDS[BAND_KO].shake);
+        cam_shake(slot_seat(a), HIT_BANDS[BAND_KO].shake);
+        audio_play(SFX_KO); audio_crowd(1.0f);
+        rumble(seat_pad(v), 1, 1, 300);
+        break; }
+      case EV_CLOSING: audio_music(MUSIC_OVERTIME); break;
+      default: break;
     }
     game_on_event(e);
   }

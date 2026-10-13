@@ -656,7 +656,9 @@ static void map_contents(const mapxf_t *m, const arena_def_t *a, const match_t *
     hud_line(sx, sy, sx + hx * (w + 3 * gs), sy + hz * (w + 3 * gs), (float)(gs + 1), c, 255);
     if (big) {
       char nm[24]; fit_text(nm, sizeof nm, F_MONO_S, b->name, 150);
-      hud_text(F_MONO_S, sx + w + 6, sy - 8, nm, C_BONE, 255, AL_LEFT);
+      /* a name that would run off the map's right side reads to the left of the dot */
+      int right = sx + w + 6 + hud_text_w(F_MONO_S, nm) > clip->x + clip->w - 4;
+      hud_text(F_MONO_S, right ? sx - w - 6 : sx + w + 6, sy - 8, nm, C_BONE, 255, right ? AL_RIGHT : AL_LEFT);
     } else if (seat_view >= 0) {
       char n[4]; snprintf(n, sizeof n, "%d", (b->seat & 3) + 1);
       hud_text(F_MONO_S, sx + w + 4, sy - 8, n, c, 255, AL_LEFT);
@@ -694,11 +696,13 @@ void hazard_seat_view(const rect_t *vp, int seat) {
   hud_rect(vp->x, vp->y, vp->w, vp->h, C_CHAR, 255);
   int chosen = seat < 4 && M.hazard_seat[seat] != 255 ? M.hazard_seat[seat] : -1;
   int kind = seat_hazard_kind(a, chosen >= 0 ? chosen : arena_seat_hazard(a, 0));
-  /* the badge: seat chip and OUT */
-  hud_seat_chip(vp->x + 8 * k, vp->y + 8 * k, 24 * k, 24 * k, seat & 3, F_MONO_S, 0);
-  hud_text(F_MONO, vp->x + 38 * k, cy_text(F_MONO, vp->y + 8 * k, 24 * k), S_OUT, C_BONE, 255, AL_LEFT);
+  /* the badge: seat chip and OUT. A right column quadrant starts its text past the clock
+   * chip and the PIP on the seam (they end at x 740), so nothing hides under them */
+  int ix = (!big && vp->x >= 640) ? 112 : 8;
+  hud_seat_chip(vp->x + ix, vp->y + 8 * k, 24 * k, 24 * k, seat & 3, F_MONO_S, 0);
+  hud_text(F_MONO, vp->x + ix + 30, cy_text(F_MONO, vp->y + 8 * k, 24 * k), S_OUT, C_BONE, 255, AL_LEFT);
   const char *have = kind == HZ_FLAME ? S_YOU_HAVE_FLAME : kind == HZ_FLOORFLIP ? S_YOU_HAVE_FLIPPER : S_YOU_HAVE_HAMMERS;
-  hud_text(big ? F_MONO : F_MONO_S, vp->x + 92 * k, cy_text(big ? F_MONO : F_MONO_S, vp->y + 8 * k, 24 * k), have, C_ASH, 255, AL_LEFT);
+  hud_text(big ? F_MONO : F_MONO_S, vp->x + ix + 84, cy_text(big ? F_MONO : F_MONO_S, vp->y + 8 * k, 24 * k), have, C_ASH, 255, AL_LEFT);
   /* the top down map */
   rect_t mr = { vp->x + 110 * k, my, 420 * k, 236 * k };
   hud_frame(mr.x, mr.y, mr.w, mr.h, 1, C_STEEL, 255);
@@ -708,7 +712,7 @@ void hazard_seat_view(const rect_t *vp, int seat) {
   /* the hints */
   const char *pick = kind == HZ_FLAME ? S_SEAT_PICK_FLAME : kind == HZ_FLOORFLIP ? S_SEAT_PICK_FLIPPER : S_SEAT_PICK_HAMMER;
   const char *fire = kind == HZ_PULVERIZER ? S_SEAT_SWING : S_SEAT_FIRE;
-  int hx = vp->x + 16 * k;
+  int hx = vp->x + (ix > 8 ? ix : 16);
   int hf = big ? F_MONO : F_MONO_S;
   hud_chevron(hx + 6, hy + 8 * k, -1, 0, 10, 2, C_HAZARD, 255);
   int tw = hud_text(hf, hx + 16, hy, pick, C_ASH, 255, AL_LEFT);
@@ -909,12 +913,15 @@ void judges_card(float t) {
     } else if (winner < M.nbots) {
       char ws[48], nm[24], pre[24];
       snprintf(pre, sizeof pre, S_WINNER_IS, "");
-      fit_text(nm, sizeof nm, F_H3, M.bots[winner].name, w - 40 - hud_text_w(F_H3, pre));
+      /* a long name drops the chip to F_MONO rather than cutting the name (the chip is 360 px) */
+      snprintf(ws, sizeof ws, S_WINNER_IS, M.bots[winner].name);
+      int font = hud_text_w(F_H3, ws) + 24 <= w - 40 ? F_H3 : F_MONO;
+      fit_text(nm, sizeof nm, font, M.bots[winner].name, w - 40 - 24 - hud_text_w(font, pre));
       snprintf(ws, sizeof ws, S_WINNER_IS, nm);
-      int tw = hud_text_w(F_H3, ws) + 24;
+      int tw = hud_text_w(font, ws) + 24;
       if (tw > w - 40) tw = w - 40;
       hud_rect(x + 20, win_y, tw, 36, C_LIVE, 255);
-      hud_text(F_H3, x + 20 + 12, cy_text(F_H3, win_y, 36), ws, C_TAPE, 255, AL_LEFT);
+      hud_text(font, x + 20 + 12, cy_text(font, win_y, 36), ws, C_TAPE, 255, AL_LEFT);
     }
   }
   hud_dirty(x, y, w + 6, h + 6);
@@ -924,6 +931,7 @@ void judges_card(float t) {
 /* ── results and the rematch menu (10.21) ──────────────────────── */
 static const char *place_word(const bot_t *b) {
   if (b->place <= 1) return PLACE_WORD[0];          /* the sim ranks from 1 */
+  if (b->alive) return PLACE_WORD[7];               /* still running at the bell: the judges or the hill placed it */
   switch (b->ko_how) {
     case KO_HP: return PLACE_WORD[1]; case KO_FLIP: return PLACE_WORD[2]; case KO_PIT: return PLACE_WORD[3];
     case KO_ROOF: return PLACE_WORD[4]; case KO_COUNT: return PLACE_WORD[5]; case KO_DECK: return PLACE_WORD[6];
@@ -1097,22 +1105,58 @@ void rematch_menu(float t) {
 }
 
 /* ── the bracket card (TOURNAMENT, 10.21) ──────────────────────── */
+static int chip_h = 28;                          /* 24 in the compact garage card */
 static void bracket_chip(int x, int y, int seat, int w, int hot) {
   if (seat < 0 || seat > 3) {
-    hud_rect(x, y, w, 28, C_GRIME, 255);
-    hud_frame(x, y, w, 28, 1, C_STEEL, 255);
-    hud_text(F_MONO_S, x + w / 2, cy_text(F_MONO_S, y, 28), S_BYE, C_SMOKE, 255, AL_CENTER);
+    hud_rect(x, y, w, chip_h, C_GRIME, 255);
+    hud_frame(x, y, w, chip_h, 1, C_STEEL, 255);
+    hud_text(F_MONO_S, x + w / 2, cy_text(F_MONO_S, y, chip_h), S_BYE, C_SMOKE, 255, AL_CENTER);
     return;
   }
   const seat_t *s = &G.seats[seat];
-  hud_rect(x, y, w, 28, hot ? C_HAZARD : C_GRIME, 255);
-  hud_frame(x, y, w, 28, 1, hot ? C_HAZARD_DP : C_STEEL, 255);
-  hud_seat_chip(x + 4, y + 4, 20, 20, seat, F_MONO_S, s->kind == SEAT_AI);
+  hud_rect(x, y, w, chip_h, hot ? C_HAZARD : C_GRIME, 255);
+  hud_frame(x, y, w, chip_h, 1, hot ? C_HAZARD_DP : C_STEEL, 255);
+  hud_seat_chip(x + 4, y + (chip_h - 20) / 2, 20, 20, seat, F_MONO_S, s->kind == SEAT_AI);
   char nm[24]; fit_text(nm, sizeof nm, F_MONO_S, s->name[0] ? s->name : S_BYE, w - 36);
-  hud_text(F_MONO_S, x + 30, cy_text(F_MONO_S, y, 28), nm, hot ? C_TAPE : C_BONE, 255, AL_LEFT);
+  hud_text(F_MONO_S, x + 30, cy_text(F_MONO_S, y, chip_h), nm, hot ? C_TAPE : C_BONE, 255, AL_LEFT);
+}
+
+/* the garage match card's bracket (560 x 160): semis, final and champion in three columns */
+static void bracket_card_compact(const rect_t *r) {
+  hud_panel(r->x, r->y, r->w, r->h, C_SLAB, C_STEEL_HI);
+  hud_eyebrow(r->x + 16, r->y + 10, MODE_NAME[MODE_TOURNAMENT], C_ASH, AL_LEFT);
+  int round = G.tournament_round;
+  hud_text(F_MONO_S, r->x + r->w - 16, r->y + 10, round <= 0 ? S_SEMIS : round == 1 ? S_THIRD_PLACE : S_FINAL, C_HAZARD, 255, AL_RIGHT);
+  int sem[2][2] = { { G.bracket[0], G.bracket[1] }, { G.bracket[2], G.bracket[3] } };
+  int fin[2] = { -1, -1 }, champ = -1;
+  for (int p = 0; p < 2; p++) for (int k = 0; k < 2; k++) {
+    int s2 = sem[p][k];
+    if (s2 < 0 || s2 > 3) continue;
+    if (G.bracket_wins[s2] >= 1 || s2 == G.bye_seat || sem[p][1 - k] < 0) fin[p] = s2;
+  }
+  for (int p = 0; p < 2; p++) if (fin[p] >= 0 && G.bracket_wins[fin[p]] >= 2) champ = fin[p];
+  chip_h = 24;
+  int cw = 160, lx = r->x + 16, mx = lx + cw + 20, cx = mx + cw + 20, y0 = r->y + 34;
+  int ccw = r->x + r->w - 16 - cx;
+  for (int p = 0; p < 2; p++) {
+    int py = y0 + p * 64, next = round <= 0 && fin[p] < 0;
+    bracket_chip(lx, py, sem[p][0], cw, next);
+    bracket_chip(lx, py + 28, sem[p][1], cw, next);
+    hud_tape(lx + cw, py + 24, mx - lx - cw, 4, 0);
+    int fy = y0 + 14 + p * 64;
+    if (fin[p] < 0 && sem[p][0] >= 0 && sem[p][1] >= 0) { hud_rect(mx, fy, cw, 24, C_GRIME, 255); hud_frame(mx, fy, cw, 24, 1, C_STEEL, 255); }
+    else bracket_chip(mx, fy, fin[p], cw, round == 2 && champ < 0);
+    hud_tape(mx + cw, fy + 10, cx - mx - cw, 4, 0);
+  }
+  hud_text(F_MONO_S, cx + ccw / 2, y0 + 20, S_CHAMPION, C_ASH, 255, AL_CENTER);
+  if (champ >= 0) bracket_chip(cx, y0 + 46, champ, ccw, 1);
+  else { hud_rect(cx, y0 + 46, ccw, 24, C_GRIME, 255); hud_frame(cx, y0 + 46, ccw, 24, 1, C_STEEL, 255); }
+  chip_h = 28;
+  hud_dirty(r->x, r->y, r->w + 6, r->h + 6);
 }
 
 void bracket_card(const rect_t *r) {
+  if (r->h < 250) { bracket_card_compact(r); return; }
   hud_panel(r->x, r->y, r->w, r->h, C_SLAB, C_STEEL_HI);
   hud_eyebrow(r->x + 16, r->y + 12, MODE_NAME[MODE_TOURNAMENT], C_ASH, AL_LEFT);
   int round = G.tournament_round;
@@ -1142,9 +1186,13 @@ void bracket_card(const rect_t *r) {
   }
   int final_next = round == 2 && champ < 0;
   /* the final chips sit on the pair midlines (y0 + 33 and y0 + 143) the tapes arrive at */
-  bracket_chip(mx, y0 + 19, fin[0], cw, final_next);
+  /* a final slot still waiting on its semi is an empty chip; BYE is only for a pair with one seat */
+  for (int p = 0; p < 2; p++) {
+    int fy = y0 + (p ? 129 : 19);
+    if (fin[p] < 0 && sem[p][0] >= 0 && sem[p][1] >= 0) { hud_rect(mx, fy, cw, 28, C_GRIME, 255); hud_frame(mx, fy, cw, 28, 1, C_STEEL, 255); }
+    else bracket_chip(mx, fy, fin[p], cw, final_next);
+  }
   hud_text(F_MONO_S, mx + cw / 2, y0 + 80, S_VS, final_next ? C_HAZARD : C_SMOKE, 255, AL_CENTER);
-  bracket_chip(mx, y0 + 129, fin[1], cw, final_next);
   /* the chain from the final down to the champion slot */
   hud_tape(mx + cw / 2 - 3, y0 + 157, 6, 26, 0);
   hud_text(F_MONO_S, mx + cw / 2, y0 + 185, S_CHAMPION, C_ASH, 255, AL_CENTER);
@@ -1153,8 +1201,10 @@ void bracket_card(const rect_t *r) {
   /* the NEXT tag above the pairing that fights next */
   int nx = round <= 0 ? lx : mx, ny = round <= 0 ? y0 + (fin[0] < 0 ? 0 : pair_y[1]) - 22 : y0 + 19 - 22;
   if (round == 1) { nx = lx; ny = y0 + pair_y[1] - 22; }
-  hud_rect(nx, ny, hud_text_w(F_MONO_S, S_NEXT) + 16, 18, C_HAZARD, 255);
-  hud_text(F_MONO_S, nx + 8, ny + 1, S_NEXT, C_TAPE, 255, AL_LEFT);
+  if (champ < 0) {
+    hud_rect(nx, ny, hud_text_w(F_MONO_S, S_NEXT) + 16, 18, C_HAZARD, 255);
+    hud_text(F_MONO_S, nx + 8, ny + 1, S_NEXT, C_TAPE, 255, AL_LEFT);
+  }
   hud_dirty(r->x, r->y, r->w + 6, r->h + 6);
 }
 
@@ -1169,7 +1219,6 @@ static int in_tell_zone(const bot_t *b, const arena_def_t *a) {
   return 0;
 }
 
-static int hazard_seats_available(const arena_def_t *a) { return M.players > 2 && arena_seat_hazard_count(a) > 0; }
 
 static void fight_frame(float dt) {
   const arena_def_t *a = cur_arena();
@@ -1191,7 +1240,7 @@ static void fight_frame(float dt) {
       continue;
     }
     const bot_t *b = seat_bot(seat);
-    if (b && !b->alive && hazard_seats_available(a)) {
+    if (b && !b->alive && game_hazard_seat_of(seat) >= 0) {
       hazard_seat_view(vp, seat);
       stinger_draw(i, vp, compact, dt);
       continue;
@@ -1279,7 +1328,8 @@ void draw_hud(float dt) {
       if (G.miniko_frames > 0) fight_frame(dt);
       else ko_card(G.phase_t);
       break;
-    case PH_JUDGES: fight_frame(dt); judges_card(G.phase_t); break;
+    /* 2.3: the TIME stinger and a 1 s freeze, then the judges card */
+    case PH_JUDGES: fight_frame(dt); if (G.phase_t >= 1.0f) judges_card(G.phase_t - 1.0f); break;
     case PH_RESULTS: results_screen(G.phase_t); fx2_draw(dt); break;
     case PH_REMATCH: results_screen(G.phase_t + 6.f); rematch_menu(G.phase_t); fx2_draw(dt); break;
     default: break;

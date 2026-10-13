@@ -494,7 +494,7 @@ static void fx2_add(int kind, float x, float y, float vx, float vy, float life, 
 }
 
 void fx2_burst(int kind, float x, float y, uint32_t c) {
-  static const uint32_t pal[6] = { C_HAZARD, C_LIVE, C_VIOLET, C_INFO, C_RUST, C_BONE };
+  static const uint32_t pal[6] = { C_HAZARD, C_LIVE, C_BONE, C_HAZARD, C_RUST, C_BONE };   /* GANTRY only */
   switch (kind) {
     case FX2_SPARK:
       for (int i = 0; i < 12; i++) {

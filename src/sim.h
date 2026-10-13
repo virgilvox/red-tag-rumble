@@ -138,13 +138,13 @@ typedef struct {
   uint8_t park;                              /* PRACTICE=off under the rig (15.5): AI seats sit still and are never counted out */
 } match_setup_t;
 
-/* hit stop frames by band (5.1). These mirror the stop column of HIT_BANDS in
- * juice.h, which the headless build cannot include (juice.h pulls audio.h). The
- * sim applies the stop itself on every hit so balance --replay stays aligned
- * with the cart; main.c may set M.hitstop to the same value, the max wins. */
+/* hit stop frames by band (5.1). These mirror J_STOP_* in juice.h, which the headless
+ * build cannot include (the balance include check refuses audio.h); main.c static
+ * asserts that the two agree, so tune juice.h and copy the value here. The sim applies
+ * the stop itself on every hit so balance --replay stays aligned with the cart. */
 #define STOP_TAP    0
-#define STOP_HIT    0
-#define STOP_HEAVY  3
+#define STOP_HIT    2
+#define STOP_HEAVY  4
 #define STOP_HUGE   6
 #define STOP_CLASH  8
 #define STOP_KO     6

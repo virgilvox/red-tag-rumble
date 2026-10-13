@@ -336,10 +336,15 @@ void cam_update(const match_t *m, float dt) {
       float vx = 0, vy = 0, vz = 0, ax = 0, az = 0;
       if (m && ko_victim >= 0 && ko_victim < m->nbots) { if (!world_bot_pos(ko_victim, &vx, &vy, &vz)) { vx = m->bots[ko_victim].b.x; vz = m->bots[ko_victim].b.z; } }
       if (m && ko_victor >= 0 && ko_victor < m->nbots) { float y; if (!world_bot_pos(ko_victor, &ax, &y, &az)) { ax = m->bots[ko_victor].b.x; az = m->bots[ko_victor].b.z; } } else { ax = vx; az = vz; }
-      float px = vx + sinf(ko_angle) * J_KO_ORBIT_DIST, pz = vz + cosf(ko_angle) * J_KO_ORBIT_DIST, py = J_KO_ORBIT_HEIGHT;
+      /* victim centred, victor in frame (9.4): the orbit widens with the distance between
+       * them and the aim leans a quarter of the way toward the victor */
+      float sep = sqrtf((ax - vx) * (ax - vx) + (az - vz) * (az - vz));
+      float dist = J_KO_ORBIT_DIST, k = sep * 0.8f + 2.0f;
+      if (k > dist) dist = k > 10.0f ? 10.0f : k;
+      float px = vx + sinf(ko_angle) * dist, pz = vz + cosf(ko_angle) * dist, py = J_KO_ORBIT_HEIGHT * dist / J_KO_ORBIT_DIST;
       push_out(&px, &py, &pz);
       t3_object_set_position(shared, px, py, pz);
-      t3_object_look_at(shared, (vx + ax) / 2, 0.4f, (vz + az) / 2);
+      t3_object_look_at(shared, vx + (ax - vx) * 0.25f, 0.4f, vz + (az - vz) * 0.25f);
       shared->fov = 50;
       break; }
     case CAMM_TIME: {

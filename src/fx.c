@@ -59,7 +59,8 @@ void fx_init(void) {
   t3_geometry *fq = t3_circle_geometry_new(0.5f, 14);
   for (int i = 0; i < 4; i++) {
     t3_material *fm = t3_mesh_basic_material_new(0xffffff);
-    fm->transparent = true; fm->opacity = 0.9f; fm->depth_write = false; fm->blending = 2;   /* additive */
+    /* additive, and drawn over the bots: the contact is usually behind the attacker in a chase view */
+    fm->transparent = true; fm->opacity = 0.9f; fm->depth_write = false; fm->depth_test = false; fm->blending = 2;
     flash[i] = t3_mesh_new(fq, fm);
     t3_object_add(&S->base, flash[i]); t3_release(flash[i]); t3_release(fm);
     flash[i]->base.visible = false;

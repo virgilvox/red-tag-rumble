@@ -12,7 +12,9 @@ Seats are packed when the lobby closes, so seat i is match slot i and turntable 
 
 Scripts: `tools/scripts/menus.json` (title, lobby, two seats, garage picks, vote, countdown), `menu.json` (settings, hall of fame, the rules flash), `flow.json` (a 60 s fight through KO, results and the rematch menu), `title.json` (the attract), the 2p and 4p fights of 15.5 and the six drive scripts.
 
-Not wired yet: the hazard seats, the mini-KO viewport hand-over to the hazard seat view, the TOURNAMENT bracket and OPS driving (item 16).
+The fight loop drains every sim event into fx, audio, rumble, the cameras, damage numbers and stingers (main.c drain_events; each band event also logs a `[hit]` line with the render frame). Hazard seats, the mini-KO hand-over to the hazard seat view, the TOURNAMENT bracket with the 3 player bye coin flip and the final's OPS crew live in game_flow.c. Feel numbers are tuned in juice.h; sim.h STOP_* mirror its J_STOP_* column and main.c static asserts that they agree.
+
+Scripts added for the fight: feel.json (a 14 damage WEDGE ram at render frame 863), 2p-time.json (a 60 s fight to TIME and the judges), solo.json, 3p-fight.json and mode-flip, mode-lbs, mode-hill, mode-2v2, mode-tourn, mode-tourn3 (the 4p opening with RIGHT presses on the mode cards).
 
 ## The header contract
 

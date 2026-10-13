@@ -47,6 +47,101 @@ static int   streak_seat = -1; static uint32_t streak_n;
 static int   last_count_s = -1;
 static float b_hold[4];                         /* hall of fame: seconds B has been held per pad */
 
+/* -- TOURNAMENT (2.2) ---------------------------------------------
+ * Seats stay seats; a tournament match is a 1v1 between two of them in match slots 0
+ * and 1 with bot_t.seat set to the real seat, so the cameras, strips and colours follow
+ * the seat. Schedule: semi 1, semi 2, third place (the semi losers), final; with three
+ * players a visible coin flip in the garage gives one seat the bye and the schedule is
+ * semi, final. In the final the first eliminated player drives OPS and the second runs
+ * its lifter and saw (with one eliminated player it does both). */
+static int t_pair[2] = { -1, -1 };              /* the two seats in this tournament match */
+static int t_match;                             /* index into the schedule */
+static int t_done;                              /* the final has been played */
+static int t_flip = -1;                         /* garage frames left in the bye coin flip */
+static int t_flip_to = -1;                      /* where the coin lands */
+static int t_loser[2] = { -1, -1 };             /* the semi losers, in order */
+static int t_winner[2] = { -1, -1 };            /* the semi winners (the bye counts as a winner) */
+static int ops_driver = -1, ops_gunner = -1;    /* the final's OPS crew, by seat */
+
+static int tourney_on(void) { return G.mode == MODE_TOURNAMENT; }
+static int tourney_matches(void) { return G.players >= 4 ? 4 : 2; }
+
+/* lay the bracket out: four seats pair in order; three seats pair the two that are not the bye */
+static void tourney_layout(void) {
+  for (int i = 0; i < 4; i++) G.bracket[i] = -1;
+  if (G.players >= 4) { for (int i = 0; i < 4; i++) G.bracket[i] = i; G.bye_seat = -1; return; }
+  int k = 0;
+  for (int i = 0; i < 3; i++) if (i != G.bye_seat) G.bracket[k++] = i;
+  G.bracket[2] = G.bye_seat; G.bracket[3] = -1;
+}
+
+static void tourney_reset(void) {
+  t_match = 0; t_done = 0; ops_driver = ops_gunner = -1;
+  for (int i = 0; i < 2; i++) { t_loser[i] = t_winner[i] = -1; t_pair[i] = -1; }
+  for (int i = 0; i < 4; i++) G.bracket_wins[i] = 0;
+  G.tournament_round = 0; G.bye_seat = -1; t_flip = -1;
+  if (!tourney_on()) { for (int i = 0; i < 4; i++) G.bracket[i] = -1; return; }
+  if (G.players == 3) { t_flip_to = (int)rtr_rand_n(&grng, 3); G.bye_seat = 0; t_flip = 90; }
+  tourney_layout();
+}
+
+/* the coin flip: the bye chip walks the three seats and lands after 1.5 s (2.2) */
+static void tourney_flip_tick(void) {
+  if (t_flip < 0) return;
+  if (t_flip > 0 && t_flip % 8 == 0) { G.bye_seat = (G.bye_seat + 1) % 3; tourney_layout(); audio_play(SFX_MENU_MOVE); }
+  if (t_flip == 0) { G.bye_seat = t_flip_to; tourney_layout(); G.bracket_wins[G.bye_seat] = 1; t_winner[1] = G.bye_seat; audio_play(SFX_MENU_OK); }
+  t_flip--;
+}
+
+/* the seats of the next match in the schedule */
+static void tourney_next_pair(void) {
+  if (t_flip >= 0) { t_flip = 0; tourney_flip_tick(); }
+  int four = G.players >= 4;
+  switch (t_match) {
+    case 0: t_pair[0] = G.bracket[0]; t_pair[1] = G.bracket[1]; G.tournament_round = 0; break;
+    case 1:
+      if (four) { t_pair[0] = G.bracket[2]; t_pair[1] = G.bracket[3]; G.tournament_round = 0; }
+      else { t_pair[0] = t_winner[0]; t_pair[1] = t_winner[1]; G.tournament_round = 2; }
+      break;
+    case 2: t_pair[0] = t_loser[0]; t_pair[1] = t_loser[1]; G.tournament_round = 1; break;
+    default: t_pair[0] = t_winner[0]; t_pair[1] = t_winner[1]; G.tournament_round = 2; break;
+  }
+  ops_driver = ops_gunner = -1;
+  if (G.tournament_round == 2) {
+    ops_driver = t_loser[0]; ops_gunner = t_loser[1] >= 0 ? t_loser[1] : t_loser[0];
+    if (ops_driver >= 0 && G.seats[ops_driver].kind != SEAT_HUMAN) ops_driver = -1;
+    if (ops_gunner >= 0 && G.seats[ops_gunner].kind != SEAT_HUMAN) ops_gunner = ops_driver;
+    if (ops_driver < 0) ops_driver = ops_gunner;
+  }
+}
+
+/* a tournament match ended: the bracket advances (the winner is a seat) */
+static void tourney_record(int win_seat) {
+  int lose_seat = win_seat == t_pair[0] ? t_pair[1] : t_pair[0];
+  if (win_seat < 0) { win_seat = t_pair[0]; lose_seat = t_pair[1]; }   /* a DRAW goes to the higher seed */
+  int four = G.players >= 4;
+  if (t_match == 0 || (four && t_match == 1)) {
+    t_winner[t_match] = win_seat; t_loser[t_match] = lose_seat;
+    G.bracket_wins[win_seat]++;
+  } else if (four && t_match == 2) {
+    /* third place: the evening tally counts it, the bracket does not advance */
+  } else { G.bracket_wins[win_seat]++; t_done = 1; }
+  t_match++;
+  if (t_match >= tourney_matches()) t_done = 1;
+}
+
+/* -- hazard seats (2.10) ------------------------------------------
+ * An eliminated player in LAST BOT STANDING, a free-for-all DEATHMATCH or 2V2 gets a
+ * hazard seat 1.5 s after the mini-KO (the stinger plays first); a human sitting out a
+ * tournament match drives one from the start. */
+static int out_frame[4] = { -1, -1, -1, -1 };    /* render frame the seat went out, -1 when live */
+static int seat_slot(int seat) { for (int i = 0; i < M.nbots && i < 4; i++) if (M.bots[i].seat == seat && !M.bots[i].is_ops) return i; return -1; }
+static int hazard_mode(void) {
+  if (G.mode == MODE_LAST_BOT || G.mode == MODE_2V2) return 1;
+  if (G.mode == MODE_DEATHMATCH) return M.players >= 3;
+  return G.mode == MODE_TOURNAMENT;
+}
+
 static void logf_(const char *s) { wc_log(s, (unsigned)strlen(s)); }
 
 /* -- small helpers ----------------------------------------------- */
@@ -66,7 +161,9 @@ static int human_count(void) { return game_humans(); }
 
 int game_slot_pad(int slot) {
   if (G.attract || slot < 0 || slot > 3) return -1;
-  const seat_t *s = &G.seats[slot];
+  int seat = slot < M.nbots ? M.bots[slot].seat : slot;
+  if (seat < 0 || seat > 3) return -1;
+  const seat_t *s = &G.seats[seat];
   return s->kind == SEAT_HUMAN ? s->pad : -1;
 }
 
@@ -198,13 +295,15 @@ static void go_lobby(void) {
   M.nbots = 0;
   lobby_ready_t = 0; lobby_empty_t = 0; G.lobby_row = 0;
   G.lobby_mode_cursor = G.mode;
+  t_done = 1;
   game_set_phase(PH_LOBBY);
   lobby_scene();
   audio_music(MUSIC_GARAGE);
 }
 
-static void garage_hint(seat_t *s, int slot) {
+static void garage_hint(seat_t *s, int seat) {
   s->hint[0] = 0;
+  int slot = seat_slot(seat);
   if (slot < 0 || slot >= M.nbots || M.bots[slot].hp_max <= 0) return;
   const bot_t *b = &M.bots[slot];
   int lost = M.winner != slot;
@@ -240,6 +339,7 @@ static void go_garage(int rebuild) {
     if (G.rig_park) for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_AI) G.seats[i].ai_level = AI_EASY;
   }
   G.sim_on = 0; G.timescale = 1; G.paused = 0; G.controls_card_seat = -1;
+  if (!rebuild || t_done || !tourney_on()) tourney_reset();
   game_set_phase(PH_GARAGE);
   garage_total = rebuild ? REBUILD_FRAMES : GARAGE_FRAMES;
   snap_left = -1;
@@ -282,14 +382,20 @@ void game_start_match(void) {
   game_attract_stop();
   memset(&SETUP, 0, sizeof SETUP);
   SETUP.mode = G.mode; SETUP.arena = G.arena; SETUP.players = G.players;
+  int seat_of_slot[4] = { 0, 1, 2, 3 };
+  if (tourney_on()) {
+    if (t_done) tourney_reset();                 /* SAME BOTS or NEW ARENA after a final starts a new bracket */
+    tourney_next_pair();
+    SETUP.players = 2; seat_of_slot[0] = t_pair[0]; seat_of_slot[1] = t_pair[1];
+  }
   G.comeback_eff = (uint8_t)game_comeback_effective();
   SETUP.comeback = G.comeback_eff;
   SETUP.fight_len_s = G.rig_park ? 90 : FIGHT_LEN_S[SAVE.fight_len & 3];
   SETUP.seed = G.rig_park ? G.seed : G.seed * 2654435761u + G.match_index * 0x9e3779b9u + 1;   /* under the rig the drive scripts replay with the host seed */
   SETUP.hitstop_off = SAVE.hitstop ? 0 : 1;
   SETUP.park = (uint8_t)G.rig_park;
-  for (int i = 0; i < G.players && i < 4; i++) {
-    const seat_t *s = &G.seats[i];
+  for (int i = 0; i < SETUP.players && i < 4; i++) {
+    const seat_t *s = &G.seats[seat_of_slot[i]];
     SETUP.builds[i] = s->build;
     SETUP.is_ai[i] = s->kind == SEAT_AI;
     SETUP.ai_level[i] = s->kind == SEAT_AI ? s->ai_level : 0;
@@ -299,13 +405,19 @@ void game_start_match(void) {
   }
   G.match_index++;
   sim_init(&M, &SETUP); M.nev = 0;
-  for (int i = 0; i < G.players && i < 4; i++) {
-    G.seats[i].slot = i;
-    if (G.seats[i].kind == SEAT_AI) { ai_init(&AIS[i], G.seats[i].ai_level, i); ai_bind(&AIS[i], i); }
+  for (int i = 0; i < 4; i++) { G.seats[i].slot = -1; out_frame[i] = -1; }
+  for (int i = 0; i < SETUP.players && i < 4; i++) {
+    int seat = seat_of_slot[i];
+    M.bots[i].seat = (uint8_t)seat;             /* a tournament pair keeps its seats' colours and views */
+    G.seats[seat].slot = i;
+    if (G.seats[seat].kind == SEAT_AI) { ai_init(&AIS[i], G.seats[seat].ai_level, i); ai_bind(&AIS[i], i); }
   }
+  /* humans sitting out a tournament match drive hazard seats from the start */
+  if (tourney_on()) for (int s = 0; s < G.players && s < 4; s++) if (G.seats[s].slot < 0 && G.seats[s].kind == SEAT_HUMAN) out_frame[s] = (int)G.frame - 90;
+  if (tourney_on() && G.tournament_round == 2 && ops_driver >= 0) sim_ops_driven(&M, ops_driver, ops_gunner);
   world_attach_arena(G.arena);
   for (int i = 0; i < 4; i++) {
-    if (i < G.players) { world_bot_build(i, &SETUP.builds[i], seat_colour(i)); world_bot_visible(i, 1); }
+    if (i < SETUP.players) { world_bot_build(i, &SETUP.builds[i], seat_colour(seat_of_slot[i])); world_bot_visible(i, 1); }
     else world_bot_visible(i, 0);
   }
   if (M.nbots > OPS_SLOT && M.bots[OPS_SLOT].is_ops) { world_bot_build_ops(OPS_SLOT); world_bot_visible(OPS_SLOT, 1); }
@@ -407,34 +519,36 @@ static int award_for(int i) {
 }
 
 void game_record_results(void) {
-  int w = M.winner < M.nbots ? M.winner : -1;
+  int wslot = M.winner < M.nbots ? M.winner : -1;
+  int w = wslot >= 0 && M.bots[wslot].seat < 4 ? M.bots[wslot].seat : -1;
   for (int i = 0; i < MAX_BOTS; i++) { G.award[i] = AW_ATTENDED; G.place[i] = 0; }
   for (int i = 0; i < M.players && i < 4; i++) { G.award[i] = award_for(i); G.place[i] = M.bots[i].place; }
   SAVE.matches++;
   if (w >= 0 && w < 4) {
     seat_t *ws = &G.seats[w];
     ws->wins++;
-    int p = build_preset_of(&M.bots[w].build);
+    int p = build_preset_of(&M.bots[wslot].build);
     SAVE.wins_by_preset[p < PRE_RANDOM ? p : 6]++;
     if (M.win_how < 6) {
       SAVE.ko_by_cause[M.win_how]++;
       uint32_t ms = (uint32_t)M.frame * 1000u / 60u;
       if (SAVE.fastest_ko_ms == 0 || ms < SAVE.fastest_ko_ms) {
         SAVE.fastest_ko_ms = ms; SAVE.fastest_ko_seat = (uint8_t)w;
-        snprintf(SAVE.fastest_ko_name, sizeof SAVE.fastest_ko_name, "%s", M.bots[w].name);
+        snprintf(SAVE.fastest_ko_name, sizeof SAVE.fastest_ko_name, "%s", M.bots[wslot].name);
       }
     }
     if (streak_seat == w) streak_n++; else { streak_seat = w; streak_n = 1; }
     if (streak_n > SAVE.longest_streak) {
       SAVE.longest_streak = streak_n; SAVE.streak_seat = (uint8_t)w;
-      snprintf(SAVE.streak_name, sizeof SAVE.streak_name, "%s", M.bots[w].name);
+      snprintf(SAVE.streak_name, sizeof SAVE.streak_name, "%s", M.bots[wslot].name);
     }
     if (ws->wins > SAVE.best_evening_wins) { SAVE.best_evening_wins = ws->wins; SAVE.best_seat = (uint8_t)w; }
   } else { streak_seat = -1; streak_n = 0; }
   /* the HARD AI learns from the human it fought (8.4) */
   int human = -1, ai = 0;
-  for (int i = 0; i < G.players && i < 4; i++) { if (G.seats[i].kind == SEAT_HUMAN && human < 0) human = i; if (G.seats[i].kind == SEAT_AI) ai = 1; }
+  for (int i = 0; i < M.players && i < 4; i++) { int st = M.bots[i].seat & 3; if (G.seats[st].kind == SEAT_HUMAN && human < 0) human = i; if (G.seats[st].kind == SEAT_AI) ai = 1; }
   if (ai && human >= 0) ai_learn(SAVE.habits, &M, human);
+  if (tourney_on()) tourney_record(w);
   save_commit();
   G.matches_this_evening++;
   G.evening_started = 1;
@@ -448,7 +562,7 @@ static void go_results(void) {
   game_record_results();
   audio_music(MUSIC_GARAGE);
   /* the winner's bot on its turntable in the results viewport (10.21) */
-  int w = M.winner < 4 ? M.winner : 0;
+  int w = M.winner < M.nbots && M.bots[M.winner].seat < 4 ? M.bots[M.winner].seat : 0;
   world_attach_garage();
   hide_bots(0);
   if (G.mode != MODE_TOURNAMENT && w < 4 && G.seats[w].kind != SEAT_EMPTY) {
@@ -622,6 +736,12 @@ static void garage_join(int p) {
 
 static void garage_update(float dt) {
   G.controls_card_seat = -1;
+  if (tourney_on()) {
+    static int players_seen;
+    if (G.phase_frames == 1) players_seen = G.players;
+    if (G.players != players_seen && t_match == 0) { players_seen = G.players; tourney_reset(); }   /* a mid garage join reseeds the bracket */
+    tourney_flip_tick();
+  }
   /* joining mid garage: an unseated pad on a face button gets a panel (3.1); a stick moves the practice bot toggle */
   for (int p = 0; p < 4; p++) {
     if (PADS[p].seat >= 0) continue;
@@ -819,6 +939,22 @@ static void fight_update(float dt) {
     if (s < 0 && PADS[p].edge) { G.next_match_chip_pad = p; G.next_match_chip_t = 2.0f; }
   }
   if (G.miniko_frames > 0) { G.miniko_frames--; G.timescale = G.miniko_frames > 0 ? J_MINIKO_TIMESCALE : 1; }
+  /* hazard seats: the stick picks (a new seat starts on the first hazard), A fires (2.10) */
+  for (int s = 0; s < 4; s++) {
+    if (game_hazard_seat_of(s) < 0) continue;
+    if (G.seats[s].kind != SEAT_HUMAN || G.seats[s].pad < 0) continue;
+    if (s == ops_driver || s == ops_gunner) continue;
+    int p = G.seats[s].pad;
+    if (M.hazard_seat[s] == 255) { sim_seat_pick(&M, s, 0); if (M.hazard_seat[s] != 255) audio_play(SFX_MENU_MOVE); continue; }
+    int d = PADS[p].nav_x ? PADS[p].nav_x : PADS[p].nav_y;
+    if (d) { sim_seat_pick(&M, s, d); audio_play(SFX_MENU_MOVE); }
+    if (edge(p, IN_A)) sim_seat_fire(&M, s);
+  }
+  /* the final's OPS crew: the driver's left stick, the gunner's A (lifter) and X (saw) */
+  if (M.ops_driven) {
+    if (ops_driver >= 0 && G.seats[ops_driver].pad >= 0) M.ops_in_drive = PADS[(int)G.seats[ops_driver].pad].cur;
+    if (ops_gunner >= 0 && G.seats[ops_gunner].pad >= 0) M.ops_in_gun = PADS[(int)G.seats[ops_gunner].pad].cur;
+  }
   fight_audio();
   if (M.over) {
     if (M.win_how == WIN_JUDGES) go_judges(); else go_ko();
@@ -832,9 +968,14 @@ static void ko_update(void) {
 }
 
 /* -- results and rematch (10.21) --------------------------------- */
+static void results_next(void) {
+  if (tourney_on() && !t_done) { audio_play(SFX_MENU_OK); go_vote(); }   /* the bracket goes on: the next pairing votes an arena */
+  else go_rematch();
+}
+
 static void results_update(void) {
-  if (G.phase_frames >= RESULTS_MIN) for (int p = 0; p < 4; p++) if (seat_of_pad(p) >= 0 && edge(p, IN_A | IN_START)) { go_rematch(); return; }
-  if (G.phase_frames >= RESULTS_FRAMES) go_rematch();
+  if (G.phase_frames >= RESULTS_MIN) for (int p = 0; p < 4; p++) if (seat_of_pad(p) >= 0 && edge(p, IN_A | IN_START)) { results_next(); return; }
+  if (G.phase_frames >= RESULTS_FRAMES) results_next();
 }
 
 static void rematch_apply(int row) {
@@ -949,9 +1090,9 @@ void game_on_event(const event_t *e) {
       G.miniko_frames = J_MINIKO_FRAMES; G.timescale = J_MINIKO_TIMESCALE;
       if (e->b < M.nbots) {
         const bot_t *v = &M.bots[e->b];
-        char line[48];
-        snprintf(line, sizeof line, "%s", KO_CAUSE[e->zone < 6 ? e->zone : 0]);
-        stinger(v->seat & 3, line, seat_colour(e->a < M.nbots ? M.bots[e->a].seat : v->seat));
+        int vp = v->seat < 4 ? cam_viewport_of(v->seat) : -1;
+        if (vp >= 0) stinger(vp, KO_CAUSE[e->zone < 6 ? e->zone : 0], seat_colour(e->a < M.nbots && M.bots[e->a].seat < 4 ? M.bots[e->a].seat : v->seat & 3));
+        if (v->seat < 4) out_frame[v->seat] = (int)G.frame;
       }
       break; }
     case EV_TAUNT: if (e->a < MAX_BOTS) taunt_frame[e->a] = M.frame; break;
@@ -966,7 +1107,14 @@ void game_on_event(const event_t *e) {
   }
 }
 
-int  game_hazard_seat_of(int seat) { (void)seat; return -1; }
+/* the hazard a seat drives, or -1: an eliminated player (after the 1.5 s stinger) or a
+ * human sitting out a tournament match, in an arena with seat hazards */
+int game_hazard_seat_of(int seat) {
+  if (seat < 0 || seat > 3 || G.phase != PH_FIGHT || out_frame[seat] < 0 || !hazard_mode()) return -1;
+  if ((int)G.frame - out_frame[seat] < 90 || seat == ops_driver || seat == ops_gunner) return -1;
+  if (arena_seat_hazard_count(&ARENAS[M.arena]) <= 0) return -1;
+  return M.hazard_seat[seat] != 255 ? M.hazard_seat[seat] : arena_seat_hazard(&ARENAS[M.arena], 0);
+}
 void game_record_inputs(const pad_state_t in[4]) { (void)in; }
 
 /* -- the frame --------------------------------------------------- */

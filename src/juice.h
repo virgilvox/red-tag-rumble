@@ -8,15 +8,31 @@
 
 typedef struct { uint8_t stop; float punch, shake, flash; uint8_t sparks, chips; float rum_lo, rum_hi; uint16_t rum_ms; uint8_t sfx, crowd; } hit_band_t;
 enum { BAND_TAP, BAND_HIT, BAND_HEAVY, BAND_HUGE, BAND_CLASH, BAND_KO, BAND_COUNT };
+/* hit stop frames by band. sim.h reads these (STOP_*) because the sim applies the stop
+ * itself, so balance --replay stays aligned with the cart. Feel gate (item 7): the hit band
+ * holds 2 frames (spec 0) so a 12 damage ram shows its sparks frozen at the contact before
+ * they fly; without it the contact frame and the release are the same frame and the ram
+ * reads as a brush. */
+#define J_STOP_TAP    0
+#define J_STOP_HIT    2
+#define J_STOP_HEAVY  4
+#define J_STOP_HUGE   6
+#define J_STOP_CLASH  8
+#define J_STOP_KO     6
+/* feel gate tuning against the spec table (5.4): punch and shake up a step in the tap, hit
+ * and heavy bands, flash quads larger, so the camera visibly kicks on a mid ram */
 static const hit_band_t HIT_BANDS[BAND_COUNT] __attribute__((unused)) = {
-  /* stop punch shake flash sparks chips  lo   hi   ms   sfx            crowd */
-  {  0, 0.04f, 0.04f, 0.0f,  6, 0, 0.2f, 0.0f,  60, SFX_HIT_LIGHT, 0 },
-  {  0, 0.06f, 0.08f, 0.3f, 12, 0, 0.4f, 0.2f,  80, SFX_HIT_LIGHT, 0 },
-  {  3, 0.10f, 0.14f, 0.5f, 20, 0, 0.8f, 0.4f, 120, SFX_HIT_HEAVY, 0 },
-  {  6, 0.12f, 0.22f, 0.7f, 32, 6, 1.0f, 0.6f, 160, SFX_HIT_HEAVY, 80 },
-  {  8, 0.12f, 0.26f, 0.9f, 40, 8, 1.0f, 1.0f, 200, SFX_CLASH,     100 },
-  {  6, 0.12f, 0.30f, 0.0f, 40, 8, 1.0f, 1.0f, 400, SFX_KO,        100 },
+  /* stop          punch  shake  flash sparks chips  lo    hi    ms   sfx            crowd */
+  { J_STOP_TAP,   0.05f, 0.06f, 0.30f,  6, 0, 0.2f, 0.0f,  60, SFX_HIT_LIGHT, 0 },
+  { J_STOP_HIT,   0.09f, 0.12f, 0.50f, 12, 2, 0.4f, 0.2f,  80, SFX_HIT_LIGHT, 0 },
+  { J_STOP_HEAVY, 0.13f, 0.18f, 0.70f, 20, 4, 0.8f, 0.4f, 120, SFX_HIT_HEAVY, 0 },
+  { J_STOP_HUGE,  0.15f, 0.24f, 0.90f, 32, 6, 1.0f, 0.6f, 160, SFX_HIT_HEAVY, 80 },
+  { J_STOP_CLASH, 0.14f, 0.28f, 1.00f, 40, 8, 1.0f, 1.0f, 200, SFX_CLASH,     100 },
+  { J_STOP_KO,    0.14f, 0.30f, 0.00f, 40, 8, 1.0f, 1.0f, 400, SFX_KO,        100 },
 };
+/* damage numbers from this much damage up use F_H2 (spec: heavy and up); 8 puts the hit
+ * band on the big font so a 12 reads at a glance in a 640 wide half */
+#define J_NUMBER_BIG_MIN      8.0f
 static inline int hit_band(float dmg) { return dmg < 8 ? BAND_TAP : dmg < 15 ? BAND_HIT : dmg < 30 ? BAND_HEAVY : BAND_HUGE; }
 #define J_BAND_HUGE_WHITE_A   40     /* viewport white alpha, 1 frame */
 #define J_BAND_CLASH_WHITE_A  60
@@ -34,8 +50,8 @@ static inline int hit_band(float dmg) { return dmg < 8 ? BAND_TAP : dmg < 15 ? B
 #define J_SPARK_BOUNCE        0.3f
 #define J_SPARK_LIFE_MIN      0.35f
 #define J_SPARK_LIFE_MAX      0.50f
-#define J_SPARK_SIZE_MIN      0.05f
-#define J_SPARK_SIZE_MAX      0.09f
+#define J_SPARK_SIZE_MIN      0.08f  /* spec 0.05: read as dust in a half */
+#define J_SPARK_SIZE_MAX      0.13f  /* spec 0.09 */
 #define J_SPARK_CAP           400
 #define J_SMOKE_CAP           160
 #define J_SMOKE_RATE_50       4
@@ -70,6 +86,10 @@ static inline int hit_band(float dmg) { return dmg < 8 ? BAND_TAP : dmg < 15 ? B
 #define J_HAZARD_TELL_HZ      2.0f
 #define J_HAZARD_SHAKE        0.08f
 #define J_OPS_SHAKE           0.06f
+#define J_LAND_SHAKE          0.06f  /* 5.2: landing, own viewport */
+#define J_WALL_SHAKE          0.04f  /* 5.2: wall hit over 2 u/s */
+#define J_SPINWALL_SHAKE      0.10f  /* 5.2: spinner wall hit */
+#define J_REDTAG_SHAKE        0.04f  /* 5.2: RED TAG */
 #define J_REDTAG_SPARKS       20
 #define J_PICKUP_CUBES        8
 #define J_LANDING_DUST        10
