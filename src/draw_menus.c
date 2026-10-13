@@ -17,4 +17,3 @@ void settings_screen(float dt) { (void)dt; }
 void hall_screen(float dt) { (void)dt; }
 void flash_card(int step, float t) { (void)step; (void)t; }
 void controls_card(const rect_t *r, int compact, int seat) { (void)r; (void)compact; (void)seat; }
-void bracket_card(const rect_t *r) { (void)r; }

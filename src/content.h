@@ -227,4 +227,17 @@ STR char *S_N_OF_M = "%d OF %d";
 STR char *CARD_CALLOUT[] = { "DRIVE", "WEAPON", "BRAKE", "BOOST", "TAUNT", "PAUSE" };
 STR char *CARD_CALLOUT_SUB[] = { "LEFT STICK", "A OR RT", "B", "L OR LT", "X", "START" };
 
+/* fight HUD chips, the bracket card and the results eyebrow (draw.c, items 9, 10, 16) */
+STR char *S_HILL = "HILL";
+STR char *S_TEAM = "TEAM";
+STR char *S_VS = "VS";
+STR char *S_NEXT = "NEXT";
+STR char *S_SEMIS = "SEMIS";
+STR char *S_THIRD_PLACE = "THIRD PLACE";
+STR char *S_FINAL = "FINAL";
+STR char *S_BYE = "BYE";
+STR char *S_CHAMPION = "CHAMPION";
+STR char *S_RESULTS_EYEBROW = "%s . %s . %s";
+STR char *S_HOLD_A_QUIT = "HOLD A";
+
 #endif
