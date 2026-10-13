@@ -25,7 +25,7 @@ enum { TILE_ORANGE, TILE_RED };
 typedef struct { uint8_t type; float x, z, w, d, ang, h; float period, offset, active_s, tell_s; float dmg; int16_t p0, p1; uint8_t seat_ok; } hazard_def_t;
 typedef struct { uint8_t kind; float x, z, w, d, h, ang; uint32_t colour; int16_t hp; } prop_def_t;   /* kind: PR_WALL, PR_BENCH, PR_HVAC, PR_BOX, PR_SHELF, PR_SIGN, PR_SERVER */
 typedef struct { uint8_t x, y, w, h, colour; } tile_rect_t;                                        /* colour: 0 orange, 1 red */
-typedef struct {
+typedef struct arena_def_s {
   const char *name, *hook;                 /* hook is ARENA_BLURB[i], under 24 chars */
   float w, d;                              /* full size; walls at +-w/2, +-d/2 */
   uint8_t open_mask;                       /* bit 0 +x, 1 -x, 2 +z, 3 -z: open edges (THE ROOF) */
@@ -57,5 +57,17 @@ int   arena_nearest_wall(const arena_def_t *a, float x, float z, float *nx, floa
 /* the k-th seat-drivable hazard index, or -1 */
 int   arena_seat_hazard(const arena_def_t *a, int k);
 int   arena_seat_hazard_count(const arena_def_t *a);
+/* the OPS gate (6.3): an L of two 2 u lexan segments on the zone's inner faces, 0.1 thick,
+ * 1.0 high; out[k] = { x0, z0, x1, z1 } as an AABB. The sim collides with them while the gate
+ * is closed; world.c draws them and slides them open on EV_OPS_WAKE. */
+void  arena_ops_gate(const arena_def_t *a, float out[2][4]);
+/* a hazard's footprint as an AABB (bumpers: the post's square; the laser and wind: the whole floor) */
+void  arena_hazard_rect(const hazard_def_t *h, float *x0, float *z0, float *x1, float *z1);
+/* does a prop collide (benches, HVAC, servers, extra walls); shelves, signs and the mound boxes do not */
+int   arena_prop_solid(const prop_def_t *p);
+/* the mound height field of THE FREE PILE at radius r (6.3.3): 0.9 at the centre, 0 at r 4 */
+float arena_mound_h(float r);
+/* 1 when (x, z) is on a ramp (HZ_RAMP with h over 0.3) or the mound slope: drives climb at 0.6x unless LEG TRACKS or SIX WHEEL */
+int   arena_on_slope(const arena_def_t *a, float x, float z);
 
 #endif
