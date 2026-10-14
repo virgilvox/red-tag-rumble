@@ -17,6 +17,26 @@ void bot_body_from_build(body_t *b, const build_t *build) {
   /* inertia is mass * (hl*hl + hw*hw) / 3 for a box and mass * r*r / 2 for a circle (4.5) */
   b->inertia = c->shape == SH_CIRCLE ? b->mass * b->hl * b->hl / 2 : b->mass * (b->hl * b->hl + b->hw * b->hw) / 3;
   b->inv_inertia = b->inertia > 0 ? 1.0f / b->inertia : 0;
+  /* the height of the body (DEEP-plan 2.1): it occupies [y + clr, y + clr + hgt]; pitch inertia about local x */
+  b->clr = DRIVE_CLEAR[build->drive < DR_COUNT ? build->drive : 0];
+  b->hgt = c->hgt;
+  b->inertia_p = b->mass * (b->hl * b->hl + b->hgt * b->hgt * 0.25f) / 3;
+  b->inv_inertia_p = b->inertia_p > 0 ? 1.0f / b->inertia_p : 0;
+  /* the static lips; LIFTER forks are a lip only while lowered, which the sim updates every step */
+  int wk = bot_wedge_kind(build, 0);
+  b->lip_f = wk >= 0 ? WEDGE_KIND[wk].lip : 0;
+  b->lip_b = 0;
+}
+
+/* the wedge on a build's front, the lowest lip wins: the WEDGE chassis, a WEDGE plate, lowered LIFTER forks,
+ * the LOWBOY nose; WK_NONE when the front is a plain face (MELTY has skids, not a lip) */
+int bot_wedge_kind(const build_t *build, float lift) {
+  if (build->drive == DR_MELTY) return WK_NONE;
+  if (build->chassis == CH_WEDGE) return WK_CHASSIS;
+  if (build->weapon == WP_WEDGE) return WK_PLATE;
+  if (build->weapon == WP_LIFTER && lift < 0.3f) return WK_FORKS;
+  if (build->chassis == CH_LOWBOY) return WK_NOSE;
+  return WK_NONE;
 }
 
 float bot_hp_max(const build_t *build) { return (float)CHASSIS[build->chassis].hp; }
@@ -50,6 +70,7 @@ void bot_setup_ops(bot_t *b, float x, float z, float heading, int driven) {
   b->b.hl *= 1.4f;
   b->b.mass = 6.0f;                          /* what the collision code uses against walls */
   b->b.inv_mass = 0; b->b.inv_inertia = 0;   /* immune to knockback and push (7) */
+  b->b.inv_inertia_p = 0;
   b->hp = b->hp_max = driven ? 400 : 300;
   b->shed_next = 0;                          /* OPS never sheds and is never KO'd */
 }

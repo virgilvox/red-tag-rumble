@@ -142,6 +142,65 @@ static const weapon_def_t WEAPONS[WP_COUNT] __attribute__((unused)) = {
 #define WP_LIFTER_FRAMES      36
 #define WP_LIFTER_MAX_HOLD    180
 
+/* -- the body and contact tables (DEEP-plan 6, deep-physics 3) ------
+ * Ground clearance by drive (the ride height the renderer draws); a HOVER skirt is drawn at 0.22 but is
+ * soft, so a lip gets under it as if it were 0.06 */
+static const float DRIVE_CLEAR[DR_COUNT] __attribute__((unused)) = { 0.12f, 0.10f, 0.10f, 0.12f, 0.22f, 0.30f, 0.10f, 0.10f };
+#define HOVER_CLEAR_SOFT 0.06f
+/* lateral grip by drive, as a share of mu g: how hard the tyres, tracks or feet stop a sideways slide
+ * (TREADS barely slide, TWO WHEEL skids, HOVER drifts across the arena) */
+#ifndef LAT_GRIP_TWO
+#define LAT_GRIP_TWO 0.8f
+#endif
+#ifndef LAT_GRIP_FOUR
+#define LAT_GRIP_FOUR 1.0f
+#endif
+#ifndef LAT_GRIP_TREAD
+#define LAT_GRIP_TREAD 1.6f
+#endif
+static const float LAT_GRIP[DR_COUNT] __attribute__((unused)) = { LAT_GRIP_TWO, LAT_GRIP_FOUR, 1.2f, LAT_GRIP_TREAD, 0.08f, 1.0f, 1.4f, 0.5f };
+/* the share of a drive's grip a ridden bot loses at full ride (load = 1 - this x ride_up): a TWO WHEEL's
+ * axle is at its middle and a WALKER's feet leave the floor with its belly, a HOVER is carried outright */
+static const float DRIVE_RIDE_LOSS[DR_COUNT] __attribute__((unused)) = { 1.0f, 0.75f, 0.75f, 0.75f, 1.0f, 0.9f, 0.75f, 0.75f };
+/* the pitch past which an unsupported bot goes over, by chassis, plus the drive's adjustment (wide and
+ * heavy tracks hold on, tall legs and a short wheelbase let go) */
+static const float CHASSIS_TIP_DEG[CH_COUNT] __attribute__((unused)) = { 55, 58, 66, 50, 55, 35 };
+static const float DRIVE_TIP_ADJ_DEG[DR_COUNT] __attribute__((unused)) = { -5, 0, 0, 6, 0, -5, 6, 0 };
+/* the flipper tumble rate per chassis, rad/s at k 0.5 (the old flip_odds column, as a rate: a LUNCHBOX goes
+ * over from almost any launch, a LOWBOY needs a deep hit on a bot driving in) */
+static const float CHASSIS_TUMBLE[CH_COUNT] __attribute__((unused)) = { 4.5f, 4.2f, 2.7f, 4.5f, 5.0f, 6.3f };
+/* the closing speed at which a wedge that rode all the way under a chassis tips it over (u/s); a SHELL never
+ * tips (it rolls off), a HOVER never tips (it is carried) */
+#ifndef V_TIP_BOX
+#define V_TIP_BOX 3.4f
+#endif
+#ifndef V_TIP_LUNCHBOX
+#define V_TIP_LUNCHBOX 2.2f
+#endif
+#define V_TIP_NEVER 99.0f
+static const float CHASSIS_VTIP[CH_COUNT] __attribute__((unused)) = { V_TIP_BOX, 3.8f, 4.6f, V_TIP_NEVER, 3.0f, V_TIP_LUNCHBOX };
+static const float DRIVE_VTIP_ADJ[DR_COUNT] __attribute__((unused)) = { -0.4f, 0, 0, 0.6f, 0, -0.3f, 0.6f, 0 };
+/* per panel armour pools (3.10): what each of the five plates takes before it falls off */
+static const float ARMOUR_PANEL_HP[AR_COUNT] __attribute__((unused)) = { 0, 20, 28, 24, 36, 32, 44 };
+/* the wedge kinds (3.5): the lowest lip on a bot's front decides. Lip height over the floor, the slope's
+ * length S and the lift at the top of it (S tan slope: 26, 20, 15 and 12 degrees) */
+enum { WK_NONE = -1, WK_CHASSIS, WK_PLATE, WK_FORKS, WK_NOSE, WK_COUNT };
+static const struct { float lip, len, lift; } WEDGE_KIND[WK_COUNT] __attribute__((unused)) = {
+  { 0.02f, 0.60f, 0.2926f },     /* the WEDGE chassis: 26 degrees over 0.60 */
+  { 0.04f, 0.45f, 0.1638f },     /* the WEDGE plate on any chassis: 20 degrees over 0.45 */
+  { 0.05f, 0.35f, 0.0938f },     /* LIFTER forks while lowered: 15 degrees over 0.35 */
+  { 0.08f, 0.30f, 0.0638f },     /* the LOWBOY pancake nose: 12 degrees over 0.30 */
+};
+/* the hammer arc (3.7): the arm is pinned HAMMER_PIVOT_UP over the chassis top and HAMMER_PIVOT_Z behind
+ * the centre, raised HAMMER_A0 degrees (from the forward horizontal) at the end of the windup, and strikes
+ * the floor HAMMER_REACH in front of the pivot at the end of the swing; the head is a circle of HAMMER_HEAD_R */
+#define HAMMER_PIVOT_UP 0.1f
+#define HAMMER_PIVOT_Z  (-0.1f)
+#define HAMMER_A0       110.0f
+#define HAMMER_REACH    1.0f
+#define HAMMER_HEAD_R   0.25f
+#define HAMMER_ACTIVE   10
+
 static const armour_def_t ARMOURS[AR_COUNT] __attribute__((unused)) = {
   /* name         short       flavour                                tags red    mass  khalf burn spark */
   { "NONE",      "NONE",     "ALL FRAME, ALL FAITH",                 0, 0.00f, 0.00f, 0, 0, SP_AMBER_DUST },

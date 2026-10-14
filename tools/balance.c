@@ -12,6 +12,7 @@
  *   build/balance --make-drive bay|laser|pile|dock|shop|roof tools/scripts/drive-<arena>.json
  *   build/balance --make-fight tools/scripts/2p-fight.json --setup "<the cart's [sim] setup line>" [driver=ai|builtin]
  *   build/balance --modes [N]          every mode, arena and seat count must end with no [stuck]
+ *   build/balance --scenario <name>|all the physics acceptance rows of DEEP-plan 6.8, PASS or FAIL each
  *
  * The driver: --robin plays each match with two MEDIUM AIs through ai_think
  * (driver=ai, the default: it is the opponent a player meets); driver=builtin
@@ -31,7 +32,8 @@
 static int usage(void) {
   fprintf(stderr, "usage: balance --parts | --robin N [arenas=...] [hazards=on|off|both] [driver=ai|builtin] [mode=M] | --check-arenas |\n"
                   "               --replay script.json --setup \"line\" [frames=N] [verbose=1|2] | --make-fight script.json --setup \"line\" |\n"
-                  "               --trace arena a b [frames] [driver=ai|builtin] | --hashcheck | --make-drive arena out.json | --modes [N]\n");
+                  "               --trace arena a b [frames] [driver=ai|builtin] | --hashcheck | --make-drive arena out.json | --modes [N] |\n"
+                  "               --scenario <name>|all\n");
   return 2;
 }
 
@@ -932,6 +934,124 @@ static int hashcheck(void) {
   return fail;
 }
 
+/* -- --scenario: the physics acceptance table (DEEP-plan 6.8) ----------------------------------
+ * Each row builds a match itself (hazards off, no hit stop, OPS only where named), places the bots by
+ * hand, drives them through their pads and reads the events. A row prints PASS or FAIL with its numbers;
+ * --scenario all exits non zero on any FAIL. The probe pattern: place, drive in.ly and in.buttons, read M.ev */
+static match_t SM;
+static event_t SEV[MAX_EVENTS]; static int SNEV;
+typedef struct { const char *name; int (*run)(char *msg, int n); } scenario_t;
+
+static void sc_init(int arena, const build_t *b0, const build_t *b1, int ops) {
+  match_setup_t s; memset(&s, 0, sizeof s);
+  s.mode = MODE_DEATHMATCH; s.arena = (uint8_t)arena; s.players = 2; s.fight_len_s = 90; s.seed = 7;
+  s.builds[0] = *b0; s.builds[1] = *b1; s.is_ai[0] = s.is_ai[1] = 1; s.hazards_off = 1; s.hitstop_off = 1; s.no_ops = (uint8_t)!ops;
+  sim_init(&SM, &s);
+}
+static void sc_init_presets(int arena, int p0, int p1, int ops) { build_t a, b; build_preset(&a, p0); build_preset(&b, p1); sc_init(arena, &a, &b, ops); }
+static void sc_place(int slot, float x, float z, float h) {
+  bot_t *b = &SM.bots[slot];
+  b->b.x = b->b.px = x; b->b.z = b->b.pz = z; b->b.h = b->b.ph = h; b->b.vx = b->b.vz = b->b.w = 0;
+  b->floor_y = arena_floor_y(sim_arena(&SM), x, z); b->b.y = b->b.py = b->floor_y; b->still_x = x; b->still_z = z;
+}
+/* thr forward 0..1 (negative reverse), turn positive right, the weapon and other buttons */
+static void sc_pad(int slot, float thr, float turn, uint16_t buttons) {
+  pad_state_t *p = &SM.bots[slot].in; memset(p, 0, sizeof *p);
+  p->ly = (int16_t)(-rtr_clamp(thr, -1, 1) * 32767.0f); p->lx = (int16_t)(rtr_clamp(turn, -1, 1) * 32767.0f); p->buttons = buttons;
+}
+static int sc_step(void) { sim_step(&SM); SNEV = SM.nev; memcpy(SEV, SM.ev, sizeof(event_t) * (size_t)SNEV); SM.nev = 0; return SNEV; }
+static float sc_dist(int i, int j) { float dx = SM.bots[i].b.x - SM.bots[j].b.x, dz = SM.bots[i].b.z - SM.bots[j].b.z; return sqrtf(dx * dx + dz * dz); }
+static float sc_speed(int i) { return sqrtf(SM.bots[i].b.vx * SM.bots[i].b.vx + SM.bots[i].b.vz * SM.bots[i].b.vz); }
+#define SC_OK(cond, ...) do { snprintf(msg, (size_t)n, __VA_ARGS__); return (cond); } while (0)
+
+/* SOLO (two seats and OPS): slots 2 and 3 exist as zeroed bots and never appear in an event */
+static int sc_ghost_sim(char *msg, int n) {
+  match_setup_t s; memset(&s, 0, sizeof s);
+  s.mode = MODE_DEATHMATCH; s.arena = AR_BAY; s.players = 2; s.fight_len_s = 75; s.seed = 4242;
+  build_preset(&s.builds[0], PRE_ROLL_OUT); build_preset(&s.builds[1], PRE_LAUNCH); s.is_ai[0] = s.is_ai[1] = 1; s.ai_level[0] = s.ai_level[1] = AI_MEDIUM;
+  sim_init(&SM, &s);
+  static ai_t ais[MAX_BOTS]; for (int i = 0; i < 2; i++) { ai_init(&ais[i], AI_MEDIUM, i); ai_bind(&ais[i], i); }
+  int bad = 0, events = 0, frames = 0;
+  for (int f = 0; f < 3000 && !sim_over(&SM); f++) {
+    for (int i = 0; i < 2; i++) ai_think(&ais[i], &SM, &SM.bots[i].in);
+    sc_step(); frames++;
+    for (int k = 0; k < SNEV; k++) {
+      const event_t *e = &SEV[k]; events++;
+      int b_is_slot = !(e->type == EV_HAZ_TELL || e->type == EV_HAZ_HIT || e->type == EV_BENCH_BREAK || e->type == EV_BUMPER_BREAK || e->type == EV_HILL_MOVE || e->type == EV_HILL_SCORE || e->type == EV_OPS_LINE || e->type == EV_CLOSING);
+      if (e->a == 2 || e->a == 3 || (b_is_slot && (e->b == 2 || e->b == 3))) bad++;
+    }
+  }
+  SC_OK(SM.nbots == 5 && SM.bots[2].hp_max == 0 && SM.bots[3].hp_max == 0 && bad == 0, "nbots %d, hp_max of slots 2 and 3: %.0f %.0f, %d of %d events over %d frames name slot 2 or 3",
+        SM.nbots, SM.bots[2].hp_max, SM.bots[3].hp_max, bad, events, frames);
+}
+
+/* THE FREE PILE: a ROLL OUT reversing off the mound into a parked LAUNCH on the floor at r 4.1 meets it at
+ * 1.05 (back to back, so no lip is involved) and never overlaps under 1.0 */
+static int sc_mound_contact(char *msg, int n) {
+  sc_init_presets(AR_PILE, PRE_ROLL_OUT, PRE_LAUNCH, 0);
+  const arena_def_t *ar = sim_arena(&SM); float mx = 0, mz = 0;
+  for (int h = 0; h < ar->nhaz; h++) if (ar->haz[h].type == HZ_MOUND) { mx = ar->haz[h].x; mz = ar->haz[h].z; }
+  /* out along +x from the mound centre; the ROLL OUT faces the centre so its back leads */
+  sc_place(0, mx + 2.0f, mz, -1.5707963f); sc_place(1, mx + 4.1f, mz, -1.5707963f);
+  float lx0 = SM.bots[1].b.x, at_contact = -1, dmin = 1e9f, y_at = 0;
+  for (int f = 0; f < 240; f++) {
+    sc_pad(0, -0.7f, 0, 0); sc_pad(1, 0, 0, 0);
+    sc_step();
+    float d = sc_dist(0, 1); if (d < dmin) dmin = d;
+    if (at_contact < 0 && fabsf(SM.bots[1].b.x - lx0) > 0.002f) { at_contact = d; y_at = SM.bots[0].b.y; }
+  }
+  SC_OK(at_contact > 1.02f && at_contact < 1.08f && dmin >= 1.0f, "first contact at centre distance %.3f (1.05 +- 0.03), closest %.3f (never under 1.0), the ROLL OUT %.2f up the dome at contact", at_contact, dmin, y_at);
+}
+
+/* a full spin CHOP into a KO BY FLIP corpse: EV_HIT with EVF_CORPSE and dmg 0 at most every 30 frames, the
+ * spin drops by half a live hit's cost, the corpse moves, nobody's tallies change */
+static int sc_corpse_hittable(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_CHOP, PRE_LAUNCH, 0);
+  sc_place(0, -2.5f, 0, 1.5707963f); sc_place(1, 0, 0, 0);
+  bot_t *c = &SM.bots[0], *v = &SM.bots[1];
+  v->alive = 0; v->ko_how = KO_FLIP; v->inverted = 1;
+  c->spin = 1.0f;
+  float vx0 = v->b.x, vz0 = v->b.z, hp0 = v->hp; int hits = 0, last = -100, min_gap = 1000, bad = 0; float drop = -1;
+  for (int f = 0; f < 300; f++) {
+    sc_pad(0, 0.6f, 0, IN_A); float before = c->spin;
+    /* keep driving at the corpse */
+    float err = rtr_wrap_pi(rtr_atan2(v->b.x - c->b.x, v->b.z - c->b.z) - c->b.h); SM.bots[0].in.lx = (int16_t)(-rtr_clamp(err * 2.2f, -1, 1) * 32767.0f);
+    sc_step();
+    for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_HIT && SEV[k].b == 1) {
+      if (!(SEV[k].flags & EVF_CORPSE) || SEV[k].dmg != 0) bad++;
+      if (hits && SM.frame - last < min_gap) min_gap = SM.frame - last;
+      if (!hits) drop = before + DT / WEAPONS[WP_HORIZ].spin_up - c->spin;
+      hits++; last = SM.frame;
+    }
+  }
+  float moved = sqrtf((v->b.x - vx0) * (v->b.x - vx0) + (v->b.z - vz0) * (v->b.z - vz0));
+  int tallies = c->dealt == 0 && c->biggest == 0 && c->spinner_dealt == 0 && v->hp == hp0;
+  float usual = 0.7f;   /* a live full spin hit's cost on a HORIZONTAL (the energy model: about the bite) */
+  SC_OK(hits >= 2 && bad == 0 && min_gap >= 30 && moved > 0.5f && tallies && drop > 0.25f * usual && drop < 0.75f * usual,
+        "%d corpse hits (flags and dmg wrong on %d), closest gap %d frames (>= 30), first spin drop %.2f (about half of %.2f), corpse moved %.2f, tallies untouched %d", hits, bad, min_gap, drop, usual, moved, tallies);
+}
+
+static const scenario_t SCENARIOS[] = {
+  { "ghost-sim", sc_ghost_sim },
+  { "mound-contact", sc_mound_contact },
+  { "corpse-hittable", sc_corpse_hittable },
+};
+
+static int scenarios(const char *which) {
+  int fail = 0, ran = 0;
+  for (size_t i = 0; i < sizeof SCENARIOS / sizeof SCENARIOS[0]; i++) {
+    if (strcmp(which, "all") && strcmp(which, SCENARIOS[i].name)) continue;
+    char msg[512] = { 0 };
+    int ok = SCENARIOS[i].run(msg, sizeof msg);
+    printf("%s %-22s %s\n", ok ? "PASS" : "FAIL", SCENARIOS[i].name, msg);
+    if (!ok) fail = 1;
+    ran++;
+  }
+  if (!ran) { fprintf(stderr, "scenario: no row named %s\n", which); return 2; }
+  printf(fail ? "scenario: FAIL\n" : "scenario: PASS\n");
+  return fail;
+}
+
 /* -- main --------------------------------------------------------- */
 static int arg_int(int argc, char **argv, const char *key, int dflt) {
   size_t kl = strlen(key);
@@ -949,6 +1069,7 @@ int main(int argc, char **argv) {
   g_verbose = arg_int(argc, argv, "verbose", 0);
   if (!strcmp(argv[1], "--check-arenas")) return check_arenas();
   if (!strcmp(argv[1], "--hashcheck")) return hashcheck();
+  if (!strcmp(argv[1], "--scenario")) return scenarios(argc > 2 ? argv[2] : "all");
   g_trace_seed = (uint32_t)arg_int(argc, argv, "trace", 0);
   if (!strcmp(argv[1], "--modes")) return modes(argc > 2 && argv[2][0] != '-' && !strchr(argv[2], '=') ? atoi(argv[2]) : 4);
   if (!strcmp(argv[1], "--robin")) {
