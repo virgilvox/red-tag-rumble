@@ -663,7 +663,11 @@ static void write_stick(pad_state_t *out, float turn, float throttle) {
 static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float tz, pad_state_t *out, int allow_reverse) {
   const arena_def_t *ar = ai_arena(a, m);
   const drive_def_t *d = &DRIVES[me->build.drive];
-  clamp_inside(ar, &tx, &tz, !me->is_ops && skill_of(a)->backoff > 0 ? 3.0f : 1.2f);
+  /* an enemy within reach against the wall is driven at, not stopped short of (the clamp parked a wedge
+   * 1.2 u off the lexan while a hover pressed into it from the other side) */
+  int close_enemy = 0;
+  if (a->goal == GOAL_ATTACK && a->target >= 0 && a->target < m->nbots) { const bot_t *e = &m->bots[a->target]; close_enemy = len2(e->b.x - tx, e->b.z - tz) < 0.3f && len2(e->b.x - me->b.x, e->b.z - me->b.z) < me->b.hl + e->b.hl + 0.6f; }
+  if (!close_enemy) clamp_inside(ar, &tx, &tz, !me->is_ops && skill_of(a)->backoff > 0 ? 3.0f : 1.2f);
   avoid_hazards(a, m, me, &tx, &tz);
   float mx = me->b.x, mz = me->b.z;
   float dx = tx - mx, dz = tz - mz, dist = len2(dx, dz);
@@ -682,9 +686,12 @@ static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float
    * wall instead, diagonally toward the arena centre, never straight back into the lexan (that was
    * the [stuck] nudge in a wedge against wedge shove at a wall) */
   a->stuck_t++;
-  if (a->stuck_t >= 120) {
+  /* the sim counts a bot pressing into the lexan or a solid without moving (bot_t.stuck_t, the wedge nudge
+   * at 120 frames): 45 of those and the escape starts now, not at the next 120 frame progress check */
+  int wedged = me->stuck_t >= 45 && a->reverse_t == 0;
+  if (a->stuck_t >= 120 || wedged) {
     float moved = len2(mx - a->progress_x, mz - a->progress_z);
-    if (moved < 0.3f && dist > 0.6f && bot_can_drive(me) && !(me->inverted && me->build.weapon == WP_HORIZ)) {   /* an inverted bot that drives (WEDGE, NONE, DRUM...) backs off too */
+    if ((moved < 0.3f || wedged) && dist > 0.6f && bot_can_drive(me) && !(me->inverted && me->build.weapon == WP_HORIZ)) {   /* an inverted bot that drives (WEDGE, NONE, DRUM...) backs off too */
       a->reverse_t = 60;
       a->approach_add = rtr_wrap_pi(a->approach_add + DEG(50));
       float nx, nz, wd; a->esc_wall = 0;

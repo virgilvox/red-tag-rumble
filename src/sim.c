@@ -1055,12 +1055,20 @@ static void wheel_hit_effect(match_t *m, int att, int vic, int edge, float dmg, 
   ev_full(m, EV_WHEEL_HIT, att, vic, 0, cx, cz, v->floor_y + v->b.clr, dmg, 0, 0, edge, weapon, EVF_WHEEL, HIT_WHY_WHEEL, 0, 0);
 }
 
-/* the disc's tooth direction at a contact: perpendicular to the disc radius there, in the spin sense (the
- * discs turn heading-positive, so the tooth at r moves along (rz, -rx)) */
-static void tooth_dir(float ox, float oz, float cx, float cz, float *dx, float *dz) {
+/* the direction a disc's blow throws a body: a face can only push back along its normal plus the friction
+ * the tooth drags along it, so the impulse leaves inside the friction cone round the normal, leaning the way
+ * the tooth was going (perpendicular to the disc radius, in the spin sense: the discs turn heading-positive,
+ * so the tooth at r moves along (rz, -rx)). TOOTH_MU 0.8 leans it about 40 degrees: the victim is thrown
+ * away and spun, the disc kicked back off it */
+#ifndef TOOTH_MU
+#define TOOTH_MU 0.8f
+#endif
+static void tooth_dir(float ox, float oz, float cx, float cz, float nx, float nz, float *dx, float *dz) {
   float rx = cx - ox, rz = cz - oz, l = len2(rx, rz);
-  if (l < 1e-4f) { *dx = 1; *dz = 0; return; }
-  *dx = rz / l; *dz = -rx / l;
+  float tx = l < 1e-4f ? -nz : rz / l, tz = l < 1e-4f ? nx : -rx / l;
+  float ux = nx + TOOTH_MU * tx, uz = nz + TOOTH_MU * tz, ul = len2(ux, uz);
+  if (ul < 1e-4f) { *dx = nx; *dz = nz; return; }
+  *dx = ux / ul; *dz = uz / ul;
 }
 
 /* a weapon hitbox overlapping a victim body: one hit. p is the hammer's share of its swing at the contact
@@ -1093,7 +1101,7 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
     if (spinner) {
       float s0 = *spin, e = s0 * s0, bite = rtr_clamp(BITE_BASE + BITE_SLOPE * (tipk * s0 + rel), BITE_MIN, BITE_MAX);
       e -= e * bite * 0.5f; *spin = sqrtf(e > 0 ? e : 0);
-      if (wid != WP_DRUM) tooth_dir(ox, oz, c->cx, c->cz, &dx, &dz);
+      if (wid != WP_DRUM) tooth_dir(ox, oz, c->cx, c->cz, nx, nz, &dx, &dz);
       knock_at(a, -dx * J * 0.7f, -dz * J * 0.7f, c->cx, c->cz);
     }
     knock_at(v, dx * J, dz * J, c->cx, c->cz);
@@ -1171,9 +1179,9 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
   float dmg = apply_hit(m, &h);
   if (dmg <= 0 && wid != WP_LIFTER && wid != WP_CRUSHER) return;
   if (spinner && wid != WP_DRUM) {
-    float dx, dz; tooth_dir(ox, oz, c->cx, c->cz, &dx, &dz);
+    float dx, dz; tooth_dir(ox, oz, c->cx, c->cz, nx, nz, &dx, &dz);
     knock_at(v, dx * J, dz * J, c->cx, c->cz);
-    knock_at(a, -dx * J * 0.7f, -dz * J * 0.7f, c->cx, c->cz);   /* the disc drags its own frame round */
+    knock_at(a, -dx * J * 0.7f, -dz * J * 0.7f, c->cx, c->cz);   /* the blow kicks the disc back and drags its frame round */
   } else if (wid == WP_DRUM) {
     knock_at(v, nx * J, nz * J, c->cx, c->cz); knock(a, -nx * J * 0.7f, -nz * J * 0.7f);
     if (!v->lifted_by && v->build.drive != DR_HOVER && !v->airborne) {
@@ -1963,6 +1971,7 @@ static void pair_impulse(bot_t *a, bot_t *b, const contact_t *c, float e, float 
 static void bots_collide(match_t *m) {
   /* the lips this step: the kind's lip, a hundredth lower while DIG IN scrapes; a lifter's forks only while down */
   for (int i = 0; i < m->nbots; i++) { bot_t *b = &m->bots[i]; int k = bot_kind(b); b->b.lip_f = k >= 0 ? WEDGE_KIND[k].lip - (b->dig_t > 0 ? 0.01f : 0) : 0; }
+  for (int i = 0; i < m->nbots; i++) m->bots[i].touch_bot = 0;
   /* the rides first: a ridden pair overlaps on purpose and is not a plain contact this step */
   for (int v = 0; v < m->nbots; v++) if (m->bots[v].ride_by) ride_step(m, v);
   for (int it = 0; it < 2; it++) {
@@ -1978,6 +1987,7 @@ static void bots_collide(match_t *m) {
         if (!same_band(a, b)) continue;                       /* one is above the other */
         shape_t sa, sb; shape_of(a, &sa); shape_of(b, &sb);
         contact_t c; if (!collide(&sa, &sb, &c)) continue;
+        a->touch_bot = b->touch_bot = 1;
         float ima = body_im(a), imb = body_im(b);               /* a dead chassis is a 0.5 mass prop, OPS immovable */
         float ims = ima + imb;
         if (ims <= 0) continue;
@@ -2413,8 +2423,9 @@ static void checks_step(match_t *m) {
         if (b->countout % 60 == 0 && b->countout < COUNTOUT_FRAMES) ev_simple(m, EV_COUNT_TICK, i, i, 10 - b->countout / 60, bd->x, bd->z, bd->y);
       } else if (!b->inverted && b->fast_t >= 10) b->countout = 0;
       if (b->inverted) b->frames_inverted++;
-      /* the wall wedge nudge: |thr| > 0.5 against a wall with no displacement for 120 frames */
-      if ((b->pinned & 1) && fabs_f(b->drive_t) > 0.5f && moved < 0.05f && !b->airborne) {
+      /* the wall wedge nudge: |thr| > 0.5 against a wall with no displacement for 120 frames. A bot held
+       * there by another bot is not wedged on the geometry: that is a pin (2.11), OPS's to break */
+      if ((b->pinned & 1) && fabs_f(b->drive_t) > 0.5f && moved < 0.05f && !b->airborne && !b->touch_bot && !b->ride_by) {
         b->stuck_t++;
         if (b->stuck_t >= 120) {
           float nx, nz, dist;
