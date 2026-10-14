@@ -29,6 +29,7 @@ static float lobby_lift[MODE_COUNT];
 static float lobby_empty_t, lobby_auto_t;
 static float garage_shake_t[4];
 static int   garage_last_cost[4] = { -1, -1, -1, -1 };
+static uint32_t garage_last_deny[4];    /* seat_t.deny_frame last seen: a refused lock shakes the tag bar again */
 static float vote_fx[4], vote_fy[4];
 static int   vote_init;
 static float settings_cursor_y = -1, pause_cursor_y = -1, match_cursor_y = -1;
@@ -465,6 +466,7 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
   /* the over budget shake timer */
   int cost = build_cost(&s->build), budget = build_budget(&s->build);
   if (cost != garage_last_cost[seat]) { if (cost > budget) garage_shake_t[seat] = 0.3f; garage_last_cost[seat] = cost; }
+  if (s->deny_frame != garage_last_deny[seat]) { if (s->deny_frame) garage_shake_t[seat] = 0.3f; garage_last_deny[seat] = s->deny_frame; }
   if (garage_shake_t[seat] > 0) garage_shake_t[seat] -= dt;
   /* background */
   hud_rect(x, y, w, h, C_CHAR, 255);
@@ -529,12 +531,12 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
       hud_text(F_MONO_S, x + 16, hy + 4, PRESETS[PRE_RANDOM].blurb, C_ASH, 0, AL_LEFT);
     } else {
       int kx = x + 16;
-      int ax = kx;
-      kx += key_hint(kx, hy, "A", S_LOCK_IN, C_ASH) + 20;
-      kx += key_hint(kx, hy, "START", S_PRESET, C_ASH) + 20;
-      kx += key_hint(kx, hy, "X", S_RANDOM_BOT, C_ASH) + 20;
-      key_hint(kx, hy, "Y", S_CONTROLS, C_ASH);
-      if (s->lock_hold > 0) hud_ring(ax + 12, hy + 12, 18, 3, clampf(s->lock_hold, 0, 1), sc, 255);
+      kx += key_hint(kx, hy, "A", S_LOCK_IN, C_ASH) + 16;
+      kx += key_hint(kx, hy, "START", S_START_FIGHT, C_ASH) + 16;
+      kx += key_hint(kx, hy, "X", S_RANDOM_BOT, C_ASH) + 16;
+      int yx = kx;
+      key_hint(kx, hy, "Y", S_PRESET_HOLD_CONTROLS, C_ASH);
+      if (s->y_hold > 0) hud_ring(yx + 12, hy + 12, 18, 3, clampf(s->y_hold / 0.4f, 0, 1), sc, 255);
     }
   } else {
     /* quadrant: header 24 px with the chip and name, the tag bar from x 300 */
@@ -584,12 +586,13 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
       if (!ai) key_hint(x + 16, hy, "B", S_RELEASE, C_ASH);
       hud_text(F_MONO_S, x + 624, hy + 4, S_LOCKED, C_LIVE, 255, AL_RIGHT);
     } else if (!ai) {
-      int kx = x + 16, ax = kx;
+      int kx = x + 16;
       kx += key_hint(kx, hy, "A", S_LOCK, C_ASH) + 12;
-      kx += key_hint(kx, hy, "START", S_PRESET, C_ASH) + 12;
+      kx += key_hint(kx, hy, "START", S_START_FIGHT, C_ASH) + 12;
       kx += key_hint(kx, hy, "X", S_RANDOM, C_ASH) + 12;
-      key_hint(kx, hy, "Y", S_CTL, C_ASH);
-      if (s->lock_hold > 0) hud_ring(ax + 12, hy + 12, 18, 3, clampf(s->lock_hold, 0, 1), sc, 255);
+      int yx = kx;
+      key_hint(kx, hy, "Y", S_PRESET, C_ASH);
+      if (s->y_hold > 0) hud_ring(yx + 12, hy + 12, 18, 3, clampf(s->y_hold / 0.4f, 0, 1), sc, 255);
     }
   }
   if (s->locked) hud_frame(x, y, w, h, 3, C_LIVE, 255);
@@ -815,10 +818,11 @@ void vote_screen(float dt) {
     thumb_paint(&VOTE_ARENAS[i], x + 16, y + 40, 352, 120);
     hud_text(F_MONO_S, x + 16, y + 172, ARENA_BLURB[i], C_ASH, 255, AL_LEFT);
     hazard_glyphs(&VOTE_ARENAS[i], x + 16, y + 200);
-    /* voter chips at the bottom right */
+    /* voter chips at the bottom right; a human who has pressed A gets a live frame round its chip */
     int cx = x + w - 16 - 24;
     for (int s = 0; s < 4; s++) if (G.seats[s].kind != SEAT_EMPTY && G.seats[s].vote == i) {
       hud_seat_chip(cx, y + h - 16 - 24, 24, 24, s, F_MONO_S, G.seats[s].kind == SEAT_AI);
+      if (G.seats[s].kind == SEAT_HUMAN && G.seats[s].voted) hud_frame(cx - 3, y + h - 16 - 27, 30, 30, 2, C_LIVE, 255);
       cx -= 28;
     }
     if (dim) hud_rect(x, y, w, h, C_CHAR, 140);
@@ -1301,6 +1305,18 @@ void pause_screen_dt(float dt) {
   hud_dirty(0, 0, 1280, 720);
 }
 
+/* one line at the bottom centre over any menu screen: a refused lock, the timer's fallback (game_flow.c toast) */
+static void toast_line(void) {
+  if (G.toast_t <= 0 || !G.toast[0]) return;
+  /* the band under the vote cards and above the vote rule line; in the garage it sits over the bars */
+  int tw = clampi(hud_text_w(F_MONO, G.toast) + 32, 0, 1240), x = 640 - tw / 2, y = 612;
+  hud_rect(x + 4, y + 4, tw, 30, C_SHADOW, 255);
+  hud_rect(x, y, tw, 30, C_CHAR, 255);
+  hud_frame(x, y, tw, 30, 2, C_RUST, 255);
+  hud_text(F_MONO, 640, text_cy(F_MONO, y, 30), G.toast, C_BONE, 255, AL_CENTER);
+  hud_dirty(x, y, tw + 4, 34);
+}
+
 /* -- the dispatcher  -- */
 int menus_draw(float dt) {
   int drew = 1;
@@ -1317,6 +1333,7 @@ int menus_draw(float dt) {
     default: drew = 0; break;
   }
   if (G.paused) pause_screen_dt(dt);
+  if (drew) toast_line();
   return drew;
 }
 
@@ -1415,7 +1432,6 @@ const char *fake_menus_setup(int scene) {
     G.phase = PH_GARAGE; G.phase_t = 18; G.phase_frames = 18 * 60; G.players = 2; G.frame = 2000;
     fake_seat(0, SEAT_HUMAN, PRE_CHOP, ROW_DRIVE, 1, 0);
     snprintf(G.seats[0].hint, sizeof G.seats[0].hint, HINT_FLIPPED, 3);
-    G.seats[0].locked_first = 1;
     fake_seat(1, SEAT_HUMAN, PRE_LAUNCH, ROW_ARMOUR, 0, 0);
     G.seats[1].build.armour = AR_WEAR;                 /* 12 - 2 + 6 = 16, then the bars animate */
     G.seats[1].build.weapon = WP_HORIZ;                /* 2 + 2 + 7 + 6 = 17 */
@@ -1423,7 +1439,7 @@ const char *fake_menus_setup(int scene) {
     G.seats[1].build.chassis = CH_SHELL;               /* 4 + 5 + 7 + 6 = 22: OVER BUDGET BY 2 */
     build_bars(&G.seats[1].build, &G.seats[1].bars_new[0], &G.seats[1].bars_new[1], &G.seats[1].bars_new[2]);
     G.seats[1].bars_from_t = (int)G.frame - 30;
-    G.seats[1].lock_hold = 0.45f;
+    G.seats[1].y_hold = 0.18f; G.seats[1].deny_frame = G.frame - 5;
     if (!strcmp(name, "garage-controls")) G.controls_card_seat = 0;
   }
   else if (!strcmp(name, "garage-solo")) {
@@ -1441,7 +1457,7 @@ const char *fake_menus_setup(int scene) {
     G.seats[2].slot_machine_t = 20;
     fake_seat(3, SEAT_AI, PRE_ROLL_OUT, ROW_PAINT, 1, 0);
     G.seats[0].bars_from_t = (int)G.frame - 40; G.seats[0].bars_old[0] = 0.35f; G.seats[0].bars_old[2] = 0.7f;
-    G.seats[0].lock_hold = 0.7f;
+    G.seats[0].y_hold = 0.28f;
   }
   else if (!strcmp(name, "garage-3p")) {
     G.phase = PH_GARAGE; G.phase_t = 43; G.phase_frames = 43 * 60; G.players = 3; G.frame = 3000;

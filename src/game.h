@@ -85,7 +85,7 @@ typedef struct {
   uint8_t ready, locked, scheme, ai_level, out, team;
   build_t build; uint8_t preset;
   int row;                   /* garage cursor row */
-  float lock_hold;           /* seconds A has been held toward the first lock */
+  float y_hold;              /* garage: seconds Y has been held (a tap under 0.4 s cycles the preset, a hold shows the controls card) */
   float leave_hold;          /* seconds B has been held toward leaving */
   int vote;                  /* arena vote card, or -1 */
   int rematch;               /* rematch row, or -1 */
@@ -96,7 +96,8 @@ typedef struct {
   int bars_from_t;           /* frame the bars started animating */
   float bars_old[3], bars_new[3];
   int slot_machine_t;        /* frames left in the RANDOM BOT animation */
-  int locked_first;          /* has locked once this evening (instant lock afterwards) */
+  uint32_t deny_frame;       /* render frame of the last refused lock (A or Start over budget): the tag bar shakes */
+  uint8_t voted;             /* arena vote: this seat has pressed A (moving the cursor is not a vote) */
   float join_slide;          /* 0..1 panel slide-in */
   char hint[48];
 } seat_t;
@@ -138,7 +139,8 @@ typedef struct {
   int settings_from_pause;   /* SETTINGS opened from the pause menu: B returns to the paused fight */
   uint32_t seed;             /* the host seed (wc_set_seed); every match seed derives from it */
   int solo;                  /* SOLO from the title: one human and the practice bot */
-  int vote_left;             /* frames until the vote closes (8 s, or 2 s after every seat has voted); 0 when unset */
+  int vote_left;             /* frames until the vote closes (8 s, or 2 s after every human has pressed A); 0 when unset */
+  char toast[64]; float toast_t;   /* one line at the bottom centre of any menu screen (a refused lock, the timer's fallback), seconds left */
 } game_t;
 
 extern game_t G;

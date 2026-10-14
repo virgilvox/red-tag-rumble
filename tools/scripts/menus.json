@@ -12,6 +12,8 @@
   { "from": 170, "to": 172, "pad": 1, "buttons": ["X"] },
   { "from": 230, "to": 300, "pad": 0, "buttons": ["A"] },
   { "from": 230, "to": 300, "pad": 1, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 0, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 1, "buttons": ["A"] },
   { "from": 330, "to": 332, "pad": 0, "buttons": ["RIGHT"] },
   { "from": 330, "to": 332, "pad": 1, "buttons": ["RIGHT"] }
 ]

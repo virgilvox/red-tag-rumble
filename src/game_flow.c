@@ -25,7 +25,9 @@
 #define FLASH_STEPS     7
 #define FLASH_CARD_S    2.6f        /* 7 cards in about 18 s (10.7 HOW IT WORKS 18 S) */
 #define SNAP_FRAMES     18          /* the garage timer snaps to zero over 0.3 s when every seat is locked */
-#define VOTE_ALL_WAIT   120         /* 2 s after every seat has voted */
+#define Y_CARD_S        0.4f        /* garage: Y held this long shows the controls card; released before, it cycles the preset */
+#define TOAST_S         2.0f        /* the bottom line of a refused lock or the timer's fallback stays 2 s */
+#define VOTE_ALL_WAIT   120         /* 2 s after every human has pressed A */
 #define VOTE_SHOW       60          /* the decided card lifts for 1 s */
 #define VOTE_TIE_FLICK  30          /* a tie flickers over the tied cards for 0.5 s */
 #define JUDGES_FRAMES   240         /* 1 s freeze plus the 3 s card */
@@ -40,7 +42,6 @@ static int   garage_total, snap_left = -1;
 static build_t ai_pick[4]; static int ai_frame[4];
 static uint32_t grng = 0x2545f491u;            /* the garage and vote rng, reseeded from the host seed */
 static int   vote_all_frame = -1, vote_decide_frame = -1, vote_tie;
-static uint8_t voted[4];
 static int   rs_prev[4];                        /* the right stick's x direction last frame, for edges */
 static int   taunt_frame[MAX_BOTS]; static uint8_t taunted_hit[MAX_BOTS];
 static int   streak_seat = -1; static uint32_t streak_n;
@@ -229,7 +230,7 @@ void game_attract_stop(void) {
 
 /* -- seats ------------------------------------------------------- */
 static void seat_reset_garage(seat_t *s) {
-  s->locked = 0; s->ready = 0; s->row = 0; s->lock_hold = 0; s->leave_hold = 0; s->slot_machine_t = 0;
+  s->locked = 0; s->ready = 0; s->row = 0; s->y_hold = 0; s->leave_hold = 0; s->slot_machine_t = 0; s->deny_frame = 0; s->voted = 0;
   s->bars_from_t = 0; bars_now(&s->build, s->bars_new); memcpy(s->bars_old, s->bars_new, sizeof s->bars_old);
 }
 
@@ -370,9 +371,9 @@ static void go_garage(int rebuild) {
 static void go_vote(void) {
   G.sim_on = 0; G.timescale = 1;
   game_set_phase(PH_VOTE);
-  /* every seat starts with a vote on the last arena (THE BAY on the first fight), so the vote ends
-   * 2 s after it opens unless someone is still moving; the 15.5 scripts rely on that (4p leaves it alone) */
-  for (int s = 0; s < 4; s++) { G.seats[s].vote = G.seats[s].kind != SEAT_EMPTY ? G.arena : -1; voted[s] = G.seats[s].kind != SEAT_EMPTY; }
+  /* every seat's cursor starts on the last arena (THE BAY on the first fight). Nobody has voted yet: the
+   * vote closes at 8 s, or 2 s after every human has pressed A; the card a human sits on counts at the bell */
+  for (int s = 0; s < 4; s++) { G.seats[s].vote = G.seats[s].kind != SEAT_EMPTY ? G.arena : -1; G.seats[s].voted = 0; }
   G.vote_leader = G.arena; G.vote_decided = 0; G.vote_decided_t = -1; G.vote_one_camera = SAVE.one_camera;
   vote_all_frame = -1; vote_decide_frame = -1; vote_tie = 0;
 }
@@ -651,7 +652,8 @@ static void lobby_update(float dt) {
     }
     if (edge(p, IN_X)) { st->scheme = st->scheme == SCHEME_TANK ? SCHEME_ARCADE : SCHEME_TANK; SAVE.scheme[s] = st->scheme; save_commit(); audio_play(SFX_MENU_MOVE); }
     if (edge(p, IN_A)) { st->ready = !st->ready; audio_play(st->ready ? SFX_MENU_OK : SFX_MENU_BACK); }
-    if (edge(p, IN_START) && st->ready) go = 1;
+    /* Start is go: it readies this seat if it was not and takes everyone to the garage */
+    if (edge(p, IN_START)) { st->ready = 1; go = 1; }
     if (held(p, IN_B)) {
       st->leave_hold += dt;
       if (st->leave_hold >= 1.0f) { game_seat_leave(s); audio_play(SFX_MENU_BACK); changed = 1; continue; }
@@ -698,9 +700,24 @@ static void cycle_row(int s, int row, int dir) {
   }
 }
 
+/* one line at the bottom centre of the menu screens for 2 s (draw_menus.c toast_line) */
+static void toast(const char *s) {
+  snprintf(G.toast, sizeof G.toast, "%s", s);
+  G.toast_t = TOAST_S;
+}
+
+/* why a build cannot lock: over budget or a broken rule (NO MOUNT, NOT IN 1V1, ...) */
+static const char *illegal_reason(const build_t *b, char *buf, int n) {
+  int over = build_cost(b) - build_budget(b);
+  const char *reason = 0;
+  if (over > 0) { snprintf(buf, (size_t)n, S_OVER_BUDGET, over); return buf; }
+  if (!build_rules(b, G.players, &reason) && reason) return reason;
+  return S_NOT_LEGAL;
+}
+
 static void lock_seat(int s) {
   seat_t *st = &G.seats[s];
-  st->locked = 1; st->lock_hold = 0; st->locked_first = 1;
+  st->locked = 1; st->y_hold = 0;
   world_turntable_lock(s, 1);
   if (st->kind == SEAT_HUMAN) { SAVE.fav_build[s] = st->build; save_commit(); }
   audio_play(SFX_LOCK);
@@ -766,7 +783,11 @@ static void garage_update(float dt) {
     }
     int p = st->pad;
     if (p < 0) continue;
-    if (held(p, IN_Y)) G.controls_card_seat = s;
+    /* Y: a hold of 0.4 s shows the controls card over this panel; a tap (released before that) cycles the
+     * preset. Start is not the preset button: Start starts (below). */
+    int y_tap = 0;
+    if (held(p, IN_Y)) { st->y_hold += dt; if (st->y_hold >= Y_CARD_S) G.controls_card_seat = s; }
+    else { if ((PADS[p].release & IN_Y) && st->y_hold > 0 && st->y_hold < Y_CARD_S) y_tap = 1; st->y_hold = 0; }
     /* the right stick scrubs the turntable; releasing resumes (3.1) */
     if (PADS[p].cur.rx < -8000 || PADS[p].cur.rx > 8000) world_turntable(s, world_turntable_angle(s) + PADS[p].cur.rx / 32767.0f * 3.0f * dt);
     if (PADS[p].cur.rt > TRIGGER_ON && PADS[p].prev.rt <= TRIGGER_ON) { world_weapon_test_fire(s); audio_part(ROW_WEAPON, st->build.drive == DR_MELTY ? WP_NONE : st->build.weapon); }
@@ -782,7 +803,7 @@ static void garage_update(float dt) {
     /* the practice bot toggle: this human's right stick while the cursor is on PAINT (3.12) */
     int rs = rs_step(p);
     if (rs && st->row == ROW_PAINT && ai_seat() >= 0) set_ai_level(ai_seat(), G.seats[ai_seat()].ai_level + rs);
-    if (edge(p, IN_START)) {
+    if (y_tap) {
       int next = wrap((st->preset < PRE_RANDOM ? st->preset : -1) + 1, PRE_RANDOM + 1);
       uint8_t paint = st->build.paint;
       if (next == PRE_RANDOM) { build_random(&st->build, &grng, G.players); st->slot_machine_t = J_SLOT_MACHINE_FRAMES; }
@@ -793,31 +814,48 @@ static void garage_update(float dt) {
       audio_play(SFX_MENU_MOVE);
     }
     if (edge(p, IN_X)) {
-      uint8_t paint = st->build.paint;
       build_random(&st->build, &grng, G.players);
       st->build.paint = (uint8_t)rtr_rand_n(&grng, PAINT_COUNT);
-      (void)paint;
       build_changed(s);
       st->slot_machine_t = J_SLOT_MACHINE_FRAMES;
     }
-    /* A locks: a 1.0 s hold the first time in an evening, instant afterwards; never over budget or illegal */
-    int legal = build_legal(&st->build, G.players);
-    if (held(p, IN_A) && legal) {
-      if (st->locked_first) { if (edge(p, IN_A)) lock_seat(s); }
-      else { st->lock_hold += dt; if (st->lock_hold >= 1.0f - 1e-4f) lock_seat(s); }
-    } else {
-      if (edge(p, IN_A) && !legal) audio_play(SFX_MENU_BACK);
-      st->lock_hold = 0;
+    /* A locks on the edge, always (no hold to discover). Start locks the same way and starts: once every
+     * human is locked the AI seats lock too and the tape snaps to the vote. Over budget or illegal, both
+     * play the deny sound, shake the tag bar and say why. */
+    if (edge(p, IN_A | IN_START)) {
+      if (build_legal(&st->build, G.players)) lock_seat(s);
+      else {
+        char rb[48], tb[64];
+        audio_play(SFX_MENU_BACK);
+        st->deny_frame = G.frame;
+        snprintf(tb, sizeof tb, S_TOAST_CANNOT_LOCK, illegal_reason(&st->build, rb, sizeof rb));
+        toast(tb);
+      }
     }
   }
-  /* the shared timer: at 0 every unlocked bot locks as is (an illegal one falls back to its seat's preset) */
+  /* the AI seats lock as soon as every human has (solo never waits out the practice bot's garage dance) */
+  int humans = 0, humans_locked = 1;
+  for (int s = 0; s < 4; s++) if (G.seats[s].kind == SEAT_HUMAN) { humans++; if (!G.seats[s].locked) humans_locked = 0; }
+  if (humans && humans_locked) for (int s = 0; s < 4; s++) {
+    seat_t *st = &G.seats[s];
+    if (st->kind != SEAT_AI || st->locked) continue;
+    st->build = ai_pick[s]; build_changed(s); lock_seat(s);
+  }
+  /* the shared timer: at 0 every unlocked bot locks exactly as it stands; only an illegal one (over budget
+   * or unmounted) falls back to its seat's preset, and the screen says so for 2 s */
   int all = 1;
   for (int s = 0; s < 4; s++) if (G.seats[s].kind != SEAT_EMPTY && !G.seats[s].locked) all = 0;
   if (snap_left < 0 && G.phase_frames >= garage_total) {
     for (int s = 0; s < 4; s++) {
       seat_t *st = &G.seats[s];
       if (st->kind == SEAT_EMPTY || st->locked) continue;
-      if (!build_legal(&st->build, G.players)) { uint8_t paint = st->build.paint; build_preset(&st->build, s % PRE_RANDOM); st->build.paint = paint; build_changed(s); }
+      if (!build_legal(&st->build, G.players)) {
+        char rb[48], tb[64];
+        const char *why = illegal_reason(&st->build, rb, sizeof rb);
+        uint8_t paint = st->build.paint; build_preset(&st->build, s % PRE_RANDOM); st->build.paint = paint; build_changed(s);
+        snprintf(tb, sizeof tb, S_TOAST_TIME_FALLBACK, s + 1, why, PRESETS[s % PRE_RANDOM].name);
+        toast(tb);
+      }
       lock_seat(s);
     }
     all = 1;
@@ -842,14 +880,15 @@ static void vote_update(float dt) {
         if (PADS[p].nav_x) { G.vote_one_camera = clampi_(G.vote_one_camera + PADS[p].nav_x, 0, 2); SAVE.one_camera = (uint8_t)G.vote_one_camera; save_commit(); audio_play(SFX_MENU_MOVE); }
         continue;
       }
-      /* Left and Right walk the six cards in order (wrapping across the rows); Up and Down jump a row */
-      if (PADS[p].nav_x) { st->vote = wrap(st->vote + PADS[p].nav_x, ARENA_COUNT); voted[s] = 1; audio_play(SFX_MENU_MOVE); }
-      if (PADS[p].nav_y) { st->vote = wrap(st->vote + 3 * PADS[p].nav_y, ARENA_COUNT); voted[s] = 1; audio_play(SFX_MENU_MOVE); }
-      if (edge(p, IN_A)) { voted[s] = 1; audio_play(SFX_MENU_OK); }
+      /* Left and Right walk the six cards in order (wrapping across the rows); Up and Down jump a row.
+       * Moving is not a vote: only A (or Start) is, and it stays cast if the cursor moves on */
+      if (PADS[p].nav_x) { st->vote = wrap(st->vote + PADS[p].nav_x, ARENA_COUNT); audio_play(SFX_MENU_MOVE); }
+      if (PADS[p].nav_y) { st->vote = wrap(st->vote + 3 * PADS[p].nav_y, ARENA_COUNT); audio_play(SFX_MENU_MOVE); }
+      if (edge(p, IN_A | IN_START) && !st->voted) { st->voted = 1; audio_play(SFX_MENU_OK); }
     }
     /* the tally; AI seats go where the humans lead */
     int count[ARENA_COUNT] = { 0 }, humans = 0, all = 1;
-    for (int s = 0; s < 4; s++) if (G.seats[s].kind == SEAT_HUMAN) { count[G.seats[s].vote]++; humans++; if (!voted[s]) all = 0; }
+    for (int s = 0; s < 4; s++) if (G.seats[s].kind == SEAT_HUMAN) { count[G.seats[s].vote]++; humans++; if (!G.seats[s].voted) all = 0; }
     int lead = G.vote_leader;
     for (int i = 0; i < ARENA_COUNT; i++) if (count[i] > count[lead]) lead = i;
     for (int s = 0; s < 4; s++) if (G.seats[s].kind == SEAT_AI) { G.seats[s].vote = lead; count[lead]++; }
@@ -999,7 +1038,7 @@ static void rematch_update(void) {
     if (s < 0 || G.seats[s].kind != SEAT_HUMAN) continue;
     seat_t *st = &G.seats[s];
     if (PADS[p].nav_y && !G.rematch_votes[s]) { st->rematch = wrap(st->rematch + PADS[p].nav_y, 4); audio_play(SFX_MENU_MOVE); }
-    if (edge(p, IN_A)) { G.rematch_votes[s] = 1; audio_play(SFX_MENU_OK); }
+    if (edge(p, IN_A | IN_START) && !G.rematch_votes[s]) { G.rematch_votes[s] = 1; audio_play(SFX_MENU_OK); }
     if (edge(p, IN_B) && G.rematch_votes[s]) { G.rematch_votes[s] = 0; audio_play(SFX_MENU_BACK); }
   }
   int count[4] = { 0 };
@@ -1055,7 +1094,7 @@ static void hall_update(float dt) {
   for (int p = 0; p < 4; p++) {
     if (held(p, IN_B)) { b_hold[p] += dt; wipe = 1; }
     else if (PADS[p].release & IN_B) { if (b_hold[p] < 0.5f) { b_hold[p] = 0; G.hall_wipe_hold = 0; audio_play(SFX_MENU_BACK); game_set_phase(PH_TITLE); title_idle = 0; return; } b_hold[p] = 0; }
-    if (edge(p, IN_A)) { audio_play(SFX_MENU_BACK); game_set_phase(PH_TITLE); title_idle = 0; return; }
+    if (edge(p, IN_A | IN_START)) { audio_play(SFX_MENU_BACK); game_set_phase(PH_TITLE); title_idle = 0; return; }
   }
   if (wipe) {
     G.hall_wipe_hold += dt;
@@ -1074,7 +1113,7 @@ static void hall_update(float dt) {
 static void rules_update(float dt) {
   G.flash_t += dt;
   int next = G.flash_t >= FLASH_CARD_S, skip = 0;
-  for (int p = 0; p < 4; p++) { if (edge(p, IN_A)) next = 1; if (edge(p, IN_B)) skip = 1; }
+  for (int p = 0; p < 4; p++) { if (edge(p, IN_A | IN_START)) next = 1; if (edge(p, IN_B)) skip = 1; }
   if (next) { G.flash_step++; G.flash_t = 0; audio_play(SFX_MENU_MOVE); }
   if (skip || G.flash_step >= FLASH_STEPS) {
     SAVE.rules_seen = 1; save_commit();
@@ -1127,6 +1166,7 @@ void game_update(float dt) {
   G.phase_t += dt; G.phase_frames++; G.frame++;
   G.tape_phase += 30 * dt;
   if (G.next_match_chip_t > 0) G.next_match_chip_t -= dt;
+  if (G.toast_t > 0) G.toast_t -= dt;
   /* the PRACTICE=off script flag (15.5): the rig holds SELECT, L3 and R3 on pad 0 in the first frames */
   if (G.frame <= 4 && (PADS[0].cur.buttons & RIG_COMBO) == RIG_COMBO && !G.rig_park) { G.rig_park = 1; logf_("[rig] practice parked"); }
   if (G.frame == 1) grng ^= G.seed * 2654435761u;

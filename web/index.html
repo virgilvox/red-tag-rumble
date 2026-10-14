@@ -80,8 +80,8 @@
       <h3>Pads and keys</h3>
       <dl>
         <dt>Pads</dt><dd>Plug in up to four. Left stick drives, A or the right trigger is the weapon, B brakes or rights you, X taunts, L boosts, Start pauses.</dd>
-        <dt>Keyboard</dt><dd>Pad 1. Arrows drive, Z weapon, X brake, A taunt, S controls card, Q boost, Enter start.</dd>
-        <dt>Garage</dt><dd>Up and down pick a row, left and right cycle a part, A locks, Start cycles presets, X rolls a random bot.</dd>
+        <dt>Keyboard</dt><dd>Pad 1. Arrows drive (no stick needed), Z weapon, X brake, A taunt, S hold for the controls card, Q boost, Enter is start: ready and go in the lobby, lock and go in the garage, pause in the fight.</dd>
+        <dt>Garage</dt><dd>Up and down pick a row, left and right cycle a part, A (Z) locks, Start (Enter) locks and starts the fight, a tap of Y (S) cycles the presets, X (A) rolls a random bot. In the arena vote the stick picks and A votes.</dd>
       </dl>
     </div>
     <div class="card">
@@ -166,7 +166,7 @@ async function start() {
   }
   host.autoWireLifecycle?.(window);
   $('gate').style.display = 'none';
-  status('Running. Keyboard is pad 1: arrows, Z, X, A, S, Enter. Pads: press A to take a seat.');
+  status('Running. Keyboard is pad 1: arrows, Z, X, A, S, Enter. Pads: press A to take a seat. Enter starts.');
   canvas.focus?.();
   const frame = async () => {
     try {

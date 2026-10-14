@@ -29,6 +29,7 @@
 #include <math.h>
 
 #define AUDIO_CAP 8192
+#define DEAD_ZONE_SQ (5898 * 5898)       /* 0.18 of 32767, squared: the sim's radial dead zone (12) */
 
 /* the sim's hit stop column must match the feel table */
 _Static_assert(STOP_TAP == J_STOP_TAP && STOP_HIT == J_STOP_HIT && STOP_HEAVY == J_STOP_HEAVY &&
@@ -138,6 +139,26 @@ static void read_pads(float dt) {
     p->cur.lx = w->left_x; p->cur.ly = w->left_y; p->cur.rx = w->right_x; p->cur.ry = w->right_y;
     p->cur.lt = (uint8_t)(w->left_trigger > 0 ? w->left_trigger >> 7 : 0);
     p->cur.rt = (uint8_t)(w->right_trigger > 0 ? w->right_trigger >> 7 : 0);
+    /* the d-pad drives the same axes as the left stick (12): a keyboard pad has no sticks at all. When
+     * the left stick rests inside the 0.18 dead zone the d-pad bits become full deflections (ly negative
+     * is forward, as the sim reads it); a TANK seat gets both sides from them so the right stick's
+     * absence never matters. The sim stays headless: it only ever sees axes. */
+    {
+      int lx = p->cur.lx, ly = p->cur.ly;
+      int dpad = p->cur.buttons & (IN_UP | IN_DOWN | IN_LEFT | IN_RIGHT);
+      if (dpad && lx * lx + ly * ly < DEAD_ZONE_SQ) {
+        int fwd = (p->cur.buttons & IN_UP ? 1 : 0) - (p->cur.buttons & IN_DOWN ? 1 : 0);
+        int steer = (p->cur.buttons & IN_RIGHT ? 1 : 0) - (p->cur.buttons & IN_LEFT ? 1 : 0);
+        int tank = p->seat >= 0 && p->seat < 4 && G.seats[p->seat].scheme == SCHEME_TANK;
+        if (tank && p->cur.rx * p->cur.rx + p->cur.ry * p->cur.ry < DEAD_ZONE_SQ) {
+          int l = fwd + steer, r = fwd - steer;
+          l = l < -1 ? -1 : l > 1 ? 1 : l; r = r < -1 ? -1 : r > 1 ? 1 : r;
+          p->cur.ly = (int16_t)(-32767 * l); p->cur.ry = (int16_t)(-32767 * r);
+        } else {
+          p->cur.lx = (int16_t)(32767 * steer); p->cur.ly = (int16_t)(-32767 * fwd);
+        }
+      }
+    }
     p->cur.cam_yaw = p->seat >= 0 ? cam_yaw(p->seat) : 0;
     p->edge = (uint16_t)(p->cur.buttons & ~p->prev.buttons);
     p->release = (uint16_t)(p->prev.buttons & ~p->cur.buttons);

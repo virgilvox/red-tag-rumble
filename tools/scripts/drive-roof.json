@@ -5,6 +5,7 @@
   { "from": 90,  "to": 92,  "pad": 0, "buttons": ["A"] },
   { "from": 110, "to": 112, "pad": 0, "buttons": ["START"] },
   { "from": 230, "to": 300, "pad": 0, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 0, "buttons": ["A"] },
   { "from": 330, "to": 332, "pad": 0, "buttons": ["RIGHT"] },
   { "from": 342, "to": 344, "pad": 0, "buttons": ["RIGHT"] },
   { "from": 354, "to": 356, "pad": 0, "buttons": ["RIGHT"] },
