@@ -71,6 +71,10 @@ int audio_song_loop(int mode);
 enum { STEM_BASE, STEM_DRUMS, STEM_LEAD, STEM_ALL };
 void audio_bake_begin(int mode, int section, int stem, int hold);
 void audio_bake_render(float *stereo, int frames);
+/* the preview: the SFX band and the master chain over frames that already
+ * hold a song from audio_bake_render at the cart's gains; the conductor is
+ * not stepped here, so the song comes from audio_bake_render alone */
+void audio_bake_sfx_render(float *stereo, int frames);
 #endif
 
 #ifdef __cplusplus
