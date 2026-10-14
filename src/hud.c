@@ -32,8 +32,55 @@ static font_t fonts[F_COUNT];
 
 static int clip_x0, clip_y0, clip_x1 = HUD_W, clip_y1 = HUD_H;   /* buffer space */
 static int alpha_mul = 255;
-static int dirty_on, dirty_x0, dirty_y0, dirty_x1, dirty_y1;      /* reference space */
 static uint16_t glyph_rows[GL_COUNT][16];
+
+/* the dirty rects, kept by the writers themselves (buffer space). The buffer is split into bands of
+ * HUD_BAND rows; each band remembers the columns written since the last hud_clear (paint) and the
+ * columns that changed since hud_dirty_reset (dirty: the previous frame's paint, which hud_clear
+ * wipes, plus this frame's). A fight paints a clock chip at the top, a 4 px seam down the middle and
+ * the strips along the bottom, so main.c uploads a few rects (hud_band_rects) instead of the one
+ * box that would span the whole texture. */
+typedef struct { int on, x0, y0, x1, y1; } box_t;
+static box_t dirty;                                   /* the bounding box, for hud_dirty_get */
+static int paint_any;
+#ifdef RTR_TRACE
+static unsigned trace_frame;              /* frames since boot, counted by hud_dirty_reset, for the trace lines */
+#endif
+static uint8_t paint_band[HUD_NBANDS], dirty_band[HUD_NBANDS];
+static int16_t paint_x0[HUD_NBANDS], paint_x1[HUD_NBANDS], dirty_x0[HUD_NBANDS], dirty_x1[HUD_NBANDS];
+
+static void box_add(box_t *b, int x0, int y0, int x1, int y1) {
+  if (!b->on) { b->on = 1; b->x0 = x0; b->y0 = y0; b->x1 = x1; b->y1 = y1; return; }
+  if (x0 < b->x0) b->x0 = x0;
+  if (y0 < b->y0) b->y0 = y0;
+  if (x1 > b->x1) b->x1 = x1;
+  if (y1 > b->y1) b->y1 = y1;
+}
+static void band_add(uint8_t *on, int16_t *bx0, int16_t *bx1, int b, int x0, int x1) {
+  if (!on[b]) { on[b] = 1; bx0[b] = (int16_t)x0; bx1[b] = (int16_t)x1; return; }
+  if (x0 < bx0[b]) bx0[b] = (int16_t)x0;
+  if (x1 > bx1[b]) bx1[b] = (int16_t)x1;
+}
+/* a writer's bounding box, clipped to the clip rect; every pixel writer below calls this */
+static void touch(const char *tag, int x0, int y0, int x1, int y1) {
+  if (x0 < clip_x0) x0 = clip_x0;
+  if (y0 < clip_y0) y0 = clip_y0;
+  if (x1 > clip_x1) x1 = clip_x1;
+  if (y1 > clip_y1) y1 = clip_y1;
+  if (x0 >= x1 || y0 >= y1) return;
+#ifdef RTR_TRACE
+  /* a writer that covers half the buffer or more, with the primitive that did it */
+  if ((x1 - x0) * (y1 - y0) >= HUD_W * HUD_H / 2) { char m[96]; snprintf(m, sizeof m, "[hud] f=%u big %s %d,%d-%d,%d", trace_frame, tag, x0, y0, x1, y1); wc_log(m, (unsigned)strlen(m)); }
+#else
+  (void)tag;
+#endif
+  box_add(&dirty, x0, y0, x1, y1);
+  paint_any = 1;
+  for (int b = y0 / HUD_BAND, e = (y1 - 1) / HUD_BAND; b <= e; b++) {
+    band_add(paint_band, paint_x0, paint_x1, b, x0, x1);
+    band_add(dirty_band, dirty_x0, dirty_x1, b, x0, x1);
+  }
+}
 
 static uint8_t *load_asset(const char *name, int *len) {
   int n = wc_asset_size(name, (unsigned)strlen(name));
@@ -84,7 +131,21 @@ void hud_init(void) {
   hud_clip_clear();
 }
 
-void hud_clear(void) { memset(hud_px, 0, HUD_W * HUD_H * 4); }
+/* clears what was painted since the last clear (the rest is already transparent: every writer
+ * goes through touch, and the one direct writer, draw_menus.c hole(), only writes zeros) */
+void hud_clear(void) {
+  if (!paint_any) return;
+  for (int b = 0; b < HUD_NBANDS; b++) {
+    if (!paint_band[b]) continue;
+    int x0 = paint_x0[b], x1 = paint_x1[b];
+    int y1 = (b + 1) * HUD_BAND < HUD_H ? (b + 1) * HUD_BAND : HUD_H;
+    for (int yy = b * HUD_BAND; yy < y1; yy++) memset(hud_px + ((size_t)(HUD_H - 1 - yy) * HUD_W + x0) * 4, 0, (size_t)(x1 - x0) * 4);
+    box_add(&dirty, x0, b * HUD_BAND, x1, y1);
+    band_add(dirty_band, dirty_x0, dirty_x1, b, x0, x1);
+    paint_band[b] = 0;
+  }
+  paint_any = 0;
+}
 
 /* -- pixel writers ------------------------------------------------ */
 
@@ -110,6 +171,7 @@ static void rect_b(int x, int y, int w, int h, uint32_t rgb, int a) {
   if (x0 >= x1 || y0 >= y1) return;
   a = a * alpha_mul / 255;
   if (a <= 0) return;
+  touch("rect", x0, y0, x1, y1);
   if (a >= 255) {
     uint8_t c[4] = { (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255 };
     uint32_t v; memcpy(&v, c, 4);
@@ -148,6 +210,7 @@ void hud_tape(int x, int y, int w, int h, float phase) {
   int ph = (int)DF(phase);
   int bx = D(x), by = D(y), bw = D(x + w) - bx, bh = D(y + h) - by;
   const int period = 48 / HUD_DIV, half = 24 / HUD_DIV;
+  touch("tape", bx, by, bx + bw, by + bh);
   for (int yy = by; yy < by + bh; yy++) {
     if (yy < clip_y0 || yy >= clip_y1) continue;
     for (int xx = bx; xx < bx + bw; xx++) {
@@ -197,6 +260,7 @@ int hud_text(int font, int x, int y, const char *s, uint32_t rgb, int a, int ali
     if (c < 32 || c > 127) c = '?';
     stbtt_bakedchar *b = &f->ch[c - 32];
     int gx = (int)floorf(cx + b->xoff + 0.5f), gy = (int)floorf(cy + b->yoff + 0.5f);
+    if (a > 0) touch("text", gx, gy, gx + b->x1 - b->x0, gy + b->y1 - b->y0);
     for (int yy = b->y0; yy < b->y1; yy++) {
       const uint8_t *row = f->atlas + yy * f->aw;
       int py = gy + yy - b->y0;
@@ -293,6 +357,7 @@ void hud_tween(float *cur, float target, float speed, float dt) {
 
 void hud_circle(int cx, int cy, int r, uint32_t rgb, int a) {
   int bx = D(cx), by = D(cy), br = D(r);
+  touch("circle", bx - br - 1, by - br - 1, bx + br + 2, by + br + 2);
   for (int y = -br - 1; y <= br + 1; y++) for (int x = -br - 1; x <= br + 1; x++) {
     float d = sqrtf((float)(x * x + y * y)) - br;
     if (d > 0.5f) continue;
@@ -311,6 +376,7 @@ void hud_line(float x0, float y0, float x1, float y1, float t, uint32_t rgb, int
   if (by0 < clip_y0) by0 = clip_y0;
   if (bx1 > clip_x1 - 1) bx1 = clip_x1 - 1;
   if (by1 > clip_y1 - 1) by1 = clip_y1 - 1;
+  touch("line", bx0, by0, bx1 + 1, by1 + 1);
   float dx = x1 - x0, dy = y1 - y0, l2 = dx * dx + dy * dy;
   for (int y = by0; y <= by1; y++) for (int x = bx0; x <= bx1; x++) {
     float px = x + 0.5f - x0, py = y + 0.5f - y0;
@@ -339,6 +405,7 @@ void hud_chevron(float x, float y, float dx, float dy, float size, float t, uint
 void hud_ring(int cx, int cy, int r, int t, float frac, uint32_t rgb, int a) {
   int bx = D(cx), by = D(cy), br = D(r), bt = D(t) < 1 ? 1 : D(t);
   float lim = frac * 6.2831853f;
+  touch("ring", bx - br - 1, by - br - 1, bx + br + 2, by + br + 2);
   for (int y = -br - 1; y <= br + 1; y++) for (int x = -br - 1; x <= br + 1; x++) {
     float d = sqrtf((float)(x * x + y * y));
     if (d > br + 0.5f || d < br - bt - 0.5f) continue;
@@ -363,6 +430,7 @@ void hud_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_
   if (by1 > clip_y1 - 1) by1 = clip_y1 - 1;
   float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
   if (fabsf(area) < 1e-6f) return;
+  touch("tri", bx0, by0, bx1 + 1, by1 + 1);
   float sgn = area > 0 ? 1.f : -1.f;
   static const float sub[4][2] = { { 0.25f, 0.25f }, { 0.75f, 0.25f }, { 0.25f, 0.75f }, { 0.75f, 0.75f } };
   for (int y = by0; y <= by1; y++) for (int x = bx0; x <= bx1; x++) {
@@ -382,6 +450,7 @@ void hud_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_
 void hud_glyph(int x, int y, int id, int s, uint32_t rgb, int a) {
   if (id < 0 || id >= GL_COUNT) return;
   if (s < 1) s = 1;
+  if (s == 1 && HUD_DIV == 1) touch("glyph", x, y, x + 16, y + 16);      /* the blend path; the rect path tracks itself */
   for (int r = 0; r < 16; r++) {
     uint16_t bits = glyph_rows[id][r];
     if (!bits) continue;
@@ -456,6 +525,7 @@ static logo_cache_t *logo_get(int size, uint32_t flame) {
 void hud_logo(int x, int y, int size, uint32_t flame_rgb) {
   int bs = D(size), bx = D(x), by = D(y);
   logo_cache_t *c = logo_get(bs, flame_rgb);
+  touch("logo", bx, by, bx + bs, by + bs);
   for (int yy = 0; yy < bs; yy++) for (int xx = 0; xx < bs; xx++) {
     int i = yy * bs + xx;
     if (c->sun[i]) blend(bx + xx, by + yy, C_LOGO_SUN, c->sun[i] * 255 / 16);
@@ -601,23 +671,58 @@ void card(int x, int y, int w, int h, int step, int total) {
   hud_dirty(x, y, w + 6, h + 6);
 }
 
-void hud_dirty(int x, int y, int w, int h) {
-  if (w <= 0 || h <= 0) return;
-  if (!dirty_on) { dirty_on = 1; dirty_x0 = x; dirty_y0 = y; dirty_x1 = x + w; dirty_y1 = y + h; return; }
-  if (x < dirty_x0) dirty_x0 = x;
-  if (y < dirty_y0) dirty_y0 = y;
-  if (x + w > dirty_x1) dirty_x1 = x + w;
-  if (y + h > dirty_y1) dirty_y1 = y + h;
-}
+/* the writers track the dirty rect themselves (touch); the explicit hint is kept so the drawers
+ * compile and does nothing, because a hint wider than what was written (the full screen marks
+ * in the menus) would only widen the upload */
+void hud_dirty(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
 int hud_dirty_get(int *x, int *y, int *w, int *h) {
-  if (!dirty_on) return 0;
-  if (x) *x = dirty_x0;
-  if (y) *y = dirty_y0;
-  if (w) *w = dirty_x1 - dirty_x0;
-  if (h) *h = dirty_y1 - dirty_y0;
+  if (!dirty.on) return 0;
+  if (x) *x = dirty.x0 * HUD_DIV;
+  if (y) *y = dirty.y0 * HUD_DIV;
+  if (w) *w = (dirty.x1 - dirty.x0) * HUD_DIV;
+  if (h) *h = (dirty.y1 - dirty.y0) * HUD_DIV;
   return 1;
 }
-void hud_dirty_reset(void) { dirty_on = 0; }
+int hud_dirty_bands(uint8_t *on, int16_t *x0, int16_t *x1) {
+  if (!dirty.on) return 0;
+  int n = 0;
+  for (int b = 0; b < HUD_NBANDS; b++) {
+    on[b] = dirty_band[b]; x0[b] = dirty_x0[b]; x1[b] = dirty_x1[b];
+    n += dirty_band[b];
+  }
+  return n;
+}
+int hud_band_rects(const uint8_t *on, const int16_t *bx0, const int16_t *bx1, int *x0, int *y0, int *x1, int *y1, int max) {
+  int n = 0;
+  if (max <= 0) return 0;
+  for (int b = 0; b < HUD_NBANDS; b++) {
+    if (!on[b]) continue;
+    int cx0 = bx0[b], cx1 = bx1[b];
+    int top = b * HUD_BAND, bot = (b + 1) * HUD_BAND < HUD_H ? (b + 1) * HUD_BAND : HUD_H;
+    if (n > 0 && y1[n - 1] == top) {
+      /* the band under the last rect: join them when the columns nearly agree (a seam running down the
+       * screen, a strip spanning several bands), else start a new rect so a chip at the top and a strip
+       * at the bottom never pull a full width rect over the whole texture */
+      int ux0 = x0[n - 1] < cx0 ? x0[n - 1] : cx0, ux1 = x1[n - 1] > cx1 ? x1[n - 1] : cx1;
+      int wa = x1[n - 1] - x0[n - 1], wb = cx1 - cx0, wmin = wa < wb ? wa : wb;
+      if (ux1 - ux0 <= wmin + wmin / 4 + 16 || n == max) { x0[n - 1] = ux0; x1[n - 1] = ux1; y1[n - 1] = bot; continue; }
+    } else if (n == max) {
+      /* out of slots: the last rect grows over everything that is left */
+      if (cx0 < x0[n - 1]) x0[n - 1] = cx0;
+      if (cx1 > x1[n - 1]) x1[n - 1] = cx1;
+      y1[n - 1] = bot;
+      continue;
+    }
+    x0[n] = cx0; x1[n] = cx1; y0[n] = top; y1[n] = bot; n++;
+  }
+  return n;
+}
+void hud_dirty_reset(void) {
+  dirty.on = 0; memset(dirty_band, 0, sizeof dirty_band);
+#ifdef RTR_TRACE
+  trace_frame++;
+#endif
+}
 
 void hud_seat_chip(int x, int y, int w, int h, int seat, int font, int ai) {
   uint32_t c = SEAT_RGB[seat & 3];

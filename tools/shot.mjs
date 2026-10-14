@@ -9,6 +9,9 @@
 //   SAVE_OUT=build/s.sav node tools/shot.mjs ...   # write the cart's save region at the end
 //   SAVE_IN=build/s.sav node tools/shot.mjs ...    # boot with that save (off by default: the rig never
 //                                                  # passes save data unless asked, so shots stay reproducible)
+//   TIMING=1 node tools/shot.mjs ...     # a [rig] line every 60 frames: host ms per frame (avg and max),
+//                                        # texture uploads per second (calls, KB, of which partial), GL
+//                                        # programs linked so far and the wasm memory size; a last line at the end
 //
 // script.json entries, frame ranges inclusive:
 //   { "from": 0, "to": 30, "pad": 0, "buttons": ["A"], "lx": 0, "ly": -32767, "rx": 0, "ry": 0, "lt": 0, "rt": 32767 }
@@ -52,6 +55,20 @@ for (const s of script) for (const b of s.buttons ?? []) if (!(b in BTN)) { cons
 
 const W = 1280, H = 720;
 const { gl } = createWebGL2Context(W, H);
+// TIMING=1: count the GL texture uploads and program links the cart causes, and time each host frame
+const timing = !!process.env.TIMING;
+const stat = { texCalls: 0, texKB: 0, subCalls: 0, links: 0, ms: 0, max: 0, n: 0 };
+if (timing) {
+  const wrap = (name, fn) => { const o = gl[name].bind(gl); gl[name] = (...a) => { fn(...a); return o(...a); }; };
+  const bytes = (a) => { const d = a[a.length - 1]; return d && d.byteLength ? d.byteLength : 0; };
+  wrap('texImage2D', (...a) => { stat.texCalls++; stat.texKB += bytes(a) / 1024; });
+  wrap('texSubImage2D', (...a) => { stat.texCalls++; stat.subCalls++; stat.texKB += bytes(a) / 1024; });
+  wrap('linkProgram', () => { stat.links++; });
+}
+const timingLine = (f) => {
+  console.log(`[rig] f=${f} ms/frame avg=${(stat.ms / Math.max(1, stat.n)).toFixed(2)} max=${stat.max.toFixed(2)} tex/s=${stat.texCalls} texKB/s=${stat.texKB.toFixed(0)} partial/s=${stat.subCalls} links=${stat.links} mem=${host.memory.buffer.byteLength}`);
+  stat.texCalls = 0; stat.texKB = 0; stat.subCalls = 0; stat.ms = 0; stat.max = 0; stat.n = 0;
+};
 const host = new CartHost();
 await host.load(new Uint8Array(readFileSync(cart)), { glBackend: gl, ...(process.env.SAVE_IN ? { saveData: new Uint8Array(readFileSync(process.env.SAVE_IN)) } : {}), ...(process.env.PACE ? {} : { deterministic: { seed: 7 } }) });
 
@@ -84,7 +101,9 @@ for (let f = 0; f <= last; f++) {
     if (s.lt !== undefined) p.leftTrigger = s.lt;
     if (s.rt !== undefined) p.rightTrigger = s.rt;
   }
+  const t0 = timing ? performance.now() : 0;
   const fr = host.runFrame(pads);
+  if (timing) { const ms = performance.now() - t0; stat.ms += ms; if (ms > stat.max) stat.max = ms; stat.n++; if (f > 0 && f % 60 === 0) timingLine(f); }
   if (process.env.WAV && fr?.audio) audioChunks.push(Float32Array.from(fr.audio));
   // let the event loop breathe; PACE=1 runs in real time
   await new Promise((r) => (process.env.PACE ? setTimeout(r, 16) : setImmediate(r)));
@@ -99,6 +118,7 @@ for (let f = 0; f <= last; f++) {
     console.log(`shot ${prefix}-${f}.png`);
   }
 }
+if (timing && stat.n) timingLine(last);
 if (process.env.WAV) {
   // 16-bit stereo 48 kHz WAV of everything the cart played
   const n = audioChunks.reduce((a, c) => a + c.length, 0);

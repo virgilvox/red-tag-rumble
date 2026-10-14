@@ -39,11 +39,10 @@ static float wrf(void) { return rtr_rand_f(&wrng); }
 static t3_geometry *g_box, *g_cyl12, *g_cyl8, *g_disc, *g_circle, *g_plane, *g_ring, *g_sphere, *g_cone, *g_torus;
 
 /* the cache compares the whole parameter tuple, never a hash, so two related
- * paints can never share a slot; it is sized for every colour the paint schemes,
- * seat colours and armour mixes can produce, and logs once if it ever fills */
+ * paints can never share a slot; it grows as needed, so a late entry is never a
+ * fresh material per call */
 typedef struct { uint32_t c, emis; float rough, metal, ei; int kind; t3_material *m; } mat_slot_t;
-#define MAT_CAP 512
-static mat_slot_t mats[MAT_CAP]; static int nmats, mats_full_logged;
+static mat_slot_t *mats; static int nmats, cmats;
 
 static t3_material *mat_ex(uint32_t c, float rough, float metal, uint32_t emis, float ei, int kind) {
   if (kind == 1) { rough = 0; metal = 0; emis = 0; ei = 0; }
@@ -56,8 +55,8 @@ static t3_material *mat_ex(uint32_t c, float rough, float metal, uint32_t emis, 
     m->roughness = rough; m->metalness = metal;
     if (ei > 0) { m->emissive = t3_color_hex(emis); m->emissive_intensity = ei; }
   }
-  if (nmats < MAT_CAP) { mats[nmats] = (mat_slot_t){ c, emis, rough, metal, ei, kind, m }; nmats++; }
-  else if (!mats_full_logged) { mats_full_logged = 1; const char *l = "[world] material cache full"; wc_log(l, (unsigned)strlen(l)); }
+  if (nmats == cmats) { cmats = cmats ? cmats * 2 : 256; mats = realloc(mats, sizeof *mats * (size_t)cmats); }
+  mats[nmats++] = (mat_slot_t){ c, emis, rough, metal, ei, kind, m };
   return m;
 }
 static t3_material *mat(uint32_t c, float rough, float metal) { return mat_ex(c, rough, metal, 0, 0, 0); }
@@ -121,9 +120,12 @@ static void soup_tri(soup_t *s, const float *a, const float *b, const float *c) 
 static void soup_quad(soup_t *s, const float *a, const float *b, const float *c, const float *d) { soup_tri(s, a, b, c); soup_tri(s, a, c, d); }
 static t3_geometry *soup_finish(soup_t *s) {
   t3_geometry *g = t3_geometry_new();
-  t3_geometry_set_attribute(g, T3_ATTR_POSITION, t3_attribute_new(T3_FLOAT32, s->p, s->n_, 3));
-  t3_geometry_set_attribute(g, T3_ATTR_NORMAL, t3_attribute_new(T3_FLOAT32, s->n, s->n_, 3));
-  t3_geometry_set_attribute(g, T3_ATTR_UV, t3_attribute_new(T3_FLOAT32, s->uv, s->n_, 2));
+  /* the geometry retains each attribute, so the creation ref goes: a wedge is rebuilt every garage
+   * and every match, and with the ref kept its three arrays outlived the geometry */
+  t3_attribute *p = t3_attribute_new(T3_FLOAT32, s->p, s->n_, 3), *n = t3_attribute_new(T3_FLOAT32, s->n, s->n_, 3), *uv = t3_attribute_new(T3_FLOAT32, s->uv, s->n_, 2);
+  t3_geometry_set_attribute(g, T3_ATTR_POSITION, p); t3_release(p);
+  t3_geometry_set_attribute(g, T3_ATTR_NORMAL, n); t3_release(n);
+  t3_geometry_set_attribute(g, T3_ATTR_UV, uv); t3_release(uv);
   t3_geometry_compute_bounding_sphere(g);
   t3_geometry_compute_bounding_box(g);
   free(s->p); free(s->n); free(s->uv);
@@ -455,14 +457,17 @@ static float tt_angle[4], tt_pause[4]; static int tt_locked[4];
 
 static void arena_floor(warena_t *w, const arena_def_t *a) {
   int W = 1024, H = (int)(1024.0f * a->d / a->w + 0.5f);
-  uint8_t *px = malloc((size_t)W * H * 4), *flipped = malloc((size_t)W * H * 4);
+  uint8_t *px = malloc((size_t)W * H * 4);
   paint_floor(a, W, H, px);
   /* the canvas has the back wall on row 0; the plane wants it at v = 1, so the rows are
-   * reversed here once instead of flip_y, which would copy the whole texture on every
-   * upload (every scorch repaint in a fight) */
-  for (int y = 0; y < H; y++) memcpy(flipped + (size_t)(H - 1 - y) * W * 4, px + (size_t)y * W * 4, (size_t)W * 4);
-  t3_texture *t = t3_data_texture_new(W, H, flipped);
-  free(px); free(flipped);
+   * swapped in place here once instead of flip_y, which copies the whole texture on every
+   * upload (a 4 MB heap step at the first countdown of every arena and on every scorch repaint) */
+  for (int y = 0; y < H / 2; y++) {
+    uint8_t row[4096]; uint8_t *lo = px + (size_t)y * W * 4, *hi = px + (size_t)(H - 1 - y) * W * 4;
+    memcpy(row, lo, (size_t)W * 4); memcpy(lo, hi, (size_t)W * 4); memcpy(hi, row, (size_t)W * 4);
+  }
+  t3_texture *t = t3_data_texture_new(W, H, px);
+  free(px);
   t->color_space = T3_SRGB_COLOR_SPACE; t->flip_y = false;
   t->mag_filter = T3_LINEAR; t->min_filter = T3_LINEAR;
   w->floor_tex = t; w->floor_w = W; w->floor_h = H;
