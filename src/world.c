@@ -12,6 +12,7 @@
 #include "hud.h"
 #include "bot.h"
 #include "game.h"
+#include "wasmcart.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -37,18 +38,26 @@ static float wrf(void) { return rtr_rand_f(&wrng); }
  * by three.c's auto instancing, so both are cached and never released */
 static t3_geometry *g_box, *g_cyl12, *g_cyl8, *g_disc, *g_circle, *g_plane, *g_ring, *g_sphere, *g_cone, *g_torus;
 
-typedef struct { uint32_t key; t3_material *m; } mat_slot_t;
-static mat_slot_t mats[256]; static int nmats;
+/* the cache compares the whole parameter tuple, never a hash, so two related
+ * paints can never share a slot; it is sized for every colour the paint schemes,
+ * seat colours and armour mixes can produce, and logs once if it ever fills */
+typedef struct { uint32_t c, emis; float rough, metal, ei; int kind; t3_material *m; } mat_slot_t;
+#define MAT_CAP 512
+static mat_slot_t mats[MAT_CAP]; static int nmats, mats_full_logged;
 
 static t3_material *mat_ex(uint32_t c, float rough, float metal, uint32_t emis, float ei, int kind) {
-  uint32_t key = c ^ ((uint32_t)(rough * 31) << 24) ^ ((uint32_t)(metal * 31) << 19) ^ (emis * 2654435761u) ^ ((uint32_t)(ei * 4) << 14) ^ ((uint32_t)kind << 29);
-  for (int i = 0; i < nmats; i++) if (mats[i].key == key) return mats[i].m;
+  if (kind == 1) { rough = 0; metal = 0; emis = 0; ei = 0; }
+  for (int i = 0; i < nmats; i++) {
+    const mat_slot_t *s = &mats[i];
+    if (s->c == c && s->kind == kind && s->rough == rough && s->metal == metal && s->emis == emis && s->ei == ei) return s->m;
+  }
   t3_material *m = kind == 1 ? t3_mesh_basic_material_new(c) : t3_mesh_standard_material_new(c);
   if (kind != 1) {
     m->roughness = rough; m->metalness = metal;
     if (ei > 0) { m->emissive = t3_color_hex(emis); m->emissive_intensity = ei; }
   }
-  if (nmats < 256) { mats[nmats].key = key; mats[nmats].m = m; nmats++; }
+  if (nmats < MAT_CAP) { mats[nmats] = (mat_slot_t){ c, emis, rough, metal, ei, kind, m }; nmats++; }
+  else if (!mats_full_logged) { mats_full_logged = 1; const char *l = "[world] material cache full"; wc_log(l, (unsigned)strlen(l)); }
   return m;
 }
 static t3_material *mat(uint32_t c, float rough, float metal) { return mat_ex(c, rough, metal, 0, 0, 0); }
@@ -121,17 +130,19 @@ static t3_geometry *soup_finish(soup_t *s) {
   return g;
 }
 
-/* a wedge: footprint w (x) by d (z), the back face (z = -d/2) is h tall, sloping to the floor at the front */
+/* a wedge: footprint w (x) by d (z), the back face (z = -d/2) is h tall, sloping to the floor at the front.
+ * Every face is wound counter clockwise seen from outside, so soup_tri's (b - a) x (c - a)
+ * normal points out of the solid and three.c's front side cull keeps the outside */
 static t3_geometry *wedge_geometry(float w, float d, float h) {
   soup_t s; soup_init(&s, 8);
   float x0 = -w / 2, x1 = w / 2, z0 = -d / 2, z1 = d / 2;
   float a[3] = { x0, 0, z0 }, b[3] = { x1, 0, z0 }, c[3] = { x1, 0, z1 }, dd[3] = { x0, 0, z1 };
   float e[3] = { x0, h, z0 }, f[3] = { x1, h, z0 };
-  soup_quad(&s, a, dd, c, b);         /* bottom */
-  soup_quad(&s, e, f, c, dd);         /* slope */
-  soup_quad(&s, a, b, f, e);          /* back */
-  soup_tri(&s, a, e, dd);             /* left */
-  soup_tri(&s, b, c, f);              /* right */
+  soup_quad(&s, a, b, c, dd);         /* bottom, -y */
+  soup_quad(&s, e, dd, c, f);         /* slope, +y +z */
+  soup_quad(&s, a, e, f, b);          /* back, -z */
+  soup_tri(&s, a, dd, e);             /* left, -x */
+  soup_tri(&s, b, f, c);              /* right, +x */
   return soup_finish(&s);
 }
 
@@ -168,11 +179,12 @@ static t3_geometry *panel_geometry(float w, float h, int state, uint32_t seed) {
 static t3_geometry *crowd_geometry(int frame) {
   soup_t s; soup_init(&s, 60);
   float lean = frame == 1 ? 0.12f : 0;
+  /* the corner arrays are c0..c7, never single capitals: G is the game state */
   #define BX(x0, y0, z0, x1, y1, z1) do { \
-    float A[3] = { x0, y0, z0 }, B[3] = { x1, y0, z0 }, C[3] = { x1, y1, z0 }, D[3] = { x0, y1, z0 }; \
-    float E[3] = { x0, y0, z1 }, F[3] = { x1, y0, z1 }, G[3] = { x1, y1, z1 }, H[3] = { x0, y1, z1 }; \
-    soup_quad(&s, A, D, C, B); soup_quad(&s, E, F, G, H); soup_quad(&s, A, B, F, E); soup_quad(&s, D, H, G, C); \
-    soup_quad(&s, A, E, H, D); soup_quad(&s, B, C, G, F); } while (0)
+    float c0[3] = { x0, y0, z0 }, c1[3] = { x1, y0, z0 }, c2[3] = { x1, y1, z0 }, c3[3] = { x0, y1, z0 }; \
+    float c4[3] = { x0, y0, z1 }, c5[3] = { x1, y0, z1 }, c6[3] = { x1, y1, z1 }, c7[3] = { x0, y1, z1 }; \
+    soup_quad(&s, c0, c3, c2, c1); soup_quad(&s, c4, c5, c6, c7); soup_quad(&s, c0, c1, c5, c4); soup_quad(&s, c3, c7, c6, c2); \
+    soup_quad(&s, c0, c4, c7, c3); soup_quad(&s, c1, c2, c6, c5); } while (0)
   BX(-0.22f, 0.0f, -0.1f, 0.22f, 0.95f, 0.1f);                        /* torso */
   BX(-0.14f, 1.0f, -0.12f + lean, 0.14f, 1.3f, 0.12f + lean);           /* head */
   if (frame == 2) { BX(-0.42f, 0.9f, -0.06f, -0.26f, 1.55f, 0.06f); BX(0.26f, 0.9f, -0.06f, 0.42f, 1.55f, 0.06f); }
@@ -443,11 +455,15 @@ static float tt_angle[4], tt_pause[4]; static int tt_locked[4];
 
 static void arena_floor(warena_t *w, const arena_def_t *a) {
   int W = 1024, H = (int)(1024.0f * a->d / a->w + 0.5f);
-  uint8_t *px = malloc((size_t)W * H * 4);
+  uint8_t *px = malloc((size_t)W * H * 4), *flipped = malloc((size_t)W * H * 4);
   paint_floor(a, W, H, px);
-  t3_texture *t = t3_data_texture_new(W, H, px);
-  free(px);
-  t->color_space = T3_SRGB_COLOR_SPACE; t->flip_y = true;
+  /* the canvas has the back wall on row 0; the plane wants it at v = 1, so the rows are
+   * reversed here once instead of flip_y, which would copy the whole texture on every
+   * upload (every scorch repaint in a fight) */
+  for (int y = 0; y < H; y++) memcpy(flipped + (size_t)(H - 1 - y) * W * 4, px + (size_t)y * W * 4, (size_t)W * 4);
+  t3_texture *t = t3_data_texture_new(W, H, flipped);
+  free(px); free(flipped);
+  t->color_space = T3_SRGB_COLOR_SPACE; t->flip_y = false;
   t->mag_filter = T3_LINEAR; t->min_filter = T3_LINEAR;
   w->floor_tex = t; w->floor_w = W; w->floor_h = H;
   t3_material *m = t3_mesh_standard_material_new(0xffffff);
@@ -653,7 +669,8 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       t3_mesh *cone = t3_mesh_new(g_cone, hz->glow_m);
       t3_object_set_scale(cone, h->w * 0.45f, 1.4f, h->d * 0.45f); t3_object_set_position(cone, 0, 0.7f, 0); t3_object_set_rotation(cone, PI, 0, 0);
       t3_object_add(hz->mov, cone); t3_release(cone);
-      t3_mesh *core = t3_mesh_new(g_cone, glass(0xfff1d6, 0.0f));
+      t3_material *cm = glass(0xfff1d6, 0.0f);
+      t3_mesh *core = t3_mesh_new(g_cone, cm); t3_release(cm);
       t3_object_set_scale(core, h->w * 0.22f, 0.9f, h->d * 0.22f); t3_object_set_position(core, 0, 0.45f, 0); t3_object_set_rotation(core, PI, 0, 0);
       t3_object_add(hz->mov, core); t3_release(core);
       hz->mov2 = (t3_object *)core;
@@ -684,17 +701,34 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       }
       break; }
     case HZ_BUMPER: {
-      float H = h->p0 >= 5 ? h->p0 / 10.0f : h->p0 > 0 ? (float)h->p0 : 1.0f;   /* p0: tenths of a unit at 5 and up, whole units below */
-      CYL(g, M_PAINT(C_TAPE), 0.4f, H, 0, H / 2, 0);
-      CYL(g, M_PAINT(C_HAZARD), 0.42f, 0.22f, 0, H * 0.55f, 0);
+      /* p0 is the post height in hundredths of a unit, the unit the sim collides with (sim.c reads p0 / 100) */
+      float H = h->p0 > 0 ? h->p0 / 100.0f : 1.0f;
+      CYL(g, M_PAINT(0x3a342b), 0.4f, H, 0, H / 2, 0);
+      CYL(g, M_PAINT(C_HAZARD), 0.42f, 0.16f, 0, H * 0.55f, 0);
+      part(g, g_disc, M_PAINT(C_TAPE), 0.4f, 0.03f, 0.4f, 0, H + 0.015f, 0);
       hz->tell_m = mat_ex(C_HAZARD, 0.4f, 0, C_HAZARD, 0.2f, 0);
-      part(g, g_sphere, hz->tell_m, 0.16f, 0.16f, 0.16f, 0, H + 0.12f, 0);
+      part(g, g_sphere, hz->tell_m, 0.14f, 0.14f, 0.14f, 0, H + 0.12f, 0);
       break; }
     case HZ_DECK: {
-      BOX(g, M_STEEL(0x5a5651), h->w, 0.12f, h->d, 0, h->h - 0.06f, 0);
-      BOX(g, M_PAINT(C_BONE), h->w, 0.03f, 0.12f, 0, h->h + 0.015f, h->d / 2 - 0.06f);
-      for (float px = -h->w / 2 + 1; px < h->w / 2; px += 2) BOX(g, M_STEEL(C_STEEL), 0.12f, h->h - 0.12f, 0.12f, px, (h->h - 0.12f) / 2, h->d / 2 - 0.2f);
-      BOX(g, M_PAINT(C_TAPE), h->w, h->h - 0.12f, 0.04f, 0, (h->h - 0.12f) / 2, -h->d / 2 + 0.02f);
+      /* the deck reads from the floor: a painted steel top, a lit front wall with a tape lip
+       * along its edge, and two strip lights under the lip so the climb is visible at night */
+      t3_material *top = mat(0x8a857c, 0.5f, 0.2f), *face = mat(0x6f6c66, 0.6f, 0.2f);
+      BOX(g, top, h->w, 0.12f, h->d, 0, h->h - 0.06f, 0);
+      BOX(g, face, h->w, h->h - 0.12f, 0.06f, 0, (h->h - 0.12f) / 2, h->d / 2 - 0.03f);
+      BOX(g, M_PAINT(C_HAZARD), h->w, 0.04f, 0.14f, 0, h->h + 0.02f, h->d / 2 - 0.07f);
+      BOX(g, M_PAINT(C_TAPE), h->w, 0.1f, 0.02f, 0, h->h - 0.17f, h->d / 2 + 0.005f);
+      for (float px = -h->w / 2 + 1; px < h->w / 2; px += 2) BOX(g, M_STEEL(C_STEEL), 0.14f, h->h - 0.12f, 0.14f, px, (h->h - 0.12f) / 2, h->d / 2 + 0.02f);
+      for (int k = -1; k <= 1; k += 2) part(g, g_box, emis(0xfff1d6, 1.8f), 2.4f, 0.05f, 0.05f, k * h->w * 0.25f, h->h - 0.3f, h->d / 2 + 0.06f);
+      BOX(g, face, h->w, h->h - 0.12f, 0.04f, 0, (h->h - 0.12f) / 2, -h->d / 2 + 0.02f);
+      break; }
+    case HZ_MOUND: {
+      /* the height field of arena_mound_h as a lathe dome under the cardboard: a tarp over the pile */
+      t3_vec2 prof[10];
+      for (int k = 0; k < 10; k++) { float rr = h->w * 0.5f * (1 - k / 9.0f); prof[k] = (t3_vec2){ rr, arena_mound_h(rr) - 0.02f }; }
+      prof[9].x = 0;
+      t3_geometry *dg = t3_lathe_geometry_new(prof, 10, 28, 0, TAU);
+      t3_mesh *dm = t3_mesh_new(dg, M_PLY(0x8f6b45));
+      t3_object_add(g, dm); t3_release(dm); t3_release(dg);
       break; }
     case HZ_FLOORFLIP: {
       hz->tell_m = mat_ex(C_LIVE, 0.5f, 0, C_LIVE, 0.0f, 0);
@@ -812,6 +846,18 @@ void world_build_arena(int idx, const arena_def_t *a) {
     if (a->props[i].kind == PR_GATE) continue;
     int cell = arena_cell(a, a->props[i].x, a->props[i].z);
     t3_object *g = build_prop(w, &a->props[i], i);
+    /* the mound boxes are terrain skin: each sits on the height field, tilted down the slope */
+    for (int k = 0; k < a->nhaz; k++) {
+      const hazard_def_t *hz = &a->haz[k];
+      if (hz->type != HZ_MOUND || a->props[i].kind != PR_BOX) continue;
+      float dx = a->props[i].x - hz->x, dz = a->props[i].z - hz->z, rr = sqrtf(dx * dx + dz * dz);
+      if (rr >= hz->w * 0.5f) continue;
+      float y = arena_mound_h(rr) - 0.08f, slope = rr > 0.1f ? (arena_mound_h(rr - 0.1f) - arena_mound_h(rr + 0.1f)) / 0.2f : 0;
+      float tilt = atanf(slope) * 0.6f;
+      t3_object_set_position(g, a->props[i].x, y, a->props[i].z);
+      /* tilt about the axis tangent to the slope: lean the box outward */
+      if (rr > 0.1f) { float ax = -dz / rr, az = dx / rr; t3_object_set_quaternion(g, t3_quat_multiply(t3_quat_from_axis_angle((t3_vec3){ ax, 0, az }, tilt), t3_quat_from_axis_angle((t3_vec3){ 0, 1, 0 }, a->props[i].ang))); }
+    }
     t3_object_add(w->cells[cell], g); t3_release(g);
     w->props[i] = g;
   }
@@ -886,6 +932,8 @@ typedef struct {
   float melty_yaw, gait, scroll, wheel_spin, spin_vis, saw_vis, led_t, radius, top_y, ride_y;
   float fire_t; int fire_on;                   /* garage test fire */
   float ring_r, ring_y;
+  float hammer_max;                            /* the slam angle that keeps the head off the floor */
+  int panels_hidden;                           /* a bare FRAME shows its tubes, never its panels */
 } wbot_t;
 static wbot_t bots[MAX_BOTS];
 
@@ -924,14 +972,17 @@ static panel_place_t panel_place(const chassis_def_t *c, int panel, float ride) 
     default: p = (panel_place_t){ W * 0.6f, L * 0.3f, 0, ride + H + 0.012f, L * 0.3f, -PI / 2, 0, 0 }; break;   /* weapon mount */
   }
   if (c->shape == SH_CIRCLE) {
-    float r = c->len / 2;
+    /* the dome (the lathe in build_chassis) is widest at 0.35 H, radius 0.5 L, and its flat
+     * top is a disc of radius 0.25 L: the four side plates are small vertical plates tangent
+     * to that bulge, the two top plates sit inside the disc, so nothing pokes out of the wok */
+    float r = c->len / 2, R = r + 0.012f, by = ride + H * 0.36f;
     switch (panel) {
-      case PN_FRONT: p = (panel_place_t){ r, H * 0.8f, 0, cy, r * 0.82f, -0.5f, 0, 0 }; break;
-      case PN_BACK: p = (panel_place_t){ r, H * 0.8f, 0, cy, -r * 0.82f, 0.5f, PI, 0 }; break;
-      case PN_LEFT: p = (panel_place_t){ r, H * 0.8f, -r * 0.82f, cy, 0, 0, -PI / 2, -0.5f }; break;
-      case PN_RIGHT: p = (panel_place_t){ r, H * 0.8f, r * 0.82f, cy, 0, 0, PI / 2, 0.5f }; break;
-      case PN_TOP: p = (panel_place_t){ r * 0.9f, r * 0.9f, 0, ride + H + 0.01f, 0, -PI / 2, 0, 0 }; break;
-      default: p = (panel_place_t){ r * 0.5f, r * 0.4f, 0, ride + H + 0.012f, r * 0.45f, -PI / 2, 0, 0 }; break;
+      case PN_FRONT: p = (panel_place_t){ r * 0.6f, H * 0.4f, 0, by, R, 0, 0, 0 }; break;
+      case PN_BACK: p = (panel_place_t){ r * 0.6f, H * 0.4f, 0, by, -R, 0, PI, 0 }; break;
+      case PN_LEFT: p = (panel_place_t){ r * 0.6f, H * 0.4f, -R, by, 0, 0, -PI / 2, 0 }; break;
+      case PN_RIGHT: p = (panel_place_t){ r * 0.6f, H * 0.4f, R, by, 0, 0, PI / 2, 0 }; break;
+      case PN_TOP: p = (panel_place_t){ r * 0.45f, r * 0.45f, 0, ride + H + 0.012f, -r * 0.1f, -PI / 2, 0, 0 }; break;
+      default: p = (panel_place_t){ r * 0.35f, r * 0.26f, 0, ride + H + 0.012f, r * 0.3f, -PI / 2, 0, 0 }; break;
     }
   }
   if (panel == PN_FRONT && c->hgt <= 0.3f && c->len >= 1.1f) { /* the WEDGE front slopes */
@@ -1023,20 +1074,42 @@ static void build_drive(wbot_t *b, const chassis_def_t *c) {
   (void)d;
 }
 
+/* the height of the WEDGE weapon's slope at z ahead of the chassis front (0 at its tip) */
+static float wedge_slope_y(const wbot_t *b, const chassis_def_t *c, float z_ahead) {
+  float h = b->ride_y + c->hgt * 0.95f, t = (z_ahead + 0.025f) / 0.55f;
+  if (t < 0) t = 0; if (t > 1) t = 1;
+  return b->ride_y + h * (1 - t);
+}
+
 /* weapon sub parts; the pivot is what animates */
 static void build_weapon(wbot_t *b, int secondary) {
   int wp = secondary ? b->build.weapon2 : b->build.weapon;
   const chassis_def_t *c = &CHASSIS[b->build.chassis];
   t3_object *g = secondary ? b->weapon2_g : b->weapon_g;
+  int dome = c->shape == SH_CIRCLE;
   float L = c->len, W = c->wid, top = b->ride_y + c->hgt;
   float z0 = L / 2, y0 = b->ride_y + c->hgt * 0.5f;
+  t3_material *steel = M_STEEL(0x7a766e), *bright = M_STEEL(0xd0ccc4), *rust = M_PAINT(C_RUST), *bracket = mat(0x6f6c66, 0.5f, 0.4f);
+  if (dome) {
+    /* a front mount on the wok: the pivot sits at the dome's widest ring with a bracket bolted into it */
+    z0 = L * 0.48f; y0 = b->ride_y + c->hgt * 0.42f;
+    if (wp != WP_WEDGE && wp != WP_HAMMER && wp != WP_FLIPPER && wp != WP_HORIZ && wp != WP_CRUSHER && wp != WP_DRUM && wp != WP_NONE)
+      BOX(g, bracket, 0.18f, 0.14f, 0.34f, 0, y0, z0 - 0.17f);
+  }
   if (secondary) {
     if (b->build.chassis == CH_LUNCHBOX && !(b->build.weapon == WP_WEDGE || b->build.weapon == WP_LIFTER)) { z0 = L * 0.1f; y0 = top; }
-    else { z0 = L / 2 + 0.35f; y0 = b->ride_y + c->hgt * 0.7f; }
+    else if (b->build.weapon == WP_WEDGE) {
+      /* on the wedge plate: a bracket from the slope up to the mount */
+      z0 = L / 2 + 0.18f; float sy = wedge_slope_y(b, c, 0.18f); y0 = sy + 0.12f;
+      BOX(g, bracket, 0.16f, y0 - sy + 0.06f, 0.16f, 0, (y0 + sy) / 2 - 0.02f, z0);
+    } else {
+      /* ahead of the chassis front, bolted to it */
+      z0 = L / 2 + 0.12f; y0 = b->ride_y + c->hgt * 0.75f;
+      BOX(g, bracket, 0.14f, 0.1f, 0.3f, 0, y0 - 0.02f, L / 2 - 0.02f);
+    }
   }
   t3_object *piv = group_at(g, 0, y0, z0);
   if (secondary) b->w2pivot = piv; else b->wpivot = piv;
-  t3_material *steel = M_STEEL(0x7a766e), *bright = M_STEEL(0xd0ccc4), *rust = M_PAINT(C_RUST);
   switch (wp) {
     case WP_WEDGE: {
       t3_geometry *wg = wedge_geometry(W * 1.05f, 0.55f, b->ride_y + c->hgt * 0.95f);
@@ -1052,16 +1125,21 @@ static void build_weapon(wbot_t *b, int secondary) {
       b->wsub[secondary ? 2 : 0] = (t3_mesh *)rod;
       break; }
     case WP_LIFTER: {
-      for (int k = 0; k < 2; k++) {
-        t3_mesh *f = BOX(piv, steel, 0.08f, 0.05f, 0.62f, (k ? 1 : -1) * 0.22f, -c->hgt * 0.4f, 0.3f);
-        (void)f;
-      }
-      BOX(piv, steel, 0.6f, 0.08f, 0.1f, 0, -c->hgt * 0.4f, 0.02f);
-      t3_mesh *bar = BOX(piv, M_PAINT(C_HAZARD), 0.62f, 0.03f, 0.05f, 0, -c->hgt * 0.4f + 0.04f, 0.6f); (void)bar;
+      /* the forks run along the floor so the lifter gets under; the hinge sits just above them */
+      float fork_y = (b->ride_y < 0.2f ? b->ride_y : 0.2f) + 0.04f;
+      if (!secondary) { y0 = fork_y + 0.08f; t3_object_set_position(piv, 0, y0, z0); }
+      float fy = fork_y - y0;
+      for (int k = 0; k < 2; k++) BOX(piv, steel, 0.08f, 0.05f, 0.62f, (k ? 1 : -1) * 0.22f, fy, 0.3f);
+      BOX(piv, steel, 0.6f, 0.08f, 0.1f, 0, fy + 0.03f, 0.02f);
+      BOX(piv, M_PAINT(C_HAZARD), 0.62f, 0.03f, 0.05f, 0, fy + 0.04f, 0.6f);
+      /* the hinge block back into the chassis */
+      BOX(piv, steel, 0.3f, 0.12f, 0.2f, 0, 0, -0.08f);
       break; }
     case WP_SAW: {
-      BOX(piv, steel, 0.12f, 0.12f, 0.5f, 0, 0.1f, 0.25f);
+      /* the arm reaches the disc, and the disc rides on a visible axle */
+      BOX(piv, steel, 0.12f, 0.12f, 0.72f, 0, 0.1f, 0.36f);
       t3_object *disc = group_at(piv, 0, 0.05f, 0.7f);
+      t3_mesh *axle = part(disc, g_cyl8, bright, 0.05f, 0.2f, 0.05f, 0, 0, 0); rot(axle, 0, 0, PI / 2);
       t3_mesh *d = part(disc, g_cyl12, bright, 0.3f, 0.03f, 0.3f, 0, 0, 0); rot(d, 0, 0, PI / 2);
       for (int t = 0; t < 10; t++) { t3_mesh *th = part(disc, g_box, M_STEEL(0xe6e2d8), 0.04f, 0.09f, 0.08f, 0, cosf(t * TAU / 10) * 0.32f, sinf(t * TAU / 10) * 0.32f); rot(th, -t * TAU / 10, 0, 0); }
       b->wsub[secondary ? 2 : 0] = (t3_mesh *)disc;
@@ -1071,13 +1149,18 @@ static void build_weapon(wbot_t *b, int secondary) {
       BOX(piv, M_PAINT(C_RUST), 0.3f, 0.3f, 0.28f, 0, 0.05f, -0.1f);
       t3_mesh *n = part(piv, g_cyl8, M_PAINT(C_TAPE), 0.06f, 0.4f, 0.06f, 0, 0.08f, 0.25f); rot(n, PI / 2, 0, 0);
       part(piv, g_cyl8, bright, 0.09f, 0.06f, 0.09f, 0, 0.08f, 0.47f);
-      t3_mesh *cone = t3_mesh_new(g_cone, glass(0xffb347, 0.0f));
+      t3_material *gm = glass(0xffb347, 0.0f);
+      t3_mesh *cone = t3_mesh_new(g_cone, gm); t3_release(gm);      /* the mesh keeps the one reference */
       t3_object_set_scale(cone, 0.35f, 2.0f, 0.35f); t3_object_set_position(cone, 0, 0.08f, 1.45f); t3_object_set_rotation(cone, -PI / 2, 0, 0);
       t3_object_add(piv, cone); t3_release(cone);
       if (secondary) b->wsub[3] = cone; else b->glow = cone;
       break; }
     case WP_HAMMER: {
-      /* the pivot sits at the back of the mount; the arm reaches forward and the head drops in front of the bot */
+      /* the pivot sits at the back of the mount; the arm reaches forward and the head drops in front of the bot.
+       * The slam stops where the head meets the floor: the angle depends on how tall the bot stands */
+      float sin_max = (top + 0.15f - 0.2f) / 1.05f;
+      if (sin_max > 0.48f) sin_max = 0.48f; if (sin_max < 0.1f) sin_max = 0.1f;
+      b->hammer_max = asinf(sin_max);
       t3_object_set_position(piv, 0, top + 0.15f, -L * 0.2f);
       BOX(g, steel, 0.16f, 0.3f, 0.16f, -0.16f, top + 0.05f, -L * 0.2f);
       BOX(g, steel, 0.16f, 0.3f, 0.16f, 0.16f, top + 0.05f, -L * 0.2f);
@@ -1086,22 +1169,31 @@ static void build_weapon(wbot_t *b, int secondary) {
       BOX(piv, M_PAINT(C_HAZARD), 0.42f, 0.06f, 0.1f, 0, 0, 1.05f);
       break; }
     case WP_FLIPPER: {
-      t3_object_set_position(piv, 0, b->ride_y + 0.08f, L * 0.05f);
-      t3_mesh *plate = BOX(piv, M_STEEL(0x8a857c), W * 0.95f, 0.05f, L * 0.5f + 0.2f, 0, 0, L * 0.3f);
-      (void)plate;
-      BOX(piv, M_PAINT(C_HAZARD), W * 0.95f, 0.02f, 0.08f, 0, 0.03f, L * 0.55f + 0.1f);
-      BOX(g, steel, 0.3f, 0.12f, 0.12f, 0, b->ride_y + 0.08f, L * 0.05f);
+      /* the plate is the lid of the front half, hinged at its back, so a LAUNCH bot reads at rest */
+      if (dome) {
+        float r = L / 2;
+        t3_object_set_position(piv, 0, b->ride_y + c->hgt * 0.5f, r * 0.2f);
+        BOX(piv, M_STEEL(0x8a857c), r * 0.9f, 0.05f, r * 1.2f, 0, 0.025f, r * 0.6f);
+        BOX(piv, M_PAINT(C_HAZARD), r * 0.9f, 0.02f, 0.08f, 0, 0.055f, r * 1.2f - 0.04f);
+        BOX(g, steel, 0.3f, 0.12f, 0.16f, 0, b->ride_y + c->hgt * 0.5f, r * 0.2f);
+      } else {
+        t3_object_set_position(piv, 0, top + 0.03f, -L * 0.1f);
+        BOX(piv, M_STEEL(0x8a857c), W * 0.95f, 0.05f, L * 0.6f, 0, 0.025f, L * 0.3f);
+        BOX(piv, M_PAINT(C_HAZARD), W * 0.95f, 0.02f, 0.08f, 0, 0.055f, L * 0.6f - 0.04f);
+        BOX(g, steel, 0.3f, 0.12f, 0.12f, 0, top + 0.03f, -L * 0.1f);
+      }
       break; }
     case WP_DRUM: {
       t3_object_set_position(piv, 0, b->ride_y + 0.3f, L / 2 + 0.25f);
       BOX(g, steel, 0.1f, 0.3f, 0.3f, -W / 2 + 0.05f, b->ride_y + 0.3f, L / 2 + 0.1f);
       BOX(g, steel, 0.1f, 0.3f, 0.3f, W / 2 - 0.05f, b->ride_y + 0.3f, L / 2 + 0.1f);
+      if (dome) BOX(g, steel, W - 0.1f, 0.12f, 0.3f, 0, b->ride_y + 0.3f, L / 2 + 0.05f);   /* the crossbar roots the side blocks in the wok */
       t3_mesh *d = part(piv, g_cyl12, M_STEEL(0x6f6c66), 0.3f, W - 0.1f, 0.3f, 0, 0, 0); rot(d, 0, 0, PI / 2);
       for (int t = 0; t < 4; t++) { t3_mesh *th = part(piv, g_box, bright, W - 0.1f, 0.08f, 0.1f, 0, cosf(t * PI / 2) * 0.3f, sinf(t * PI / 2) * 0.3f); rot(th, -t * PI / 2, 0, 0); }
       if (!secondary) { b->ring_r = 0.32f; b->ring_y = b->ride_y + 0.3f; }
       break; }
     case WP_HORIZ: {
-      t3_object_set_position(piv, 0, top + 0.07f, L * 0.15f);
+      t3_object_set_position(piv, 0, top + 0.09f, L * 0.15f);
       BOX(g, steel, 0.16f, 0.2f, 0.16f, 0, top, L * 0.15f);
       t3_object *disc = group_at(piv, 0, 0, 0);
       part(disc, g_cyl12, M_STEEL(0x6f6c66), 0.55f, 0.06f, 0.55f, 0, 0, 0);
@@ -1109,14 +1201,20 @@ static void build_weapon(wbot_t *b, int secondary) {
       for (int t = 0; t < 3; t++) { t3_mesh *th = part(disc, g_box, bright, 0.14f, 0.08f, 0.22f, cosf(t * TAU / 3) * 0.55f, 0, sinf(t * TAU / 3) * 0.55f); rot(th, 0, -t * TAU / 3, 0); }
       b->wsub[secondary ? 2 : 0] = (t3_mesh *)disc;
       /* the motion blur copy */
-      t3_mesh *blur = t3_mesh_new(g_disc, glass(0x8d97a3, 0.0f)); t3_object_set_scale(blur, 0.58f, 0.03f, 0.58f);
+      t3_material *gm = glass(0x8d97a3, 0.0f);
+      t3_mesh *blur = t3_mesh_new(g_disc, gm); t3_release(gm); t3_object_set_scale(blur, 0.58f, 0.03f, 0.58f);
       t3_object_add(piv, blur); t3_release(blur); b->wsub[secondary ? 3 : 1] = blur;
-      if (!secondary) { b->ring_r = 0.6f; b->ring_y = top + 0.07f; }
+      if (!secondary) { b->ring_r = 0.6f; b->ring_y = top + 0.09f; }
       break; }
     case WP_CRUSHER: {
       t3_object_set_position(piv, 0, top, L * 0.1f);
-      BOX(g, steel, 0.5f, 0.1f, 0.9f, 0, b->ride_y + 0.12f, L / 2 + 0.2f);         /* the fixed lower jaw */
-      BOX(g, rust, 0.5f, 0.1f, 0.12f, 0, b->ride_y + 0.17f, L / 2 + 0.6f);
+      if (dome) {
+        BOX(g, steel, 0.5f, 0.1f, 0.8f, 0, b->ride_y + 0.12f, L * 0.3f + 0.4f);     /* the fixed lower jaw, rooted in the dome */
+        BOX(g, rust, 0.5f, 0.1f, 0.12f, 0, b->ride_y + 0.17f, L * 0.3f + 0.74f);
+      } else {
+        BOX(g, steel, 0.5f, 0.1f, 0.9f, 0, b->ride_y + 0.12f, L / 2 + 0.2f);         /* the fixed lower jaw */
+        BOX(g, rust, 0.5f, 0.1f, 0.12f, 0, b->ride_y + 0.17f, L / 2 + 0.6f);
+      }
       BOX(piv, steel, 0.12f, 0.1f, 0.9f, -0.18f, 0.05f, 0.5f);
       BOX(piv, steel, 0.12f, 0.1f, 0.9f, 0.18f, 0.05f, 0.5f);
       BOX(piv, rust, 0.5f, 0.12f, 0.16f, 0, 0.0f, 0.95f);
@@ -1127,6 +1225,17 @@ static void build_weapon(wbot_t *b, int secondary) {
   }
 }
 
+/* a plane hugging the SHELL dome: azimuth phi round the bot (0 is the front), at radius R and height y,
+ * tilted by rx about its own horizontal axis (positive leans the top outward) */
+static t3_mesh *dome_plane(wbot_t *b, t3_material *m, float w, float h, float phi, float R, float y, float rx) {
+  t3_object *az = group_at(b->body, 0, 0, 0);
+  t3_object_set_rotation(az, 0, phi, 0);
+  t3_mesh *pl = t3_mesh_new(g_plane, m);
+  t3_object_set_scale(pl, w, h, 1); t3_object_set_position(pl, 0, y, R); t3_object_set_rotation(pl, rx, 0, 0);
+  t3_object_add(az, pl); t3_release(pl);
+  return pl;
+}
+
 static void build_chassis(wbot_t *b) {
   const chassis_def_t *c = &CHASSIS[b->build.chassis];
   uint32_t body = paint_colour(PAINT_SCHEMES[b->build.paint % PAINT_COUNT].body, b->seat_colour);
@@ -1135,6 +1244,10 @@ static void build_chassis(wbot_t *b) {
   t3_material *bm = M_PAINT(body);
   float L = c->len, W = c->wid, H = c->hgt, r = b->ride_y;
   if (b->is_ops) L *= 1.4f;
+  int frame = b->build.chassis == CH_FRAME, bare_frame = frame && b->build.armour == AR_NONE && !b->is_ops;
+  b->panels_hidden = bare_frame;
+  /* the deck every top mark sits on: the lid, or the electronics box of a bare FRAME */
+  float deck = r + H, deck_w = W, deck_l = L;
   switch (b->build.chassis) {
     case CH_WEDGE: {
       BOX(b->body, bm, W, H, L * 0.5f, 0, r + H / 2, -L * 0.25f);
@@ -1149,12 +1262,15 @@ static void build_chassis(wbot_t *b) {
       t3_object_add(b->body, m); t3_release(m); t3_release(lg);
       break; }
     case CH_FRAME: {
-      t3_material *tube = M_STEEL(0x8a857c);
-      for (int k = 0; k < 4; k++) BOX(b->body, tube, 0.06f, H, 0.06f, (k & 1 ? 1 : -1) * (W / 2 - 0.03f), r + H / 2, (k & 2 ? 1 : -1) * (L / 2 - 0.03f));
-      for (int k = 0; k < 2; k++) { BOX(b->body, tube, W, 0.06f, 0.06f, 0, r + (k ? H - 0.03f : 0.03f), L / 2 - 0.03f); BOX(b->body, tube, W, 0.06f, 0.06f, 0, r + (k ? H - 0.03f : 0.03f), -L / 2 + 0.03f);
-        BOX(b->body, tube, 0.06f, 0.06f, L, (k ? 1 : -1) * (W / 2 - 0.03f), r + 0.03f, 0); BOX(b->body, tube, 0.06f, 0.06f, L, (k ? 1 : -1) * (W / 2 - 0.03f), r + H - 0.03f, 0); }
-      BOX(b->body, bm, W * 0.5f, H * 0.5f, L * 0.5f, 0, r + H * 0.3f, 0);     /* the electronics box inside */
-      part(b->body, g_box, emis(C_LIVE, 2.0f), 0.05f, 0.05f, 0.05f, W * 0.1f, r + H * 0.58f, -L * 0.1f);
+      /* an open tube frame that catches light; the electronics box and its LED show through */
+      t3_material *tube = mat(0x9a948a, 0.45f, 0.4f);
+      for (int k = 0; k < 4; k++) BOX(b->body, tube, 0.07f, H, 0.07f, (k & 1 ? 1 : -1) * (W / 2 - 0.035f), r + H / 2, (k & 2 ? 1 : -1) * (L / 2 - 0.035f));
+      for (int k = 0; k < 2; k++) { BOX(b->body, tube, W, 0.07f, 0.07f, 0, r + (k ? H - 0.035f : 0.035f), L / 2 - 0.035f); BOX(b->body, tube, W, 0.07f, 0.07f, 0, r + (k ? H - 0.035f : 0.035f), -L / 2 + 0.035f);
+        BOX(b->body, tube, 0.07f, 0.07f, L, (k ? 1 : -1) * (W / 2 - 0.035f), r + 0.035f, 0); BOX(b->body, tube, 0.07f, 0.07f, L, (k ? 1 : -1) * (W / 2 - 0.035f), r + H - 0.035f, 0); }
+      BOX(b->body, bm, W * 0.7f, H * 0.6f, L * 0.7f, 0, r + H * 0.3f + 0.035f, 0);     /* the electronics box inside */
+      part(b->body, g_box, emis(C_LIVE, 2.0f), 0.05f, 0.05f, 0.05f, W * 0.2f, r + H * 0.6f + 0.06f, -L * 0.2f);
+      BOX(b->body, M_STEEL(C_STEEL_HI), W * 0.3f, 0.04f, 0.04f, 0, r + H * 0.6f + 0.055f, L * 0.1f);
+      if (bare_frame) { deck = r + H * 0.6f + 0.035f; deck_w = W * 0.7f; deck_l = L * 0.7f; }
       break; }
     case CH_LUNCHBOX: {
       BOX(b->body, bm, W, H, L, 0, r + H / 2, 0);
@@ -1171,34 +1287,47 @@ static void build_chassis(wbot_t *b) {
   if (c->shape == SH_CIRCLE) part(b->body, g_cyl12, M_PAINT(b->seat_colour), L / 2 + 0.03f, 0.08f, L / 2 + 0.03f, 0, r + H * 0.22f, 0);
   else if (b->build.chassis == CH_WEDGE) BOX(b->body, M_PAINT(b->seat_colour), W + 0.04f, 0.08f, L * 0.5f + 0.04f, 0, r + 0.1f, -L * 0.25f);
   else BOX(b->body, M_PAINT(b->seat_colour), W + 0.04f, 0.08f, L + 0.04f, 0, r + 0.1f, 0);
-  /* the stripe on the top and decals */
+  /* the stripe on the top and decals, stacked a centimetre apart over the top panel (at +0.012):
+   * stripe +0.035, decals +0.05, tape +0.052, digit +0.06, so nothing shares a depth */
   if (c->shape != SH_CIRCLE) {
-    BOX(b->body, M_PAINT(stripe), W * 0.18f, 0.015f, L * 0.8f, 0, r + H + 0.02f, 0);
-    if (b->build.decal == DC_HAZARD_STRIPES) for (int k = 0; k < 3; k++) { t3_mesh *s = BOX(b->body, M_PAINT(C_HAZARD), 0.08f, 0.012f, W * 0.5f, -W * 0.3f + k * W * 0.3f, r + H + 0.022f, -L * 0.3f); rot(s, 0, 0.785f, 0); }
-    if (b->build.decal == DC_TAPE_BAND) { t3_mesh *t = t3_mesh_new(g_plane, mat_tape); t3_object_set_scale(t, W * 0.96f, 0.14f, 1); rot(t, -PI / 2, 0, 0); t3_object_set_position(t, 0, r + H + 0.024f, -L * 0.3f); t3_object_add(b->body, t); t3_release(t); }
+    float sl = deck_l * 0.8f, sz = 0;
+    if (b->build.weapon == WP_FLIPPER && !frame) { sl = deck_l * 0.3f; sz = -deck_l * 0.25f; }   /* the flipper plate is the front lid */
+    BOX(b->body, M_PAINT(stripe), deck_w * 0.18f, 0.015f, sl, 0, deck + 0.035f, sz);
+    if (b->build.decal == DC_HAZARD_STRIPES) for (int k = 0; k < 3; k++) { t3_mesh *s = BOX(b->body, M_PAINT(C_HAZARD), 0.08f, 0.012f, deck_w * 0.5f, -deck_w * 0.3f + k * deck_w * 0.3f, deck + 0.05f, -deck_l * 0.3f); rot(s, 0, 0.785f, 0); }
+    if (b->build.decal == DC_TAPE_BAND) { t3_mesh *t = t3_mesh_new(g_plane, mat_tape); t3_object_set_scale(t, deck_w * 0.96f, 0.14f, 1); rot(t, -PI / 2, 0, 0); t3_object_set_position(t, 0, deck + 0.052f, -deck_l * 0.3f); t3_object_add(b->body, t); t3_release(t); }
   }
   /* seat digits: top and both sides (OPS reads OPS) */
   int digit = b->is_ops ? 4 : (b->seat & 3);
   float ds = H * 0.75f; if (ds < 0.18f) ds = 0.18f; if (ds > 0.34f) ds = 0.34f;
   if (b->build.decal == DC_SEAT_NUMBER || b->is_ops || 1) {
     t3_mesh *n;
-    n = t3_mesh_new(g_plane, mat_digit[digit]); t3_object_set_scale(n, ds, ds, 1); t3_object_set_position(n, -W / 2 - 0.02f, r + H / 2 + 0.03f, -L * 0.25f); rot(n, 0, -PI / 2, 0); t3_object_add(b->body, n); t3_release(n);
-    n = t3_mesh_new(g_plane, mat_digit[digit]); t3_object_set_scale(n, ds, ds, 1); t3_object_set_position(n, W / 2 + 0.02f, r + H / 2 + 0.03f, -L * 0.25f); rot(n, 0, PI / 2, 0); t3_object_add(b->body, n); t3_release(n);
-    if (c->shape != SH_CIRCLE) { n = t3_mesh_new(g_plane, mat_digit[digit]); t3_object_set_scale(n, ds, ds, 1); t3_object_set_position(n, W * 0.28f, r + H + 0.03f, -L * 0.28f); rot(n, -PI / 2, 0, PI); t3_object_add(b->body, n); t3_release(n); }
+    if (c->shape == SH_CIRCLE) {
+      /* on the dome: smaller, at the widest ring, swung 50 degrees back from the side plates */
+      float dd = H * 0.55f, R = L / 2 + 0.015f, y = r + H * 0.36f;
+      dome_plane(b, mat_digit[digit], dd, dd, -PI / 2 - 0.87f, R, y, 0);
+      dome_plane(b, mat_digit[digit], dd, dd, PI / 2 + 0.87f, R, y, 0);
+    } else {
+      n = t3_mesh_new(g_plane, mat_digit[digit]); t3_object_set_scale(n, ds, ds, 1); t3_object_set_position(n, -W / 2 - 0.02f, r + H / 2 + 0.03f, -L * 0.25f); rot(n, 0, -PI / 2, 0); t3_object_add(b->body, n); t3_release(n);
+      n = t3_mesh_new(g_plane, mat_digit[digit]); t3_object_set_scale(n, ds, ds, 1); t3_object_set_position(n, W / 2 + 0.02f, r + H / 2 + 0.03f, -L * 0.25f); rot(n, 0, PI / 2, 0); t3_object_add(b->body, n); t3_release(n);
+      float td = ds; if (td > deck_w * 0.4f) td = deck_w * 0.4f;
+      n = t3_mesh_new(g_plane, mat_digit[digit]); t3_object_set_scale(n, td, td, 1); t3_object_set_position(n, deck_w * 0.28f, deck + 0.06f, -deck_l * 0.28f); rot(n, -PI / 2, 0, PI); t3_object_add(b->body, n); t3_release(n);
+    }
   }
-  /* panels: four states each, one visible */
+  /* panels: four states each, one visible. A FRAME with armour wears bolt on plates inside its
+   * tube rectangle; a bare FRAME builds them hidden so sync_panels keeps working */
   t3_material *am = armour_mat(b->is_ops ? AR_STEEL : b->build.armour, body);
   for (int p = 0; p < PN_COUNT; p++) {
     panel_place_t pl = panel_place(c, p, r);
     if (b->is_ops && (p == PN_LEFT || p == PN_RIGHT)) pl.w *= 1.4f;
     if (b->is_ops && (p == PN_TOP)) pl.z *= 1.4f;
+    if (frame && !bare_frame) { pl.w *= 0.55f; pl.h *= 0.55f; }
     for (int s = 0; s < 4; s++) {
       t3_geometry *pg = panel_geometry(pl.w, pl.h, s, (uint32_t)(b->build.chassis * 16 + p));
       t3_mesh *m = t3_mesh_new(pg, am);
       t3_object_set_position(m, pl.x, pl.y, pl.z);
       t3_object_set_rotation(m, pl.rx, pl.ry, pl.rz);
       t3_object_add(b->body, m); t3_release(m); t3_release(pg);
-      set_vis(m, s == 0);
+      set_vis(m, s == 0 && !bare_frame);
       b->panels[p][s] = m;
     }
   }
@@ -1218,7 +1347,8 @@ static void bot_alloc(wbot_t *b, int slot) {
   b->weapon_g = group_at(b->body, 0, 0, 0);
   b->weapon2_g = group_at(b->body, 0, 0, 0);
   for (int k = 0; k < 2; k++) {
-    t3_mesh *r = t3_mesh_new(g_ring, glass(0xcfd3d6, 0));
+    t3_material *gm = glass(0xcfd3d6, 0);
+    t3_mesh *r = t3_mesh_new(g_ring, gm); t3_release(gm);
     rot(r, -PI / 2, 0, k * 0.26f);
     t3_object_add(b->root, r); t3_release(r); b->ring[k] = r; set_vis(r, 0);
   }
@@ -1237,6 +1367,9 @@ static void bot_alloc(wbot_t *b, int slot) {
 
 static void bot_rebuild(wbot_t *b) {
   clear_group(b->body); clear_group(b->drive_g);
+  /* the tread material holds its own reference to the stripe map; ours goes with the old drive */
+  if (b->tread_tex) { t3_release(b->tread_tex); b->tread_tex = 0; }
+  b->hammer_max = 0.5f; b->panels_hidden = 0;
   b->weapon_g = group_at(b->body, 0, 0, 0);
   b->weapon2_g = group_at(b->body, 0, 0, 0);
   memset(b->wsub, 0, sizeof b->wsub); b->glow = 0; b->wpivot = b->w2pivot = 0; b->ring_r = 0;
@@ -1355,9 +1488,10 @@ static void pose_weapon(wbot_t *b, const bot_t *bt, int secondary, float dt) {
     case WP_HAMMER: {
       /* windup raises the arm, active slams it, cooldown returns it */
       float ang;
+      float hm = b->hammer_max > 0 ? b->hammer_max : 0.5f;                         /* where the head meets the floor */
       if (bt->windup > 0) ang = -0.6f - (15 - bt->windup) / 15.0f * 1.2f;        /* raise to -1.8 */
-      else if (active > 0) ang = -1.8f + (4 - active) / 4.0f * 2.3f;              /* slam to +0.5 */
-      else if (cooldown > 0) ang = 0.5f - (72 - cooldown) / 72.0f * 1.1f;        /* back to -0.6 */
+      else if (active > 0) ang = -1.8f + (4 - active) / 4.0f * (1.8f + hm);      /* slam to the floor */
+      else if (cooldown > 0) ang = hm - (72 - cooldown) / 72.0f * (hm + 0.6f);   /* back to -0.6 */
       else ang = -0.6f;
       t3_object_set_rotation(piv, ang, 0, 0);
       break; }
@@ -1391,7 +1525,7 @@ static void pose_weapon(wbot_t *b, const bot_t *bt, int secondary, float dt) {
 static void sync_panels(wbot_t *b, const uint8_t *state) {
   for (int p = 0; p < PN_COUNT; p++) {
     int s = state ? state[p] : 0; if (s > 4) s = 4;
-    for (int k = 0; k < 4; k++) if (b->panels[p][k]) set_vis(b->panels[p][k], k == s);
+    for (int k = 0; k < 4; k++) if (b->panels[p][k]) set_vis(b->panels[p][k], k == s && !b->panels_hidden);
   }
 }
 
@@ -1455,41 +1589,61 @@ static void sync_bot(wbot_t *b, const bot_t *bt, float alpha, float dt) {
   /* MELTY LED blinks at 4 Hz on the heading intent */
   if (b->build.drive == DR_MELTY) set_vis(b->led, fmodf(world_t * 4, 1.0f) < 0.5f);
   /* smoke and fire follow HP */
-  if (bt->alive) fx_bot_damage_state((int)(b - bots), bt->hp, x, y + b->top_y, z);
+  if (bt->alive) fx_bot_damage_state((int)(b - bots), bt->hp, bt->burn_t > 0, x, y + b->top_y, z);
 }
 
-/* the garage test fire runs the same poser on a synthetic bot */
+/* the garage test fire runs the same poser on a synthetic bot: the primary's timeline and,
+ * in parallel, the 2ND weapon's, so a ROLL OUT with a SAW on the plate still shows something on RT */
 static void pose_test_fire(wbot_t *b, float dt) {
   bot_t t; memset(&t, 0, sizeof t);
   t.alive = 1; t.build = b->build; t.hp = 100;
   if (b->fire_on) {
     b->fire_t += dt;
     float ft = b->fire_t;
-    int wp = b->build.weapon;
+    int wp = b->build.weapon, w2 = b->build.weapon2, running = 0;
     if (wp == WP_HORIZ || wp == WP_DRUM || wp == WP_SAW || b->build.drive == DR_MELTY) {
       float up = WEAPONS[wp].spin_up > 0 ? WEAPONS[wp].spin_up : 1.5f;
       t.spin = ft < up ? ft / up : (ft < up + 1.5f ? 1 : fmaxf(0, 1 - (ft - up - 1.5f) / (up * 2)));
       t.saw_on = 1; t.in.buttons = ft < up + 1.5f ? IN_A : 0;
-      if (ft > up * 3 + 1.5f) b->fire_on = 0;
+      running |= ft <= up * 3 + 1.5f;
     } else if (wp == WP_HAMMER) {
       int f = (int)(ft * 60);
-      if (f < 15) t.windup = (int16_t)(15 - f); else if (f < 19) t.active = (int16_t)(4 - (f - 15)); else if (f < 91) t.cooldown = (int16_t)(72 - (f - 19)); else b->fire_on = 0;
+      if (f < 15) t.windup = (int16_t)(15 - f); else if (f < 19) t.active = (int16_t)(4 - (f - 15)); else if (f < 91) t.cooldown = (int16_t)(72 - (f - 19));
+      running |= f < 91;
     } else if (wp == WP_FLIPPER) {
       int f = (int)(ft * 60);
-      if (f < 4) t.active = (int16_t)(4 - f); else if (f < 112) t.cooldown = (int16_t)(108 - (f - 4)); else b->fire_on = 0;
+      if (f < 4) t.active = (int16_t)(4 - f); else if (f < 112) t.cooldown = (int16_t)(108 - (f - 4));
+      running |= f < 112;
     } else if (wp == WP_SPIKE) {
       int f = (int)(ft * 60);
-      if (f < 9) t.active = (int16_t)(9 - f); else if (f < 30) t.cooldown = 1; else b->fire_on = 0;
+      if (f < 9) t.active = (int16_t)(9 - f); else if (f < 30) t.cooldown = 1;
+      running |= f < 30;
     } else if (wp == WP_LIFTER) {
       t.lift = ft < 0.6f ? ft / 0.6f : (ft < 1.4f ? 1 : fmaxf(0, 1 - (ft - 1.4f) / 0.6f));
-      if (ft > 2.1f) b->fire_on = 0;
+      running |= ft <= 2.1f;
     } else if (wp == WP_FLAME) {
-      t.fuel = 240; t.in.buttons = ft < 1.6f ? IN_A : 0;
-      if (ft > 2.2f) b->fire_on = 0;
+      t.fuel = WP_FLAME_FUEL; t.in.buttons = ft < 1.6f ? IN_A : 0;
+      running |= ft <= 2.2f;
     } else if (wp == WP_CRUSHER) {
       int f = (int)(ft * 60);
-      if (f < 24) t.clamp = (int16_t)(24 - f); else if (f < 100) t.lock = 1; else b->fire_on = 0;
-    } else b->fire_on = 0;
+      if (f < 24) t.clamp = (int16_t)(24 - f); else if (f < 100) t.lock = 1;
+      running |= f < 100;
+    }
+    if (w2 == WP_SAW) {
+      t.spin2 = ft < 0.8f ? ft / 0.8f : (ft < 2.3f ? 1 : fmaxf(0, 1 - (ft - 2.3f) / 1.6f));
+      t.saw_on = 1; running |= ft <= 3.9f;
+    } else if (w2 == WP_FLAME) {
+      t.fuel2 = WP_FLAME_FUEL; t.in.buttons |= ft < 1.6f ? IN_A : 0;
+      running |= ft <= 2.2f;
+    } else if (w2 == WP_SPIKE) {
+      int f = (int)(ft * 60);
+      if (f < 9) t.active2 = (int16_t)(9 - f);
+      running |= f < 30;
+    } else if (w2 == WP_LIFTER) {
+      t.lift = ft < 0.6f ? ft / 0.6f : (ft < 1.4f ? 1 : fmaxf(0, 1 - (ft - 1.4f) / 0.6f));
+      running |= ft <= 2.1f;
+    }
+    if (!running) b->fire_on = 0;
     if (b->build.drive == DR_MELTY) { b->melty_yaw += t.spin * 30.0f * dt; t3_object_set_rotation(b->body, 0, b->melty_yaw, 0); }
   }
   pose_weapon(b, &t, 0, dt);
@@ -1779,7 +1933,8 @@ void world_scorch(float x, float z, float r) {
   w->scorch_frame = (int)G.frame;
   const arena_def_t *a = w->def;
   canvas_t c = { w->floor_tex->pixels, w->floor_w, w->floor_h };
-  int cx = (int)((x + a->w / 2) / a->w * w->floor_w), cy = (int)((z + a->d / 2) / a->d * w->floor_h), cr = (int)(r / a->w * w->floor_w);
+  /* the texture rows run from the front wall (row 0) to the back wall: see arena_floor */
+  int cx = (int)((x + a->w / 2) / a->w * w->floor_w), cy = w->floor_h - 1 - (int)((z + a->d / 2) / a->d * w->floor_h), cr = (int)(r / a->w * w->floor_w);
   cv_circle(&c, cx, cy, cr, 0x1d1915, 110);
   cv_circle(&c, cx, cy, cr * 2 / 3, 0x0e0c0a, 90);
   w->floor_tex->version++;
@@ -1807,15 +1962,6 @@ void world_crowd(int frame, float level) {
   if (frame < 0) frame = 0; if (frame > 2) frame = 2;
   for (int f = 0; f < 3; f++) if (w->crowd[f]) set_vis(w->crowd[f], f == frame);
   (void)level;
-}
-
-void world_compile_all(void) {
-  if (!RTR_R || !S) return;
-  t3_camera *c = cam_get(0);
-  const arena_def_t *was = attached; int was_idx = attached_idx;
-  for (int i = 0; i < ARENA_COUNT; i++) { world_attach_arena(i); t3_renderer_compile(RTR_R, S, c); }
-  world_attach_garage(); t3_renderer_compile(RTR_R, S, c);
-  if (was_idx >= 0) world_attach_arena(was_idx); else if (was == &GARAGE_BAY) world_attach_garage(); else world_detach_all();
 }
 
 /* -- init --------------------------------------------------------- */
@@ -1850,4 +1996,75 @@ void world_init(void) {
   debris_init();
   for (int i = 0; i < MAX_BOTS; i++) bot_alloc(&bots[i], i);
   world_attach_arena(AR_BAY);
+}
+
+/* -- the boot compile --------------------------------------------- */
+/* Every program this cart draws links here, one scene per call, so nothing links during play
+ * (a link is a visible hitch on the station). The scene is dressed first with what a fight adds
+ * to an arena: four bots that between them carry every drive, weapon and armour material (treads
+ * with their stripe map, the hover skirt, a spinner with its blur disc, a flame cone, a MELTY
+ * with its LED), OPS, one of every particle and the flash quads; then it is compiled and rendered
+ * once into a four pixel corner, which also forms the auto instanced batches and uploads the
+ * painted floor. The dressing is hidden again before the call returns. */
+static int warm_built;
+static const int warm_slots[5] = { 0, 1, 2, 3, OPS_SLOT };
+
+static void warm_show(int on) {
+  if (!warm_built) {
+    const build_t set[4] = {
+      { CH_WEDGE, DR_TREAD, WP_WEDGE, WP_SAW, AR_STEEL, 0, DC_TAPE_BAND },
+      { CH_SHELL, DR_HOVER, WP_FLAME, WP_NONE, AR_UHMW, 1, DC_HAZARD_STRIPES },
+      { CH_LOWBOY, DR_FOUR, WP_HORIZ, WP_NONE, AR_ALU, 2, DC_NONE },
+      { CH_FRAME, DR_MELTY, WP_NONE, WP_NONE, AR_NONE, 3, DC_SEAT_NUMBER } };
+    for (int i = 0; i < 4; i++) world_bot_build(i, &set[i], SEAT_RGB[i]);
+    world_bot_build_ops(OPS_SLOT);
+    warm_built = 1;
+  }
+  for (int k = 0; k < 5; k++) {
+    int i = warm_slots[k];
+    wbot_t *b = &bots[i];
+    world_bot_visible(i, on);
+    if (on) {
+      world_bot_pose(i, -2.0f + k, 0, 0.6f, 0, 0);
+      for (int r = 0; r < 2; r++) set_vis(b->ring[r], 1);
+      set_vis(b->led, 1); set_vis(b->seat_ring, 1);
+      if (b->glow) b->glow->materials[0]->opacity = 0.5f;
+      if (b->wsub[1]) b->wsub[1]->materials[0]->opacity = 0.3f;
+    } else {
+      b->posed = 0;
+      if (b->glow) b->glow->materials[0]->opacity = 0;
+      if (b->wsub[1]) b->wsub[1]->materials[0]->opacity = 0;
+    }
+  }
+  if (debris_mesh) {
+    t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ 0, on ? 0.3f : -5.0f, 0.6f }, t3_quat_identity(), on ? (t3_vec3){ 0.3f, 0.3f, 0.14f } : (t3_vec3){ 0.001f, 0.001f, 0.001f });
+    t3_instanced_mesh_set_matrix_at(debris_mesh, 0, &m); debris_mesh->instance_matrix->version++;
+    set_vis(pickup_rings[0], on);
+  }
+  if (attached_idx >= 0 && arenas[attached_idx].hill) set_vis(arenas[attached_idx].hill, on);
+  fx_warm(on);
+}
+
+int world_compile_one(int i) {
+  const int count = ARENA_COUNT + 1;
+  if (!RTR_R || !S || i < 0 || i >= count) return count;
+  t3_camera *c = cam_get(0);
+  const arena_def_t *was = attached; int was_idx = attached_idx;
+  if (i < ARENA_COUNT) world_attach_arena(i); else world_attach_garage();
+  warm_show(1);
+  t3_renderer_compile(RTR_R, S, c);
+  t3_renderer_set_scissor_test(RTR_R, true);
+  t3_renderer_set_viewport(RTR_R, 0, 0, 4, 4);
+  t3_renderer_set_scissor(RTR_R, 0, 0, 4, 4);
+  t3_renderer_render(RTR_R, S, c);
+  t3_renderer_set_scissor_test(RTR_R, false);
+  t3_renderer_set_viewport(RTR_R, 0, 0, RTR_W, RTR_H);
+  warm_show(0);
+  if (was_idx >= 0) world_attach_arena(was_idx); else if (was == &GARAGE_BAY) world_attach_garage(); else world_detach_all();
+  return count;
+}
+
+void world_compile_all(void) {
+  int n = world_compile_one(0);
+  for (int i = 1; i < n; i++) world_compile_one(i);
 }

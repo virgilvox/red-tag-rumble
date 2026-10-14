@@ -52,6 +52,9 @@ void world_closing(int on);
 /* hazard tells and poses are read from the match in world_sync; a broken prop is hidden */
 /* compile every program for every scene with a camera during PH_BOOT */
 void world_compile_all(void);
+/* the same one scene at a time (the six arenas, then the garage) so the boot screen can take one
+ * per frame: compiles and renders scene i dressed with bots and particles, and returns the scene count */
+int  world_compile_one(int i);
 /* the crowd quads' frame (0..2) and tint level 0..1 */
 void world_crowd(int frame, float level);
 /* the world position of a bot root this frame (after world_sync), for the HUD and the camera */

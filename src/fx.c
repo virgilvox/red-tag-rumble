@@ -21,7 +21,7 @@ typedef struct {
   float hx, hy, hz;             /* held sparks remember the release velocity */
 } cube_t;
 
-typedef struct { float x, y, z, life, life0, size0, size1, rise; uint32_t colour; uint8_t live; } puff_t;
+typedef struct { float x, y, z, life, life0, size0, size1, rise, size, roll; uint32_t colour; uint8_t live; } puff_t;
 
 static cube_t cubes[J_SPARK_CAP];
 static puff_t puffs[J_SMOKE_CAP];
@@ -31,8 +31,8 @@ static t3_mesh *flash[4];
 static float flash_x, flash_y, flash_z, flash_size; static int flash_frames;
 static int white_a[4], white_frames[4];
 static uint32_t rng = 0x5eed1234u;
-static float frozen_t;
-static struct { float hp, x, y, z, acc_s, acc_f; int seen; } emit[MAX_BOTS];
+static struct { float hp, x, y, z, acc_s, acc_f; int seen, burning; } emit[MAX_BOTS];
+#define FLASH_FRAMES 4            /* one frame at full size, then it shrinks 0.6x a frame */
 
 static float rf(void) { return rtr_rand_f(&rng); }
 static float rr(float a, float b) { return a + (b - a) * rf(); }
@@ -49,18 +49,18 @@ void fx_init(void) {
   cube_mesh = t3_instanced_mesh_new(g, m, J_SPARK_CAP);
   cube_mesh->mesh.base.frustum_culled = false;
   t3_object_add(&S->base, cube_mesh); t3_release(cube_mesh); t3_release(m); t3_release(g);
-  /* smoke puffs are chunky translucent cubes: a flat quad read as paper on the floor from the chase camera */
-  t3_geometry *q = t3_box_geometry_new(1, 1, 1, 1, 1, 1);
+  /* smoke puffs are soft translucent discs (14.2: flat quads) faced to each viewport's camera in fx_face */
+  t3_geometry *q = t3_circle_geometry_new(0.5f, 10);
   t3_material *pm = t3_mesh_basic_material_new(0xffffff);
-  pm->transparent = true; pm->opacity = 0.6f; pm->depth_write = false;
+  pm->transparent = true; pm->opacity = 0.35f; pm->depth_write = false;
   puff_mesh = t3_instanced_mesh_new(q, pm, J_SMOKE_CAP);
   puff_mesh->mesh.base.frustum_culled = false;
   t3_object_add(&S->base, puff_mesh); t3_release(puff_mesh); t3_release(pm); t3_release(q);
   t3_geometry *fq = t3_circle_geometry_new(0.5f, 14);
   for (int i = 0; i < 4; i++) {
-    t3_material *fm = t3_mesh_basic_material_new(0xffffff);
-    /* additive, and drawn over the bots: the contact is usually behind the attacker in a chase view */
-    fm->transparent = true; fm->opacity = 0.9f; fm->depth_write = false; fm->depth_test = false; fm->blending = 2;
+    t3_material *fm = t3_mesh_basic_material_new(0xfff1d6);
+    /* additive and depth tested: a brief warm bloom in the contact gap; the spark burst carries the impact */
+    fm->transparent = true; fm->opacity = 0.55f; fm->depth_write = false; fm->depth_test = true; fm->blending = 2;
     flash[i] = t3_mesh_new(fq, fm);
     t3_object_add(&S->base, flash[i]); t3_release(flash[i]); t3_release(fm);
     flash[i]->base.visible = false;
@@ -149,13 +149,13 @@ void fx_hit(const event_t *e, int band) {
     uint32_t tints[AR_COUNT] = { C_HAZARD, 0xb08a55, 0xd7dadc, 0xe9e5dc, 0x6f6c66, 0x8d97a3, 0x4f3a2d };
     spawn_sparks(e->x, e->y, e->z, e->nx, e->nz, hb->chips, tints[armour % AR_COUNT], held, ivx, ivz, PK_CHIP, (float)J_DEBRIS_CHIP_LIFE / 60 / 0.42f);
   }
-  if (hb->flash > 0) { flash_x = e->x; flash_y = e->y > 0.05f ? e->y : 0.35f; flash_z = e->z; flash_size = hb->flash; flash_frames = hb->stop > 2 ? hb->stop : 2; }
+  if (hb->flash > 0) { flash_x = e->x; flash_y = e->y > 0.05f ? e->y : 0.35f; flash_z = e->z; flash_size = hb->flash * 0.55f; flash_frames = FLASH_FRAMES; }
   if (band == BAND_HUGE) white_flash(victim, J_BAND_HUGE_WHITE_A);
   if (band == BAND_CLASH) { white_flash(victim, J_BAND_CLASH_WHITE_A); white_flash(attacker, J_BAND_CLASH_WHITE_A); }
   if (band == BAND_KO) {
     white_flash(victim, J_BAND_CLASH_WHITE_A);
     /* the burst: smoke to black from the frame */
-    for (int i = 0; i < 12; i++) { puff_t *p = puff_alloc(); p->x = e->x + rr(-0.3f, 0.3f); p->y = 0.3f; p->z = e->z + rr(-0.3f, 0.3f); p->life = p->life0 = J_SMOKE_LIFE / 60.0f * 1.5f; p->size0 = 0.3f; p->size1 = 0.9f; p->rise = J_SMOKE_RISE; p->colour = 0x1d1915; }
+    for (int i = 0; i < 8; i++) { puff_t *p = puff_alloc(); p->x = e->x + rr(-0.3f, 0.3f); p->y = 0.3f; p->z = e->z + rr(-0.3f, 0.3f); p->life = p->life0 = J_SMOKE_LIFE / 60.0f * 1.5f; p->size0 = 0.3f; p->size1 = 0.7f; p->rise = J_SMOKE_RISE; p->colour = 0x1d1915; p->roll = rf() * 6.28f; }
   }
 }
 
@@ -209,7 +209,7 @@ void fx_event(const event_t *e, const match_t *m) {
     case EV_SHED: fx_sparks(e->x, e->y > 0 ? e->y : 0.3f, e->z, e->nx, e->nz, 8, C_HAZARD); break;
     case EV_BURST: {
       fx_sparks(e->x, 0.3f, e->z, 0, 1, 20, C_HAZARD); fx_sparks(e->x, 0.3f, e->z, 0, -1, 20, C_RUST);
-      for (int i = 0; i < 12; i++) { puff_t *p = puff_alloc(); p->x = e->x + rr(-0.3f, 0.3f); p->y = 0.3f; p->z = e->z + rr(-0.3f, 0.3f); p->life = p->life0 = J_SMOKE_LIFE / 60.0f * 1.5f; p->size0 = 0.3f; p->size1 = 1.0f; p->rise = J_SMOKE_RISE; p->colour = 0x1d1915; }
+      for (int i = 0; i < 8; i++) { puff_t *p = puff_alloc(); p->x = e->x + rr(-0.3f, 0.3f); p->y = 0.3f; p->z = e->z + rr(-0.3f, 0.3f); p->life = p->life0 = J_SMOKE_LIFE / 60.0f * 1.5f; p->size0 = 0.3f; p->size1 = 0.7f; p->rise = J_SMOKE_RISE; p->colour = 0x1d1915; p->roll = rf() * 6.28f; }
       break; }
     case EV_RED_TAG: fx_sparks(e->x, 0.4f, e->z, 0, 1, J_REDTAG_SPARKS / 2, C_RUST); fx_sparks(e->x, 0.4f, e->z, 0, -1, J_REDTAG_SPARKS / 2, C_RUST); break;
     case EV_PICKUP: rise_cubes(e->x, 0.1f, e->z, J_PICKUP_CUBES, C_LIVE); break;
@@ -229,9 +229,9 @@ void fx_event(const event_t *e, const match_t *m) {
   }
 }
 
-void fx_bot_damage_state(int slot, float hp, float x, float y, float z) {
+void fx_bot_damage_state(int slot, float hp, int burning, float x, float y, float z) {
   if (slot < 0 || slot >= MAX_BOTS) return;
-  emit[slot].hp = hp; emit[slot].x = x; emit[slot].y = y; emit[slot].z = z; emit[slot].seen = 1;
+  emit[slot].hp = hp; emit[slot].x = x; emit[slot].y = y; emit[slot].z = z; emit[slot].seen = 1; emit[slot].burning = burning;
 }
 
 static void emitters(float dt) {
@@ -239,17 +239,20 @@ static void emitters(float dt) {
     if (!emit[i].seen) continue;
     emit[i].seen = 0;
     float hp = emit[i].hp;
-    if (hp > 50 || hp <= 0) continue;
+    if (hp <= 0) continue;
     int black = hp <= 30;
-    emit[i].acc_s += dt * (black ? J_SMOKE_RATE_30 : J_SMOKE_RATE_50);
-    while (emit[i].acc_s >= 1) {
-      emit[i].acc_s -= 1;
-      puff_t *p = puff_alloc();
-      p->x = emit[i].x + rr(-0.15f, 0.15f); p->y = emit[i].y; p->z = emit[i].z + rr(-0.15f, 0.15f);
-      p->life = p->life0 = J_SMOKE_LIFE / 60.0f; p->size0 = 0.2f; p->size1 = 0.6f; p->rise = J_SMOKE_RISE;
-      p->colour = black ? 0x1d1915 : 0x8a857c;
+    if (hp <= 50) {
+      emit[i].acc_s += dt * (black ? J_SMOKE_RATE_30 : J_SMOKE_RATE_50);
+      while (emit[i].acc_s >= 1) {
+        emit[i].acc_s -= 1;
+        puff_t *p = puff_alloc();
+        p->x = emit[i].x + rr(-0.15f, 0.15f); p->y = emit[i].y; p->z = emit[i].z + rr(-0.15f, 0.15f);
+        p->life = p->life0 = J_SMOKE_LIFE / 60.0f; p->size0 = 0.2f; p->size1 = 0.45f; p->rise = J_SMOKE_RISE;
+        p->colour = black ? 0x1d1915 : 0x8a857c; p->roll = rf() * 6.28f;
+      }
     }
-    if (black) {
+    /* fire at HP 30, and on any bot that is BURNING from a flame or a grate */
+    if (black || emit[i].burning) {
       emit[i].acc_f += dt * J_FIRE_RATE_30;
       while (emit[i].acc_f >= 1) {
         emit[i].acc_f -= 1;
@@ -272,9 +275,8 @@ static uint32_t lerp_rgb(uint32_t a, uint32_t b, float t) {
 void fx_update(float dt, int frozen) {
   if (dt <= 0) dt = 1.f / 60; if (dt > 0.1f) dt = 0.1f;
   for (int v = 0; v < 4; v++) { if (white_frames[v] > 0) white_frames[v]--; else white_a[v] = 0; }
-  if (flash_frames > 0 && !frozen) flash_frames--;
-  else if (flash_frames > 0 && frozen) { frozen_t += dt; if (frozen_t > 0.2f) flash_frames = 0; }
-  if (!frozen) frozen_t = 0;
+  /* the flash is one full frame then three shrinking ones, on wall time whatever the hit stop does */
+  if (flash_frames > 0) { if (flash_frames < FLASH_FRAMES) flash_size *= 0.6f; flash_frames--; }
   emitters(dt);
   for (int i = 0; i < J_SPARK_CAP; i++) {
     cube_t *c = &cubes[i];
@@ -310,40 +312,81 @@ void fx_update(float dt, int frozen) {
     if (c->kind == PK_RISE || c->kind == PK_DUST) s *= k < 0.3f ? k / 0.3f : 1;
     if (c->kind == PK_CHIP && k < 0.25f) s *= k / 0.25f;
     t3_mat4 m; t3_quat q = t3_quat_from_axis_angle((t3_vec3){ 0.6f, 0.8f, 0 }, c->spin * (c->life0 - c->life) + i * 0.7f);
-    t3_vec3 sc = c->kind == PK_CONFETTI ? (t3_vec3){ s * 1.4f, s * 0.2f, s * 1.0f } : c->kind == PK_SPARK ? (t3_vec3){ s, s, s * 1.8f } : (t3_vec3){ s, s, s };
+    t3_vec3 sc = c->kind == PK_CONFETTI ? (t3_vec3){ s * 1.4f, s * 0.2f, s * 1.0f } : (t3_vec3){ s, s, s };
+    if (c->kind == PK_SPARK) {
+      /* a spark is a streak along its own velocity (the release velocity while it is held at the contact) */
+      float vx = c->held ? c->hx : c->vx, vy = c->held ? c->hy : c->vy, vz = c->held ? c->hz : c->vz;
+      float sp = sqrtf(vx * vx + vy * vy + vz * vz);
+      if (sp > 0.01f) {
+        float dx = vx / sp, dy = vy / sp, dz = vz / sp;
+        float ax = -dy, ay = dx, al = sqrtf(ax * ax + ay * ay);       /* z cross d */
+        float ang = acosf(dz > 1 ? 1 : dz < -1 ? -1 : dz);
+        q = al > 0.0001f ? t3_quat_from_axis_angle((t3_vec3){ ax / al, ay / al, 0 }, ang) : t3_quat_identity();
+      }
+      float len = 1.6f + sp * 0.25f; if (len > 4) len = 4;
+      sc = (t3_vec3){ s * 0.55f, s * 0.55f, s * len };
+    }
     t3_mat4_compose(&m, (t3_vec3){ c->x, c->y, c->z }, q, sc);
     t3_instanced_mesh_set_matrix_at(cube_mesh, i, &m);
     t3_instanced_mesh_set_color_at(cube_mesh, i, t3_color_hex(col));
   }
-  /* smoke runs on wall time and never freezes */
+  /* smoke runs on wall time and never freezes; a puff grows, drifts up, then shrinks away over its
+   * last third (the instanced alpha is global, so the fade is in size and in a drift toward the floor tone) */
   for (int i = 0; i < J_SMOKE_CAP; i++) {
     puff_t *p = &puffs[i];
     if (!p->live) continue;
     p->life -= dt; p->y += p->rise * dt;
     if (p->life <= 0) { p->live = 0; hide_instance(puff_mesh, i); continue; }
     float u = 1 - p->life / p->life0, s = p->size0 + (p->size1 - p->size0) * u;
-    if (u > 0.7f) s *= 1 - (u - 0.7f) / 0.3f;
-    t3_mat4 m; t3_quat q = t3_quat_from_axis_angle((t3_vec3){ 0.3f, 1, 0.2f }, i * 0.9f + u * 1.5f);
-    t3_mat4_compose(&m, (t3_vec3){ p->x, p->y + s * 0.3f, p->z }, q, (t3_vec3){ s, s * 0.8f, s });
-    t3_instanced_mesh_set_matrix_at(puff_mesh, i, &m);
-    t3_instanced_mesh_set_color_at(puff_mesh, i, t3_color_hex(p->colour));
+    if (u > 0.66f) s *= 1 - (u - 0.66f) / 0.34f;
+    p->size = s;
+    t3_instanced_mesh_set_color_at(puff_mesh, i, t3_color_hex(lerp_rgb(p->colour, C_SMOKE, u * 0.5f)));
   }
   /* the instance buffers re-upload only on a version bump (three.js needsUpdate) */
   cube_mesh->instance_matrix->version++; if (cube_mesh->instance_color) cube_mesh->instance_color->version++;
-  puff_mesh->instance_matrix->version++; if (puff_mesh->instance_color) puff_mesh->instance_color->version++;
+  if (puff_mesh->instance_color) puff_mesh->instance_color->version++;
 }
 
+/* the puffs and the flash face viewport i's camera: written per viewport, just before it renders */
 void fx_face(int viewport) {
   for (int i = 0; i < 4; i++) if (flash[i]) flash[i]->base.visible = false;
-  if (viewport < 0 || viewport > 3 || flash_frames <= 0) return;
+  if (viewport < 0 || viewport > 3) return;
   t3_camera *c = cam_get(viewport);
   if (!c) return;
+  t3_quat cq = c->base.quaternion;
+  for (int i = 0; i < J_SMOKE_CAP; i++) {
+    puff_t *p = &puffs[i];
+    if (!p->live) continue;
+    float s = p->size;
+    t3_mat4 m; t3_quat q = t3_quat_multiply(cq, t3_quat_from_axis_angle((t3_vec3){ 0, 0, 1 }, p->roll + (p->life0 - p->life) * 0.6f));
+    t3_mat4_compose(&m, (t3_vec3){ p->x, p->y + s * 0.3f, p->z }, q, (t3_vec3){ s, s * 0.85f, 1 });
+    t3_instanced_mesh_set_matrix_at(puff_mesh, i, &m);
+  }
+  puff_mesh->instance_matrix->version++;
+  if (flash_frames <= 0) return;
   t3_mesh *f = flash[viewport];
   t3_object_set_position(f, flash_x, flash_y, flash_z);
   t3_object_set_scale(f, flash_size, flash_size, 1);
   t3_vec3 cp = t3_object_get_world_position(c);
   t3_object_look_at(f, cp.x, cp.y, cp.z);
   f->base.visible = true;
+}
+
+/* the boot compile: one spark, one chip, one puff and the flash quads on screen so their programs link
+ * before the first fight; off hides them again */
+void fx_warm(int on) {
+  if (on) {
+    t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ 0, 0.5f, 0 }, t3_quat_identity(), (t3_vec3){ 0.1f, 0.1f, 0.2f });
+    t3_instanced_mesh_set_matrix_at(cube_mesh, 0, &m); t3_instanced_mesh_set_color_at(cube_mesh, 0, t3_color_hex(C_HAZARD));
+    t3_instanced_mesh_set_matrix_at(puff_mesh, 0, &m); t3_instanced_mesh_set_color_at(puff_mesh, 0, t3_color_hex(0x8a857c));
+    for (int i = 0; i < 4; i++) { t3_object_set_position(flash[i], 0, 0.5f, 0); t3_object_set_scale(flash[i], 0.3f, 0.3f, 1); flash[i]->base.visible = true; }
+  } else {
+    if (!cubes[0].live) hide_instance(cube_mesh, 0);
+    if (!puffs[0].live) hide_instance(puff_mesh, 0);
+    for (int i = 0; i < 4; i++) flash[i]->base.visible = false;
+  }
+  cube_mesh->instance_matrix->version++; if (cube_mesh->instance_color) cube_mesh->instance_color->version++;
+  puff_mesh->instance_matrix->version++; if (puff_mesh->instance_color) puff_mesh->instance_color->version++;
 }
 
 int fx_white_alpha(int viewport) { return viewport >= 0 && viewport < 4 && white_frames[viewport] > 0 ? white_a[viewport] : 0; }
