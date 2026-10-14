@@ -9,3 +9,5 @@
 -Ithird_party
 -Isrc
 -Ibuild/obj/game
+-Wall
+-Wshadow

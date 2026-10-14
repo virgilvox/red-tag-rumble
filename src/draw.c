@@ -531,8 +531,8 @@ void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
     /* the hill score as a small chip at the content's right end */
     if (M.mode == MODE_HILL) {
       hud_glyph(x + cw - 40, y + 8, GL_CROWN, 1, C_LIVE, 255);
-      char sc[8]; snprintf(sc, sizeof sc, "%d", M.score[b->seat & 3]);
-      hud_text(F_MONO_L, x + cw - 4, y + 22, sc, C_BONE, 255, AL_RIGHT);
+      char score_s[8]; snprintf(score_s, sizeof score_s, "%d", M.score[b->seat & 3]);
+      hud_text(F_MONO_L, x + cw - 4, y + 22, score_s, C_BONE, 255, AL_RIGHT);
     }
   }
   hud_dirty(vp->x, y, vp->w, h);

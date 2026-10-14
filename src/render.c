@@ -16,13 +16,24 @@
 #endif
 
 /* -- the render half fallback ------------------------------------- */
+/* frame_ms is the host's frame delta: on a vsynced 60 Hz host it is 16.7 ms when the cart keeps up and
+ * 33 ms when it drops a frame, never under 12, so the spec's "back when under 12 ms" (13) could never
+ * release it. On: 30 frames over 20 ms (the cart misses vsync). Off: a run of frames at 60 Hz (17.5 ms
+ * or less) that starts at 3 s and doubles every time the fallback re-trips in the same phase, so a
+ * fight on the edge settles instead of flapping. Every phase change resets it: a slow 4 pad fight
+ * never carries its half rate into the garage and the menus. */
 static int half_phase;
+static int release_need = 180, release_trips, half_scene = -1;
 
 void render_measure(float frame_ms) {
+  if (G.phase != half_scene) { half_scene = G.phase; G.render_half = 0; G.slow_frames = 0; G.fast_frames = 0; release_need = 180; release_trips = 0; }
   G.frame_ms_avg += (frame_ms - G.frame_ms_avg) * 0.1f;
-  if (frame_ms > 20) { G.slow_frames++; G.fast_frames = 0; } else if (frame_ms < 12) { G.fast_frames++; G.slow_frames = 0; } else { G.slow_frames = 0; G.fast_frames = 0; }
-  if (!G.render_half && G.slow_frames >= 30) { G.render_half = 1; G.slow_frames = 0; }
-  if (G.render_half && G.fast_frames >= 120) { G.render_half = 0; G.fast_frames = 0; }
+  if (frame_ms > 20) { G.slow_frames++; G.fast_frames = 0; } else if (frame_ms <= 17.5f) { G.fast_frames++; G.slow_frames = 0; } else { G.slow_frames = 0; G.fast_frames = 0; }
+  if (!G.render_half && G.slow_frames >= 30) {
+    G.render_half = 1; G.slow_frames = 0; G.fast_frames = 0;
+    if (release_trips++ > 0 && release_need < 1800) release_need *= 2;
+  }
+  if (G.render_half && G.fast_frames >= release_need) { G.render_half = 0; G.fast_frames = 0; }
 }
 
 /* the arena cell under a camera, for the vis table */

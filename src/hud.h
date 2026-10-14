@@ -123,9 +123,21 @@ void hud_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_
 void menu_row(int x, int y, int w, const char *label, const char *value, int focused, int enabled, int is_choice, int can_left, int can_right);
 /* a panel with a 24 px tape header and a step dot row at the bottom (10 px bone squares, the current one hazard) */
 void card(int x, int y, int w, int h, int step, int total);
-/* widen the frame's dirty rect; main.c bumps hud_tex->version only on frames with one */
+/* the dirty rect: the pixel writers above record what they touch, hud_clear erases only what the
+ * previous frame painted and marks it, and main.c uploads only the dirty rows (glTexSubImage2D) or
+ * nothing on a clean frame. hud_dirty is a no-op kept so the drawers compile: a hint wider than
+ * what was written would only widen the upload. Reference space in and out. */
 void hud_dirty(int x, int y, int w, int h);
-int  hud_dirty_get(int *x, int *y, int *w, int *h);    /* 0 when nothing was marked this frame */
+int  hud_dirty_get(int *x, int *y, int *w, int *h);    /* the bounding box; 0 when no pixel changed since the last reset */
+/* the changed pixels as bands of HUD_BAND buffer rows: on[b] with the columns [x0[b], x1[b]) of
+ * band b (arrays of HUD_NBANDS); returns the number of bands on, 0 when nothing changed */
+#define HUD_BAND 8
+#define HUD_NBANDS ((HUD_H + HUD_BAND - 1) / HUD_BAND)
+int  hud_dirty_bands(uint8_t *on, int16_t *x0, int16_t *x1);
+/* a band set as up to max rects in buffer space (x0, y0 inclusive, x1, y1 exclusive, y top down):
+ * runs of bands whose columns nearly agree; the last rect grows over the rest when the slots run
+ * out; returns how many */
+int  hud_band_rects(const uint8_t *on, const int16_t *bx0, const int16_t *bx1, int *x0, int *y0, int *x1, int *y1, int max);
 void hud_dirty_reset(void);
 /* the fixed seat colours in GANTRY order (2.1): hazard, live, bone, rust */
 static const uint32_t SEAT_RGB[4] __attribute__((unused)) = { C_HAZARD, C_LIVE, C_BONE, C_RUST };

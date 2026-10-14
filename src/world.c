@@ -37,18 +37,23 @@ static float wrf(void) { return rtr_rand_f(&wrng); }
  * by three.c's auto instancing, so both are cached and never released */
 static t3_geometry *g_box, *g_cyl12, *g_cyl8, *g_disc, *g_circle, *g_plane, *g_ring, *g_sphere, *g_cone, *g_torus;
 
-typedef struct { uint32_t key; t3_material *m; } mat_slot_t;
-static mat_slot_t mats[256]; static int nmats;
+/* the cache compares the whole parameter tuple (a hashed key could hand a paint a steel of a related
+ * colour) and grows as needed, so a late entry is never a fresh material per call */
+typedef struct { uint32_t c, emis; float rough, metal, ei; int kind; t3_material *m; } mat_slot_t;
+static mat_slot_t *mats; static int nmats, cmats;
 
 static t3_material *mat_ex(uint32_t c, float rough, float metal, uint32_t emis, float ei, int kind) {
-  uint32_t key = c ^ ((uint32_t)(rough * 31) << 24) ^ ((uint32_t)(metal * 31) << 19) ^ (emis * 2654435761u) ^ ((uint32_t)(ei * 4) << 14) ^ ((uint32_t)kind << 29);
-  for (int i = 0; i < nmats; i++) if (mats[i].key == key) return mats[i].m;
+  for (int i = 0; i < nmats; i++) {
+    const mat_slot_t *s = &mats[i];
+    if (s->c == c && s->kind == kind && s->rough == rough && s->metal == metal && s->emis == emis && s->ei == ei) return s->m;
+  }
   t3_material *m = kind == 1 ? t3_mesh_basic_material_new(c) : t3_mesh_standard_material_new(c);
   if (kind != 1) {
     m->roughness = rough; m->metalness = metal;
     if (ei > 0) { m->emissive = t3_color_hex(emis); m->emissive_intensity = ei; }
   }
-  if (nmats < 256) { mats[nmats].key = key; mats[nmats].m = m; nmats++; }
+  if (nmats == cmats) { cmats = cmats ? cmats * 2 : 256; mats = realloc(mats, sizeof *mats * (size_t)cmats); }
+  mats[nmats++] = (mat_slot_t){ c, emis, rough, metal, ei, kind, m };
   return m;
 }
 static t3_material *mat(uint32_t c, float rough, float metal) { return mat_ex(c, rough, metal, 0, 0, 0); }
@@ -112,9 +117,12 @@ static void soup_tri(soup_t *s, const float *a, const float *b, const float *c) 
 static void soup_quad(soup_t *s, const float *a, const float *b, const float *c, const float *d) { soup_tri(s, a, b, c); soup_tri(s, a, c, d); }
 static t3_geometry *soup_finish(soup_t *s) {
   t3_geometry *g = t3_geometry_new();
-  t3_geometry_set_attribute(g, T3_ATTR_POSITION, t3_attribute_new(T3_FLOAT32, s->p, s->n_, 3));
-  t3_geometry_set_attribute(g, T3_ATTR_NORMAL, t3_attribute_new(T3_FLOAT32, s->n, s->n_, 3));
-  t3_geometry_set_attribute(g, T3_ATTR_UV, t3_attribute_new(T3_FLOAT32, s->uv, s->n_, 2));
+  /* the geometry retains each attribute, so the creation ref goes: a wedge is rebuilt every garage
+   * and every match, and with the ref kept its three arrays outlived the geometry */
+  t3_attribute *p = t3_attribute_new(T3_FLOAT32, s->p, s->n_, 3), *n = t3_attribute_new(T3_FLOAT32, s->n, s->n_, 3), *uv = t3_attribute_new(T3_FLOAT32, s->uv, s->n_, 2);
+  t3_geometry_set_attribute(g, T3_ATTR_POSITION, p); t3_release(p);
+  t3_geometry_set_attribute(g, T3_ATTR_NORMAL, n); t3_release(n);
+  t3_geometry_set_attribute(g, T3_ATTR_UV, uv); t3_release(uv);
   t3_geometry_compute_bounding_sphere(g);
   t3_geometry_compute_bounding_box(g);
   free(s->p); free(s->n); free(s->uv);
@@ -169,10 +177,10 @@ static t3_geometry *crowd_geometry(int frame) {
   soup_t s; soup_init(&s, 60);
   float lean = frame == 1 ? 0.12f : 0;
   #define BX(x0, y0, z0, x1, y1, z1) do { \
-    float A[3] = { x0, y0, z0 }, B[3] = { x1, y0, z0 }, C[3] = { x1, y1, z0 }, D[3] = { x0, y1, z0 }; \
-    float E[3] = { x0, y0, z1 }, F[3] = { x1, y0, z1 }, G[3] = { x1, y1, z1 }, H[3] = { x0, y1, z1 }; \
-    soup_quad(&s, A, D, C, B); soup_quad(&s, E, F, G, H); soup_quad(&s, A, B, F, E); soup_quad(&s, D, H, G, C); \
-    soup_quad(&s, A, E, H, D); soup_quad(&s, B, C, G, F); } while (0)
+    float q0[3] = { x0, y0, z0 }, q1[3] = { x1, y0, z0 }, q2[3] = { x1, y1, z0 }, q3[3] = { x0, y1, z0 }; \
+    float q4[3] = { x0, y0, z1 }, q5[3] = { x1, y0, z1 }, q6[3] = { x1, y1, z1 }, q7[3] = { x0, y1, z1 }; \
+    soup_quad(&s, q0, q3, q2, q1); soup_quad(&s, q4, q5, q6, q7); soup_quad(&s, q0, q1, q5, q4); soup_quad(&s, q3, q7, q6, q2); \
+    soup_quad(&s, q0, q4, q7, q3); soup_quad(&s, q1, q2, q6, q5); } while (0)
   BX(-0.22f, 0.0f, -0.1f, 0.22f, 0.95f, 0.1f);                        /* torso */
   BX(-0.14f, 1.0f, -0.12f + lean, 0.14f, 1.3f, 0.12f + lean);           /* head */
   if (frame == 2) { BX(-0.42f, 0.9f, -0.06f, -0.26f, 1.55f, 0.06f); BX(0.26f, 0.9f, -0.06f, 0.42f, 1.55f, 0.06f); }
@@ -445,9 +453,15 @@ static void arena_floor(warena_t *w, const arena_def_t *a) {
   int W = 1024, H = (int)(1024.0f * a->d / a->w + 0.5f);
   uint8_t *px = malloc((size_t)W * H * 4);
   paint_floor(a, W, H, px);
+  /* the rows are swapped here instead of flip_y: three.c's flip is a copy of the whole texture at
+   * its first upload, a 4 MB heap step in the first countdown of every arena */
+  for (int y = 0; y < H / 2; y++) {
+    uint8_t row[4096]; uint8_t *lo = px + (size_t)y * W * 4, *hi = px + (size_t)(H - 1 - y) * W * 4;
+    memcpy(row, lo, (size_t)W * 4); memcpy(lo, hi, (size_t)W * 4); memcpy(hi, row, (size_t)W * 4);
+  }
   t3_texture *t = t3_data_texture_new(W, H, px);
   free(px);
-  t->color_space = T3_SRGB_COLOR_SPACE; t->flip_y = true;
+  t->color_space = T3_SRGB_COLOR_SPACE;
   t->mag_filter = T3_LINEAR; t->min_filter = T3_LINEAR;
   w->floor_tex = t; w->floor_w = W; w->floor_h = H;
   t3_material *m = t3_mesh_standard_material_new(0xffffff);
@@ -1071,7 +1085,8 @@ static void build_weapon(wbot_t *b, int secondary) {
       BOX(piv, M_PAINT(C_RUST), 0.3f, 0.3f, 0.28f, 0, 0.05f, -0.1f);
       t3_mesh *n = part(piv, g_cyl8, M_PAINT(C_TAPE), 0.06f, 0.4f, 0.06f, 0, 0.08f, 0.25f); rot(n, PI / 2, 0, 0);
       part(piv, g_cyl8, bright, 0.09f, 0.06f, 0.09f, 0, 0.08f, 0.47f);
-      t3_mesh *cone = t3_mesh_new(g_cone, glass(0xffb347, 0.0f));
+      t3_material *cm = glass(0xffb347, 0.0f);
+      t3_mesh *cone = t3_mesh_new(g_cone, cm); t3_release(cm);     /* the mesh holds the only ref */
       t3_object_set_scale(cone, 0.35f, 2.0f, 0.35f); t3_object_set_position(cone, 0, 0.08f, 1.45f); t3_object_set_rotation(cone, -PI / 2, 0, 0);
       t3_object_add(piv, cone); t3_release(cone);
       if (secondary) b->wsub[3] = cone; else b->glow = cone;
@@ -1109,7 +1124,8 @@ static void build_weapon(wbot_t *b, int secondary) {
       for (int t = 0; t < 3; t++) { t3_mesh *th = part(disc, g_box, bright, 0.14f, 0.08f, 0.22f, cosf(t * TAU / 3) * 0.55f, 0, sinf(t * TAU / 3) * 0.55f); rot(th, 0, -t * TAU / 3, 0); }
       b->wsub[secondary ? 2 : 0] = (t3_mesh *)disc;
       /* the motion blur copy */
-      t3_mesh *blur = t3_mesh_new(g_disc, glass(0x8d97a3, 0.0f)); t3_object_set_scale(blur, 0.58f, 0.03f, 0.58f);
+      t3_material *bm = glass(0x8d97a3, 0.0f);
+      t3_mesh *blur = t3_mesh_new(g_disc, bm); t3_release(bm); t3_object_set_scale(blur, 0.58f, 0.03f, 0.58f);
       t3_object_add(piv, blur); t3_release(blur); b->wsub[secondary ? 3 : 1] = blur;
       if (!secondary) { b->ring_r = 0.6f; b->ring_y = top + 0.07f; }
       break; }
@@ -1236,6 +1252,7 @@ static void bot_alloc(wbot_t *b, int slot) {
 }
 
 static void bot_rebuild(wbot_t *b) {
+  if (b->tread_tex) { t3_release(b->tread_tex); b->tread_tex = 0; }   /* the creation ref; the material held its own */
   clear_group(b->body); clear_group(b->drive_g);
   b->weapon_g = group_at(b->body, 0, 0, 0);
   b->weapon2_g = group_at(b->body, 0, 0, 0);

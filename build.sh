@@ -41,7 +41,7 @@ if [ "${1:-}" = balance ]; then
     echo "balance: libm trig in a headless source (use rtr_sin, rtr_cos, rtr_atan2)" >&2
     exit 1
   fi
-  (cd "$ROOT" && cc -O2 -std=gnu11 -Wall -Wno-unused-function -ffp-contract=off -DRTR_HEADLESS -I src \
+  (cd "$ROOT" && cc -O2 -std=gnu11 -Wall -Wshadow -Wno-unused-function -ffp-contract=off -DRTR_HEADLESS -I src \
     $HEADLESS_SRCS tools/balance.c -lm -o "$OUT/balance")
   echo "built build/balance"
   exit 0
@@ -113,7 +113,7 @@ if [ "$NAME" = red-tag-rumble ]; then
   GAMEOBJ="$OUT/obj/game/audio_band.o"
 fi
 
-emcc $OPT -std=gnu11 -Wall -Wno-unused-function -ffp-contract=off -DT3_WASMCART $GAMEF \
+emcc $OPT -std=gnu11 -Wall -Wshadow -Wno-unused-function -ffp-contract=off -DT3_WASMCART $GAMEF \
   -I "$WASMCART/include" -I "$THREE/include" -I "$ROOT/third_party" \
   -I "$ROOT/src" -I "$THREE/src" -I "$OUT/obj/game" \
   $SRCS $GAMEOBJ "$TOBJ"/*.o \
