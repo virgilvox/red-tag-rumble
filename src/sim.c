@@ -637,7 +637,7 @@ static float apply_damage(match_t *m, int att, int vic, float raw, int weapon, i
   bot_t *v = &m->bots[vic];
   hit_t h = { 0 };
   h.att = att; h.vic = vic; h.raw = raw; h.stun = stun; h.cx = cx; h.cz = cz; h.nx = nx; h.nz = nz; h.ev_type = ev_type; h.zone = zone; h.wear = 1;
-  h.weapon = weapon == -2 ? EVW_MELTY : weapon == -3 ? (att < 0 ? EVW_HAZARD : EVW_LAND) : weapon < 0 ? (att < 0 ? EVW_HAZARD : EVW_NONE) : weapon;
+  h.weapon = att < 0 ? EVW_HAZARD : weapon == -2 ? EVW_MELTY : weapon == -3 ? EVW_LAND : weapon < 0 ? EVW_NONE : weapon;
   if (att >= 0 && m->bots[att].is_ops) h.weapon = EVW_OPS;
   h.panel = weapon == -3 ? PN_TOP : panel_at(v, cx, cz);
   if (h.panel == PN_TOP) h.flags |= EVF_TOP;
@@ -1077,7 +1077,7 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
   bot_t *a = &m->bots[att], *v = &m->bots[vic];
   int wid = which ? a->build.weapon2 : a->build.weapon;
   int melty = a->build.drive == DR_MELTY && !which && !a->is_ops;
-  int w = melty ? EVW_MELTY : wid;
+  int w = a->is_ops ? EVW_OPS : melty ? EVW_MELTY : wid;
   int16_t *cd = which ? &a->hit_cd2[vic] : &a->hit_cd[vic];
   if (*cd > 0) return;
   float *spin = which ? &a->spin2 : &a->spin;
@@ -2327,7 +2327,10 @@ static void hazards_on_bots(match_t *m) {
           } else {
             if (!inside && b->on_ramp && grounded) {
               float sx = rtr_sin(h->ang), sz = rtr_cos(h->ang), sp = len2(b->b.vx, b->b.vz);
-              if (sp > 4.0f && dotp(b->b.vx, b->b.vz, sx, sz) > 0 && b->b.y >= h->h - 0.05f) { b->b.vy = sp * 0.8f; b->airborne = 1; b->flip_pending = 1; b->launched_by = 0; ev_simple(m, EV_LAUNCH, j, j, 1, b->b.x, b->b.z, b->b.y); }
+              if (sp > 4.0f && dotp(b->b.vx, b->b.vz, sx, sz) > 0 && b->b.y >= h->h - 0.05f) {
+                b->b.vy = sp * 0.8f; b->airborne = 1; b->flip_pending = 1; b->launched_by = 0; b->peak_y = b->b.y; b->bounced = 0; b->tipping = 0;
+                ev_full(m, EV_LAUNCH, j, j, LAUNCH_RAMP, b->b.x, b->b.z, b->b.y, b->b.vy, sx, sz, 0, EVW_HAZARD, 0, 0, b->b.vy, 0);
+              }
             }
             b->on_ramp = (uint8_t)inside;
           }
@@ -2343,11 +2346,19 @@ static void hazards_on_bots(match_t *m) {
           if (haz_contains(h, b->b.x, b->b.z, 0)) {
             b->haz_t[i]++;
             if ((b->haz_t[i] >= h->p0 && m->hazards_on && hs->cooldown == 0) || hs->fire_t == 1) {
-              b->b.vy = 6.0f; b->airborne = 1; b->flip_pending = 1; b->launched_by = 0; b->haz_t[i] = 0;
+              b->b.vy = 6.0f; b->airborne = 1; b->flip_pending = 1; b->launched_by = 0; b->haz_t[i] = 0; b->peak_y = b->b.y; b->bounced = 0; b->tipping = 0;
+              if (b->ride_by) ride_end(m, j, RIDE_BACKED_OFF);
+              /* the plate throws up the end of the bot that is over it: the bot turns away from the plate's centre */
+              {
+                float fx, fz, rx, rz; fwd_of(b->b.h, &fx, &fz); right_of(b->b.h, &rx, &rz);
+                float dx = h->x - b->b.x, dz = h->z - b->b.z, lz = dotp(dx, dz, fx, fz), lx = dotp(dx, dz, rx, rz);
+                float w = CHASSIS_TUMBLE[b->build.chassis] * 0.85f;
+                if (fabs_f(lz) >= fabs_f(lx)) b->b.wp = lz >= 0 ? w : -w; else b->b.wr = lx >= 0 ? w : -w;
+              }
               if (hs->fire_t != 1) hs->cooldown = (int16_t)h->p1;
               b->hazard_hits++;
-              ev_simple(m, EV_HAZ_HIT, j, i, 0, b->b.x, b->b.z, b->b.y);
-              ev_simple(m, EV_LAUNCH, j, j, 1, b->b.x, b->b.z, b->b.y);
+              ev_full(m, EV_HAZ_HIT, j, i, 0, b->b.x, b->b.z, b->b.y, 0, 0, 0, 0, EVW_HAZARD, 0, 0, 6.0f, 0);
+              ev_full(m, EV_LAUNCH, j, j, LAUNCH_RAMP, b->b.x, b->b.z, b->b.y, 6.0f, 0, 0, 0, EVW_HAZARD, 0, 0, 6.0f, fabs_f(b->b.wp) + fabs_f(b->b.wr));
             }
           } else b->haz_t[i] = 0;
           break;
@@ -2423,6 +2434,10 @@ static void checks_step(match_t *m) {
         if (b->countout % 60 == 0 && b->countout < COUNTOUT_FRAMES) ev_simple(m, EV_COUNT_TICK, i, i, 10 - b->countout / 60, bd->x, bd->z, bd->y);
       } else if (!b->inverted && b->fast_t >= 10) b->countout = 0;
       if (b->inverted) b->frames_inverted++;
+      /* a lid on the floor at over 1.5 u/s for 6 frames scrapes (once per 30; the wall's scrape is walls_step's) */
+      if (b->inverted && !b->airborne && speed > SCRAPE_SPEED) {
+        if (++b->scrape_t == 6 && b->scrape_cd == 0) { ev_full(m, EV_SCRAPE, i, i, SCRAPE_FLOOR, bd->x, bd->z, b->floor_y, speed, bd->vx / speed, bd->vz / speed, PN_TOP, 0, 0, 0, speed, 0); b->scrape_cd = 30; }
+      } else if (b->inverted) b->scrape_t = 0;
       /* the wall wedge nudge: |thr| > 0.5 against a wall with no displacement for 120 frames. A bot held
        * there by another bot is not wedged on the geometry: that is a pin (2.11), OPS's to break */
       if ((b->pinned & 1) && fabs_f(b->drive_t) > 0.5f && moved < 0.05f && !b->airborne && !b->touch_bot && !b->ride_by) {
@@ -2590,7 +2605,7 @@ static void ops_step(match_t *m) {
         if (m->ops_state == OPS_PUNISH) {
           /* a 40 damage lift and shove */
           apply_damage(m, OPS_SLOT, target, 40.0f, WP_LIFTER, 30, t->b.x, t->b.z, rtr_sin(o->b.h), rtr_cos(o->b.h), EV_HIT, 1.5f);
-          t->lifted_by = 0; o->carry_t = 0; o->lift = 0; t->airborne = 1; t->b.vy = 2.0f;
+          lift_release(m, OPS_SLOT, target); t->b.vy = 2.0f; o->carry_t = 0; o->lift = 0;
           knock(t, rtr_sin(o->b.h) * 6.0f, rtr_cos(o->b.h) * 6.0f);
           m->ops_state = OPS_RETURN;
         } else {
@@ -2609,9 +2624,9 @@ static void ops_step(match_t *m) {
       int there = len2(o->b.x - m->ops_carry_x, o->b.z - m->ops_carry_z) < 1.0f;
       if (t->lifted_by != OPS_SLOT + 1 || there || o->carry_t > 170 || leaving_time) {
         if (t->lifted_by == OPS_SLOT + 1) {
-          t->lifted_by = 0; t->airborne = 1; t->b.vy = 0.5f;
+          lift_release(m, OPS_SLOT, m->ops_target);
           /* a rescue sets the bot down the right way up and its count starts over */
-          if (m->ops_rescue && t->inverted) { t->inverted = 0; t->countout = 0; ev_simple(m, EV_SELFRIGHT, m->ops_target, m->ops_target, 1, t->b.x, t->b.z, t->b.y); }
+          if (m->ops_rescue && t->inverted) { t->inverted = 0; t->countout = 0; t->b.pitch = t->b.roll = 0; ev_simple(m, EV_SELFRIGHT, m->ops_target, m->ops_target, 2, t->b.x, t->b.z, t->b.y); }
         }
         o->carry_t = 0; o->lift = 0; o->saw_on = 0; m->ops_state = OPS_RETURN; m->ops_rescue = 0;
       }
@@ -2637,7 +2652,7 @@ static void ops_step(match_t *m) {
     default: m->ops_state = OPS_PARKED;
   }
   if (leaving_time && m->ops_state != OPS_PARKED && m->ops_state != OPS_RETURN) {
-    for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == OPS_SLOT + 1) { m->bots[i].lifted_by = 0; m->bots[i].airborne = 1; }
+    for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == OPS_SLOT + 1) lift_release(m, OPS_SLOT, i);
     o->carry_t = 0; o->lift = 0; m->ops_state = OPS_LEAVING;
   }
   if (m->ops_state == OPS_RETURN || m->ops_state == OPS_LEAVING || m->ops_state == OPS_PARKED) m->ops_rescue = 0;
