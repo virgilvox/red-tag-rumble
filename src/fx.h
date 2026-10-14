@@ -24,6 +24,13 @@ void fx_face(int viewport);
 /* smoke and fire emitters follow HP: 50 grey, 30 black plus fire; a BURNING bot shows the fire
  * whatever its HP (world_sync calls it per alive bot) */
 void fx_bot_damage_state(int slot, float hp, int burning, float x, float y, float z);
+/* a launch (graphics 4.9): seat colour trail cubes along the flier's velocity and a streak at the plate tip */
+void fx_launch(int victim_slot, float x, float y, float z, float vx, float vy, float vz, uint32_t seat_colour);
+/* smoke and fire by the fraction of max HP (graphics 4.5): grey from 0.40, char and fire from 0.20, from the
+ * world point of the most damaged side; side is the PN_* the smoke pours out of, -1 for the lid */
+void fx_bot_damage_frac(int slot, float hp_frac, int burning, float x, float y, float z, int side);
+/* a lit flamethrower: fire cubes from the cone drifting forward along (dx, dz), 12 a second (graphics 3.4) */
+void fx_flame(float x, float y, float z, float dx, float dz, float dt);
 /* the boot compile: show one of every particle so every fx program links before play; 0 hides them */
 void fx_warm(int on);
 /* the spark colour for an armour and red tag state (3.6, 5.3) */

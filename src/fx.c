@@ -391,3 +391,22 @@ void fx_warm(int on) {
 
 int fx_white_alpha(int viewport) { return viewport >= 0 && viewport < 4 && white_frames[viewport] > 0 ? white_a[viewport] : 0; }
 int fx_live_sparks(void) { int n = 0; for (int i = 0; i < J_SPARK_CAP; i++) n += cubes[i].live; return n; }
+
+void fx_launch(int victim_slot, float x, float y, float z, float vx, float vy, float vz, uint32_t seat_colour) {
+  (void)victim_slot; (void)x; (void)y; (void)z; (void)vx; (void)vy; (void)vz; (void)seat_colour;
+}
+void fx_bot_damage_frac(int slot, float hp_frac, int burning, float x, float y, float z, int side) {
+  (void)side; fx_bot_damage_state(slot, hp_frac * 100, burning, x, y, z);
+}
+
+void fx_flame(float x, float y, float z, float dx, float dz, float dt) {
+  static float acc;
+  acc += dt * 12;
+  while (acc >= 1) {
+    acc -= 1;
+    cube_t *c = cube_alloc();
+    c->x = x + rr(-0.1f, 0.1f); c->y = y + rr(-0.05f, 0.08f); c->z = z + rr(-0.1f, 0.1f);
+    c->vx = dx * 3 + rr(-0.4f, 0.4f); c->vz = dz * 3 + rr(-0.4f, 0.4f); c->vy = rr(0.2f, 0.8f);
+    c->life = c->life0 = rr(0.25f, 0.4f); c->size = rr(0.1f, 0.16f); c->colour = C_HAZARD; c->kind = PK_FIRE; c->spin = rr(-6, 6);
+  }
+}
