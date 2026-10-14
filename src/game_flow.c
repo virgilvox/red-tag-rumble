@@ -965,6 +965,8 @@ static void fight_audio(void) {
     audio_whine(i, lv * 0.8f, 0.3f + lv * 0.9f);
     if (b->alive && !b->is_ai && b->hp <= 30 && b->hp > 0) tense = 1;
   }
+  /* the riser riff also comes in for the last 20 s of a timed fight */
+  if (M.fight_len_s && G.mode != MODE_HILL && M.clock_s <= 20.0f) tense = 1;
   audio_tension(tense);
   /* T minus 10: the clock ticks each second (2.3) */
   if (M.fight_len_s && G.mode != MODE_HILL) {

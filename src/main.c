@@ -302,20 +302,23 @@ static void drain_events(void) {
         if (e->dmg > 0.5f) number_all(e->x, e->y + 0.4f, e->z, dmg_int(e->dmg), C_RUST, 0);
         break;
       case EV_SPIN_WALL:
-        audio_play(SFX_CLASH); cam_shake(slot_seat(a), J_SPINWALL_SHAKE);
+        audio_play_var(SFX_CLASH, SFXV_LOW); cam_shake(slot_seat(a), J_SPINWALL_SHAKE);   /* the 0.6 clash of 11.3 */
         number_all(e->x, e->y + 0.4f, e->z, dmg_int(e->dmg), C_RUST, 1);
         break;
       case EV_INVERT: audio_play_var(SFX_KLAXON, SFXV_SHORT); sting_slot(a, PICK(ST_INVERTED), slot_colour(e->b, C_BONE)); break;
       case EV_COUNT_TICK:
         if (a >= 0 && M.bots[a].deck_count == 60) { audio_play_var(SFX_KLAXON, SFXV_TELL); sting_slot(a, PICK(ST_DECK), C_RUST); }
+        else if (a >= 0 && M.bots[a].inverted) audio_play_var(SFX_KLAXON, SFXV_LOW);   /* the inverted tick of 11.3 */
         else audio_play_var(SFX_COUNT, SFXV_SHORT);
         break;
       case EV_HAZ_TELL: audio_play_var(SFX_KLAXON, SFXV_TELL); break;
       case EV_HAZ_HIT: {
         int v = e->a < M.nbots ? e->a : -1;
         int ht = e->b < ARENAS[M.arena].nhaz ? ARENAS[M.arena].haz[e->b].type : -1;
-        audio_play(SFX_HIT_HEAVY); rumble(seat_pad(v), 0.6f, 0.6f, 100);
-        cam_shake(slot_seat(v), J_HAZARD_SHAKE);
+        /* a hazard hit by its damage: a flame tick or a bumper tap is a light
+         * landing, a hammer or a saw is the heavy clang (11.3) */
+        if (e->dmg >= 15.0f) { audio_play(SFX_HIT_HEAVY); rumble(seat_pad(v), 0.6f, 0.6f, 100); cam_shake(slot_seat(v), J_HAZARD_SHAKE); }
+        else { audio_play_var(SFX_HIT_LIGHT, SFXV_LOW); rumble(seat_pad(v), 0.3f, 0.3f, 60); cam_shake(slot_seat(v), J_HAZARD_SHAKE * 0.5f); }
         if (e->dmg > 0.5f) number_all(e->x, e->y + 0.6f, e->z, dmg_int(e->dmg), C_RUST, e->dmg >= 15);
         if (e->zone == KO_PIT) sting_slot(v, PICK(ST_PIT), C_RUST);
         else if (ht == HZ_LASER) sting_slot(v, PICK(ST_DUCK), C_RUST);
