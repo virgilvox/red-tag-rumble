@@ -84,7 +84,8 @@ float bot_top_speed(const bot_t *b) {
   if (b->build.drive == DR_FOUR && b->hp <= 30) top *= 0.8f;    /* lost a wheel */
   if (b->boost > 0) top *= 1.5f;
   if (b->red_tag_t > 0) top *= 1.15f;
-  if (b->wheel_hit > 0) top *= 0.6f;
+  if (b->wheel_hit > 0) top *= b->build.drive == DR_TWO ? 0.6f : 0.8f;   /* the scooter wheel, or one of four or six */
+  if (b->tread_hit > 0) top *= 0.85f;                                      /* a hit track */
   if (b->inverted) top *= 0.7f;
   return top;
 }

@@ -106,7 +106,7 @@ static const weapon_def_t WEAPONS[WP_COUNT] __attribute__((unused)) = {
   { "LIFTER",     "LIFTER",  "GETS UNDER, LIFTS, CARRIES",                 3,  4,  4,   0.0f,  0,  0,   0,  18,  1.2f, 0,  0.0f, 0.10f, 0.6f, 0,   0.5f, 0.8f, 0,    WI_HOLD,    0, 0, SR_NONE, 1 },
   { "SAW",        "SAW",     "NEEDS A MOMENT WITH YOU",                    3,  4, 12,   0.8f,  0,  0,   0,   6,  0.4f, 0,  2.0f, 0.10f, 0,    0,   0.7f, 0,    0.3f, WI_TOGGLE,  1, 1, SR_NONE, 0 },
   { "FLAME",      "FLAME",   "SCARY. MILD. GREAT ON CAMERA",               4,  2, 10,   0.0f,  0,  0,   0,   0,  0.0f, 0,  0.0f, 0.10f, 0,    0,   0,    1.5f, 0,    WI_HOLD,    0, 0, SR_NONE, 0 },
-  { "HAMMER",     "HAMMER",  "TELEGRAPHS. THEN DENTS",                     5, 20, 20,   0.0f, 15,  4,  72,  30,  1.2f, 0,  4.0f, 0.20f, 0.4f, 0,   0.5f, 1.0f, 0,    WI_TAP,     0, 0, SR_B,    0 },
+  { "HAMMER",     "HAMMER",  "TELEGRAPHS. THEN DENTS",                     5, 20, 20,   0.0f, 15, 10,  72,  30,  1.2f, 0,  4.0f, 0.20f, 0.4f, 0,   0.5f, 1.0f, 0,    WI_TAP,     0, 0, SR_B,    0 },
   { "FLIPPER",    "FLIPPER", "GRAVITY, BUT FOR THEM",                      6,  6,  6,   0.0f,  0,  4, 108,  36,  3.0f, 7,  0.0f, 0.20f, 0.6f, 0,   0.4f, 0.9f, 0,    WI_TAP,     0, 0, SR_B,    0 },
   { "DRUM",       "DRUM",    "POPS THEM UP. HITS THE FLOOR TO SELF RIGHT", 6, 17, 17,   1.5f,  0,  0,   0,  24,  4.0f, 3,  3.0f, 0.30f, 0,    0,   0.55f, 0,   0.3f, WI_HOLD,    1, 1, SR_DRUM, 0 },
   { "HORIZONTAL", "HORIZ",   "CHAINSAW YOU CANNOT STEER",                  7, 22, 22,   2.0f,  0,  0,   0,  21,  6.0f, 0,  4.0f, 0.30f, 0,    0,   0.15f, 0,   0.55f, WI_HOLD,   0, 1, SR_NONE, 0 },
@@ -201,7 +201,7 @@ static const struct { float lip, len, lift; } WEDGE_KIND[WK_COUNT] __attribute__
 #define HAMMER_PIVOT_Z  (-0.1f)
 #define HAMMER_A0       110.0f
 #define HAMMER_REACH    1.0f
-#define HAMMER_HEAD_R   0.25f
+#define HAMMER_HEAD_R   0.15f
 #define HAMMER_ACTIVE   10
 
 static const armour_def_t ARMOURS[AR_COUNT] __attribute__((unused)) = {

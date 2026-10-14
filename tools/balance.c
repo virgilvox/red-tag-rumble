@@ -28,6 +28,9 @@
 #include "bot.h"
 #include "arena.h"
 #include "ai.h"
+#ifndef TIP_SWING
+#define TIP_SWING 4.0f      /* sim.c's swing tip speed: the hammer's event speed is TIP_SWING (0.5 + p) */
+#endif
 
 static int usage(void) {
   fprintf(stderr, "usage: balance --parts | --robin N [arenas=...] [hazards=on|off|both] [driver=ai|builtin] [mode=M] | --check-arenas |\n"
@@ -956,8 +959,12 @@ static void sc_place(int slot, float x, float z, float h) {
 }
 /* thr forward 0..1 (negative reverse), turn positive right, the weapon and other buttons */
 static void sc_pad(int slot, float thr, float turn, uint16_t buttons) {
+  /* the sim reads the stick past a 0.18 dead zone; this writes the deflection that gives exactly thr */
   pad_state_t *p = &SM.bots[slot].in; memset(p, 0, sizeof *p);
-  p->ly = (int16_t)(-rtr_clamp(thr, -1, 1) * 32767.0f); p->lx = (int16_t)(rtr_clamp(turn, -1, 1) * 32767.0f); p->buttons = buttons;
+  thr = rtr_clamp(thr, -1, 1); turn = rtr_clamp(turn, -1, 1);
+  float y = thr == 0 ? 0 : (thr > 0 ? 1.0f : -1.0f) * (0.18f + 0.82f * fabsf(thr)), x = turn == 0 ? 0 : (turn > 0 ? 1.0f : -1.0f) * (0.18f + 0.82f * fabsf(turn));
+  if (thr != 0 && turn != 0) { x = turn; y = thr; }       /* both: the raw deflection */
+  p->ly = (int16_t)(-y * 32767.0f); p->lx = (int16_t)(x * 32767.0f); p->buttons = buttons;
 }
 static int sc_step(void) { sim_step(&SM); SNEV = SM.nev; memcpy(SEV, SM.ev, sizeof(event_t) * (size_t)SNEV); SM.nev = 0; return SNEV; }
 static float sc_dist(int i, int j) { float dx = SM.bots[i].b.x - SM.bots[j].b.x, dz = SM.bots[i].b.z - SM.bots[j].b.z; return sqrtf(dx * dx + dz * dz); }
@@ -972,7 +979,7 @@ static int sc_ghost_sim(char *msg, int n) {
   sim_init(&SM, &s);
   static ai_t ais[MAX_BOTS]; for (int i = 0; i < 2; i++) { ai_init(&ais[i], AI_MEDIUM, i); ai_bind(&ais[i], i); }
   int bad = 0, events = 0, frames = 0;
-  for (int f = 0; f < 3000 && !sim_over(&SM); f++) {
+  for (int f = 0; f < 3000; f++) {                     /* on past the KO: the corpse and the parked OPS stay in the step */
     for (int i = 0; i < 2; i++) ai_think(&ais[i], &SM, &SM.bots[i].in);
     sc_step(); frames++;
     for (int k = 0; k < SNEV; k++) {
@@ -1274,6 +1281,264 @@ static int sc_flip_bounce(char *msg, int n) {
         "first landing at %.0f degrees (60 to 120) is a BOUNCE %d, decided at %d frames after the launch (< 90), inverted %d", pitch_at, L.first[EV_LAND][LAND_BOUNCE] >= 0, t_end - t_launch, SM.bots[1].inverted);
 }
 
+/* the first EV_HIT on slot b during a run, or a zeroed event */
+static int sc_hit_on(int b, event_t *out) { for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_HIT && SEV[k].b == b) { *out = SEV[k]; return 1; } return 0; }
+static float reduction_of(int slot) { return ARMOURS[SM.bots[slot].build.armour].reduction; }
+
+/* a full spin CHOP into a ROLL OUT's front: it glances (EVF_DEFLECT, under 9), hops up the slope 8 to 12
+ * frames, and keeps most of its spin */
+static int sc_spinner_wedge_glance(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_CHOP, PRE_ROLL_OUT, 0);
+  sc_place(0, -2.4f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  SM.bots[0].spin = 1.0f;
+  event_t e; int got = 0, air = 0, counting = 0; float spin_after = -1;
+  for (int f = 0; f < 120; f++) {
+    sc_pad(0, got ? 0 : 0.5f, 0, IN_A); sc_pad(1, 0, 0, 0); sc_step();
+    if (!got && sc_hit_on(1, &e)) { got = 1; spin_after = SM.bots[0].spin; counting = 1; }
+    if (counting) { if (SM.bots[0].airborne) air++; else if (air > 0) counting = 0; }
+  }
+  SC_OK(got && (e.flags & EVF_DEFLECT) && e.dmg < 9 && air >= 8 && air <= 12 && spin_after > 0.8f, "first hit flags %d (DEFLECT 2), dmg %.1f (< 9), the CHOP airborne %d frames (8 to 12), spin after %.2f (> 0.8), reason %d",
+        e.flags, e.dmg, air, spin_after, e.reason);
+}
+
+/* a full spin CHOP charging a ROLL OUT's side: the capped hit, the disc spent, the victim sent; a LAUNCH skids */
+static int sc_spinner_side_full(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_CHOP, PRE_ROLL_OUT, 0);
+  sc_place(0, -2.6f, 0, HALF_PI); sc_place(1, 0, 0, 0);
+  SM.bots[0].spin = 1.0f; SM.bots[0].b.vx = 4.0f;
+  event_t e; int got = 0, after = -1; float spin_after = -1, vmax = 0;
+  for (int f = 0; f < 60; f++) {
+    sc_pad(0, 1, 0, IN_A); sc_pad(1, 0, 0, 0); sc_step();
+    if (!got && sc_hit_on(1, &e)) { got = 1; spin_after = SM.bots[0].spin; after = 0; }
+    if (after >= 0 && after < 5) { if (sc_speed(1) > vmax) vmax = sc_speed(1); after++; }
+  }
+  sc_init_presets(AR_BAY, PRE_CHOP, PRE_LAUNCH, 0);
+  sc_place(0, -2.6f, 0.1f, HALF_PI); sc_place(1, 0, 0, 0);
+  SM.bots[0].spin = 1.0f; SM.bots[0].b.vx = 4.0f;
+  int slide = 0;
+  for (int f = 0; f < 60; f++) { sc_pad(0, 1, 0, IN_A); sc_pad(1, 0, 0, 0); sc_step(); for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_SLIDE && SEV[k].a == 1) slide++; }
+  SC_OK(got && e.dmg >= 16 && e.dmg <= 18 && spin_after < 0.6f && vmax > 2.0f && slide > 0, "ROLL OUT side: dmg %.1f (16 to 18), spin after %.2f (< 0.6), the ROLL OUT sent at %.2f u/s (> 2), reason %d; LAUNCH side: %d EV_SLIDE",
+        e.dmg, spin_after, vmax, e.reason, slide);
+}
+
+/* a standing full spin CHOP: a LAUNCH backing into the disc at 6 u/s takes 1.4x what one leaving at 3 u/s does */
+static float moving_hit(float vx) {
+  sc_init_presets(AR_BAY, PRE_CHOP, PRE_LAUNCH, 0);
+  sc_place(0, -1.65f, 0, HALF_PI); sc_place(1, vx < 0 ? 0.05f : -0.6f, 0, HALF_PI);   /* the LAUNCH's back to the disc */
+  SM.bots[0].spin = 1.0f; SM.bots[1].b.vx = vx;
+  event_t e; e.dmg = 0;
+  for (int f = 0; f < 20; f++) {
+    sc_pad(0, 0, 0, IN_A);
+    if (vx > 0) { sc_pad(1, vx / DRIVES[DR_TWO].top, 0, 0); if (f == 0) SM.bots[1].b.vx = vx; } else { sc_pad(1, 0, 0, 0); SM.bots[1].b.vx = vx; }   /* away under its own drive, or shoved back into the disc */
+    sc_step(); if (sc_hit_on(1, &e)) break;
+  }
+  return e.dmg;
+}
+static int sc_spinner_moving_target(char *msg, int n) {
+  float in = moving_hit(-6.0f), out = moving_hit(3.0f);
+  SC_OK(in > 0 && out > 0 && in >= 1.4f * out, "into the disc at 6 u/s: %.1f, away at 3 u/s: %.1f, ratio %.2f (>= 1.4)", in, out, out > 0 ? in / out : 0);
+}
+
+/* a CHOP on a LAUNCH's wheel: EVF_WHEEL, EV_WHEEL_HIT, wheel_hit 240 and the scooter at 0.6x top */
+static int sc_spinner_wheel(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_CHOP, PRE_LAUNCH, 0);
+  float wz = -0.2f * CHASSIS[CH_BOX].len;
+  sc_place(0, -2.4f, wz, HALF_PI); sc_place(1, 0, 0, 0);
+  SM.bots[0].spin = 1.0f;
+  event_t e; int got = 0, wheel_ev = 0, wh = 0; float vmax = 0; int after = -1;
+  for (int f = 0; f < 200; f++) {
+    sc_pad(0, got ? -0.5f : 0.5f, 0, got ? 0 : IN_A); sc_pad(1, after >= 0 ? 1.0f : 0, 0, 0); sc_step();
+    if (!got && sc_hit_on(1, &e)) { got = 1; after = 0; wh = SM.bots[1].wheel_hit; }
+    for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_WHEEL_HIT && SEV[k].b == 1) wheel_ev++;
+    if (after >= 0) { after++; if (after > 30 && after <= 90 && sc_speed(1) > vmax) vmax = sc_speed(1); }
+  }
+  float top = DRIVES[DR_TWO].top;
+  SC_OK(got && (e.flags & EVF_WHEEL) && wheel_ev == 1 && wh >= 238 && vmax <= 0.6f * top + 0.05f && vmax > 0.5f * top, "flags %d (WHEEL 4), %d EV_WHEEL_HIT, wheel_hit %d (240), top over 60 frames %.2f (0.6 x %.1f = %.2f)",
+        e.flags, wheel_ev, wh, vmax, top, 0.6f * top);
+}
+
+/* a STOMP's hammer at 1.2 u: the tall STOMP is met early in the swing, the low CHOP late; both on the TOP */
+static void hammer_once(int victim, float dist, event_t *e, int *wear) {
+  sc_init_presets(AR_BAY, PRE_STOMP, victim, 0);
+  sc_place(0, -dist, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  memset(e, 0, sizeof *e); *wear = 0; int got = 0;
+  for (int f = 0; f < 200; f++) {
+    sc_pad(0, 0, 0, (f % 100) < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step();
+    for (int k = 0; k < SNEV; k++) { if (SEV[k].type == EV_HIT && SEV[k].b == 1 && !got) { *e = SEV[k]; got = 1; } if (SEV[k].type == EV_PANEL_WEAR && SEV[k].b == 1 && SEV[k].panel == PN_TOP) (*wear)++; }
+    SM.bots[0].cooldown = SM.bots[0].cooldown > 2 && f > 30 ? 2 : SM.bots[0].cooldown;    /* the second swing comes at frame 100 */
+    sc_place(1, 0, 0, -HALF_PI);                                                         /* the victim held still for the swing */
+    sc_place(0, -dist, 0, HALF_PI);
+  }
+}
+static int sc_hammer_arc(char *msg, int n) {
+  event_t a, b, c; int wa, wb, wc;
+  hammer_once(PRE_STOMP, 1.2f, &a, &wa); hammer_once(PRE_CHOP, 1.2f, &b, &wb);
+  build_t ham = { CH_BOX, DR_FOUR, WP_HAMMER, WP_NONE, AR_ALU, 0, 0 }, tall; build_preset(&tall, PRE_STOMP);
+  sc_init(AR_BAY, &ham, &tall, 0);                 /* a low hammer bot hugging a tall one: the arm meets it first */
+  sc_place(0, -1.0f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  memset(&c, 0, sizeof c);
+  for (int f = 0; f < 60; f++) { sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step(); event_t t; if (!c.type && sc_hit_on(1, &t)) c = t; }
+  float pa = a.speed / TIP_SWING - 0.5f, pb = b.speed / TIP_SWING - 0.5f;
+  float ra = 20.0f * pa, rb = 20.0f * pb, rc = c.dmg / (1.0f - reduction_of(1));
+  wc = 0; (void)wc;
+  /* the arc with a 1.0 reach meets the STOMP's lid at p 0.6 to 0.75 and the CHOP's at 0.85 to 1.0 (the plan's
+   * 0.2 to 0.4 and 0.8 to 1.0 came from an arc that never reached the floor); the damage is the swing's
+   * energy, base x p, which lands in its 11 to 14 and 18 to 20 */
+  SC_OK(a.dmg > 0 && b.dmg > 0 && pa >= 0.6f && pa <= 0.75f && pb >= 0.85f && pb <= 1.0f && a.panel == PN_TOP && b.panel == PN_TOP && (a.flags & EVF_TOP) && (b.flags & EVF_TOP) && wb >= 1 && rc > 0 && rc < 8.0f,
+        "STOMP met at p %.2f (raw %.1f, dealt %.1f), CHOP met at p %.2f (raw %.1f, dealt %.1f), both TOP %d %d, CHOP TOP wear events %d; the handle on a hugging STOMP %.1f raw (< 8)",
+        pa, ra, a.dmg, pb, rb, b.dmg, a.panel == PN_TOP, b.panel == PN_TOP, wb, rc);
+}
+
+/* a SPIKE: a target in the rod's way on the way out takes the full 15, one sliding in on the way back 0.3 of it */
+static int sc_spike_extend(char *msg, int n) {
+  build_t sp = { CH_BOX, DR_FOUR, WP_SPIKE, WP_NONE, AR_ALU, 0, 0 }, la; build_preset(&la, PRE_LAUNCH);
+  sc_init(AR_BAY, &sp, &la, 0);
+  sc_place(0, -1.3f, 0, HALF_PI); sc_place(1, 0, 0, HALF_PI);   /* the LAUNCH's back face 0.8 in front of the spike's centre */
+  event_t e1; memset(&e1, 0, sizeof e1); int f1 = -1;
+  for (int f = 0; f < 30; f++) { sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step(); event_t t; if (!e1.type && sc_hit_on(1, &t)) { e1 = t; f1 = WEAPONS[WP_SPIKE].active + 1 - SM.bots[0].active; } }
+  sc_init(AR_BAY, &sp, &la, 0);
+  sc_place(0, -1.3f, 0, HALF_PI); sc_place(1, 0, 0.125f + 0.4f + 0.05f * 5.5f, HALF_PI);   /* beside the rod, sliding across it into frame 6 */
+  event_t e2; memset(&e2, 0, sizeof e2); int f2 = -1;
+  for (int f = 0; f < 30; f++) {
+    sc_pad(0, 0, 0, f < 1 ? IN_A : 0); sc_pad(1, 0, 0, 0); SM.bots[1].b.vz = -3.0f; sc_step();
+    event_t t; if (!e2.type && sc_hit_on(1, &t)) { e2 = t; f2 = WEAPONS[WP_SPIKE].active + 1 - SM.bots[0].active; }
+  }
+  float r1 = e1.dmg / (1.0f - reduction_of(1)), r2 = e2.dmg / (1.0f - reduction_of(1));
+  SC_OK(f1 >= 1 && f1 <= 5 && r1 > 14.9f && f2 >= 6 && r2 > 0 && r2 < 0.31f * 15.0f, "out: hit in frame %d (1 to 5) for %.1f raw (15); back: hit in frame %d (6 to 9) for %.1f raw (0.3 x 15)", f1, r1, f2, r2);
+}
+
+/* a CRUSHER closes on a LAUNCH: 15 on the bite, then 3 every 30 frames for 120 (6 a second) through the TOP,
+ * the victim's own drive does nothing */
+static int sc_crusher_hold(char *msg, int n) {
+  build_t cr = { CH_BOX, DR_FOUR, WP_CRUSHER, WP_NONE, AR_ALU, 0, 0 }, la; build_preset(&la, PRE_LAUNCH);
+  sc_init(AR_BAY, &cr, &la, 0);
+  sc_place(0, -1.15f, 0, HALF_PI); sc_place(1, 0, 0, HALF_PI);
+  event_t e; memset(&e, 0, sizeof e); int ticks = 0; float tick_dmg = 0, top0 = SM.bots[1].panel_hp[PN_TOP], d0 = -1, dmax = 0;
+  for (int f = 0; f < 200; f++) {
+    sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, SM.bots[1].clamped_by ? 1.0f : 0, 0, 0); sc_step();
+    event_t t; if (!e.type && sc_hit_on(1, &t)) e = t;
+    for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_GRIND && SEV[k].zone == GRIND_TICK) { ticks++; tick_dmg += SEV[k].dmg; }
+    if (SM.bots[1].clamped_by) { float d = sc_dist(0, 1); if (d0 < 0) d0 = d; if (fabsf(d - d0) > dmax) dmax = fabsf(d - d0); }
+  }
+  float raw = e.dmg / (1.0f - reduction_of(1)), worn = top0 - SM.bots[1].panel_hp[PN_TOP];
+  SC_OK(raw > 14.9f && raw < 15.1f && ticks == 4 && tick_dmg > 11.9f && tick_dmg < 12.1f && worn > 3.9f && worn < 4.1f && dmax < 0.01f,
+        "the bite %.1f raw (15), %d GRIND_TICKs for %.1f over the hold (6 a second for 2 s), TOP pool wore %.1f (4), the victim's own drive moved it %.3f (0)", raw, ticks, tick_dmg, worn, dmax);
+}
+
+/* a WEDGE plus SAW build holding its blade on a LAUNCH's side: a tick every 10 frames, the side plate wears
+ * a point every 6, the grind starts and ends */
+static int sc_saw_grind(char *msg, int n) {
+  build_t ws = { CH_BOX, DR_TWO, WP_WEDGE, WP_SAW, AR_ALU, 0, 0 }, la; build_preset(&la, PRE_LAUNCH);
+  sc_init(AR_BAY, &ws, &la, 0);
+  sc_place(0, -1.25f, 0.3f, HALF_PI); sc_place(1, 0, 0, 0);       /* the blade on the LAUNCH's side, ahead of its wheels */
+  SM.bots[0].spin2 = 1.0f; SM.bots[0].saw_on = 1;
+  int ticks = 0, start = 0, end = -1, gt_max = 0, gaps = 0, prev_gt = 0; float tick_raw = 0, side0 = 0; int side = -1;
+  for (int f = 0; f < 200; f++) {
+    int hold = f < 120;
+    sc_pad(0, hold ? 0 : -0.6f, 0, 0); sc_pad(1, 0, 0, 0);
+    sc_place(1, 0, 0, 0); if (hold) sc_place(0, -1.25f, 0.3f, HALF_PI);
+    sc_step();
+    for (int k = 0; k < SNEV; k++) {
+      const event_t *e = &SEV[k];
+      if (e->type == EV_HIT && e->b == 1 && e->weapon == WP_SAW) { ticks++; tick_raw = e->dmg / (1.0f - reduction_of(1)); if (side < 0) { side = e->panel; side0 = ARMOUR_PANEL_HP[AR_ALU]; } }
+      if (e->type == EV_GRIND && e->zone == GRIND_START) start++;
+      if (e->type == EV_GRIND && e->zone == GRIND_END && end < 0) end = f;
+    }
+    int gt = SM.bots[0].grind_t; if (gt > gt_max) gt_max = gt; if (hold && prev_gt > 0 && gt != prev_gt + 1) gaps++; prev_gt = gt;
+  }
+  float worn = side >= 0 ? side0 - SM.bots[1].panel_hp[side] : 0;
+  int st = side >= 0 ? SM.bots[1].panel_state[side] : -1;
+  SC_OK(ticks >= 11 && ticks <= 13 && tick_raw > 3.99f && tick_raw < 4.01f && worn >= 19 && worn <= 21 && st == 2 && start == 1 && end >= 0 && gaps == 0,
+        "%d ticks (12) of %.1f raw (4), side %d wore %.0f (20) to state %d (2), GRIND_START %d, END at %d, grind_t continuous %d (max %d)", ticks, tick_raw, side, worn, st, start, end, gaps == 0, gt_max);
+}
+
+/* a TOAST holding its flame on a LAUNCH: 4 ticks of 2, one burn of 3 over 180 frames, no relight while it
+ * burns; a TOAST on a TOAST (UHMW) never burns */
+static int sc_flame_burn(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_TOAST, PRE_LAUNCH, 0);
+  sc_place(0, -1.55f, 0, HALF_PI); sc_place(1, 0, 0, HALF_PI);
+  int ticks = 0, starts = 0, end_f = -1, start_f = -1; float tick_raw = 0, hp_burn = 0;
+  for (int f = 0; f < 320; f++) {
+    sc_pad(0, 0, 0, f < 120 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_place(1, 0, 0, HALF_PI); sc_place(0, -1.55f, 0, HALF_PI);
+    float hp0 = SM.bots[1].hp;
+    sc_step();
+    int ticked = 0;
+    for (int k = 0; k < SNEV; k++) {
+      const event_t *e = &SEV[k];
+      if (e->type == EV_HIT && e->b == 1) { ticks++; ticked = 1; tick_raw = e->dmg / (1.0f - reduction_of(1)); }
+      if (e->type == EV_BURN_START && e->b == 1) { starts++; if (start_f < 0) start_f = f; }
+      if (e->type == EV_BURN_END && e->b == 1 && end_f < 0) end_f = f;
+    }
+    hp_burn += hp0 - SM.bots[1].hp;
+    for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_HIT && SEV[k].b == 1) hp_burn -= SEV[k].dmg;
+    (void)ticked;
+  }
+  float burn_raw = hp_burn / (1.0f - reduction_of(1));
+  sc_init_presets(AR_BAY, PRE_TOAST, PRE_TOAST, 0);
+  sc_place(0, -1.65f, 0, HALF_PI); sc_place(1, 0, 0, HALF_PI);
+  int toast_burn = 0, toast_ticks = 0;
+  for (int f = 0; f < 150; f++) { sc_pad(0, 0, 0, IN_A); sc_pad(1, 0, 0, 0); sc_place(1, 0, 0, HALF_PI); sc_place(0, -1.65f, 0, HALF_PI); sc_step(); for (int k = 0; k < SNEV; k++) { if (SEV[k].type == EV_BURN_START) toast_burn++; if (SEV[k].type == EV_HIT && SEV[k].b == 1) toast_ticks++; } }
+  SC_OK(ticks == 4 && tick_raw > 1.99f && tick_raw < 2.01f && starts == 1 && burn_raw > 2.95f && burn_raw < 3.05f && end_f - start_f >= 178 && end_f - start_f <= 182 && toast_burn == 0 && toast_ticks > 0,
+        "%d ticks (4) of %.1f raw (2), %d BURN_START (1), the burn %.2f raw (3) ending %d frames later (180), TOAST on TOAST: %d burns (0) under %d ticks",
+        ticks, tick_raw, starts, burn_raw, end_f - start_f, toast_burn, toast_ticks);
+}
+
+/* where a hit lands is where the plate wears (3.10): two spike hits on a CHOP's left side and two disc hits
+ * on its right; FRONT and BACK stay clean until HP 50; the third left hit sheds LEFT, the fourth lands on
+ * the bare frame (EVF_STRIPPED, no armour, 1.25x) */
+static void panel_spike(int left) {
+  /* a spike bot in front of the CHOP's side, fired once */
+  float x = left ? -1.3f : 1.3f;
+  SM.bots[0].b.x = x; SM.bots[0].b.z = 0; SM.bots[0].b.h = left ? HALF_PI : -HALF_PI; SM.bots[0].b.vx = SM.bots[0].b.vz = SM.bots[0].b.w = 0;
+  SM.bots[0].cooldown = 0; SM.bots[0].active = 0;
+  for (int f = 0; f < 20; f++) {
+    sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); SM.bots[1].spin = 0.4f; sc_place(1, 0, 0, 0); SM.bots[0].b.x = x; SM.bots[0].b.z = 0; SM.bots[0].b.vx = SM.bots[0].b.vz = 0; sc_step();
+    if (g_verbose) for (int k = 0; k < SNEV; k++) printf("  spike f %d ev %d b %d zone %d dmg %.1f panel %d flags %d pools %.0f %.0f %.0f %.0f\n", f, SEV[k].type, SEV[k].b, SEV[k].zone, SEV[k].dmg, SEV[k].panel, SEV[k].flags, SM.bots[1].panel_hp[0], SM.bots[1].panel_hp[1], SM.bots[1].panel_hp[2], SM.bots[1].panel_hp[3]);
+  }
+}
+static int sc_panel_location(char *msg, int n) {
+  build_t sp = { CH_BOX, DR_FOUR, WP_SPIKE, WP_NONE, AR_ALU, 0, 0 }, ch; build_preset(&ch, PRE_CHOP);
+  sc_init(AR_BAY, &sp, &ch, 0);
+  sc_place(0, -1.3f, 0, HALF_PI); sc_place(1, 0, 0, 0);
+  bot_t *v = &SM.bots[1];
+  /* the CHOP faces +z: its local +x (PN_RIGHT) is world +x, PN_LEFT world -x */
+  panel_spike(1); panel_spike(1);
+  int left_after2 = v->panel_state[PN_LEFT], fb_clean = v->panel_state[PN_FRONT] == 0 && v->panel_state[PN_BACK] == 0; float hp_after_left = v->hp;
+  /* two disc hits on the right from a spinner at 0.7 spin closing at 1 u/s */
+  build_t hz; build_preset(&hz, PRE_CHOP);
+  SM.bots[0].build = hz; bot_body_from_build(&SM.bots[0].b, &hz);
+  for (int k = 0; k < 2; k++) {
+    SM.bots[0].b.x = 1.5f; SM.bots[0].b.z = 0; SM.bots[0].b.h = -HALF_PI; SM.bots[0].spin = 0.7f; memset(SM.bots[0].hit_cd, 0, sizeof SM.bots[0].hit_cd);
+    for (int f = 0; f < 30; f++) {
+      sc_pad(0, 0, 0, IN_A); sc_pad(1, 0, 0, 0); SM.bots[1].spin = 0.4f; SM.bots[0].spin = 0.7f; sc_place(1, 0, 0, 0); SM.bots[0].b.vx = -1.0f; SM.bots[0].b.vz = 0; SM.bots[0].b.w = 0;
+      sc_step(); event_t t;
+      if (g_verbose) for (int q = 0; q < SNEV; q++) printf("  disc k %d f %d ev %d a %d b %d zone %d dmg %.1f panel %d x %.2f spin %.2f w %d speed %.2f j %.2f flags %d reason %d hp %.1f\n", k, f, SEV[q].type, SEV[q].a, SEV[q].b, SEV[q].zone, SEV[q].dmg, SEV[q].panel, SM.bots[0].b.x, SM.bots[0].spin, SEV[q].weapon, SEV[q].speed, SEV[q].j, SEV[q].flags, SEV[q].reason, SM.bots[1].hp);
+      if (sc_hit_on(1, &t)) break;
+    }
+    if (k == 0) fb_clean = fb_clean && (v->hp > 50 ? v->panel_state[PN_FRONT] == 0 && v->panel_state[PN_BACK] == 0 : 1);
+  }
+  int right_after2 = v->panel_state[PN_RIGHT];
+  /* back to the spike for the third and fourth left hits */
+  SM.bots[0].build = sp; bot_body_from_build(&SM.bots[0].b, &sp); SM.bots[0].spin = 0;
+  int shed_left = 0; event_t third, fourth; memset(&third, 0, sizeof third); memset(&fourth, 0, sizeof fourth);
+  for (int k = 0; k < 2; k++) {
+    float x = -1.3f;
+    SM.bots[0].b.x = x; SM.bots[0].b.h = HALF_PI; SM.bots[0].cooldown = 0; SM.bots[0].active = 0; memset(SM.bots[0].hit_cd, 0, sizeof SM.bots[0].hit_cd);
+    for (int f = 0; f < 20; f++) {
+      sc_pad(0, 0, 0, f >= 2 && f < 4 ? IN_A : 0); sc_pad(1, 0, 0, 0); SM.bots[1].spin = 0.4f; sc_place(1, 0, 0, 0); SM.bots[0].b.x = x; SM.bots[0].b.z = 0; SM.bots[0].b.h = HALF_PI; SM.bots[0].b.vx = SM.bots[0].b.vz = SM.bots[0].b.w = 0;
+      sc_step();
+      for (int q = 0; q < SNEV; q++) {
+        if (SEV[q].type == EV_SHED && SEV[q].b == 1 && SEV[q].zone == PN_LEFT) shed_left++;
+        if (SEV[q].type == EV_HIT && SEV[q].b == 1) { if (k == 0) third = SEV[q]; else fourth = SEV[q]; }
+        if (g_verbose) printf("  left k %d f %d ev %d b %d zone %d dmg %.1f panel %d flags %d hp %.1f\n", k, f, SEV[q].type, SEV[q].b, SEV[q].zone, SEV[q].dmg, SEV[q].panel, SEV[q].flags, SM.bots[1].hp);
+      }
+    }
+  }
+  SC_OK(left_after2 == 3 && right_after2 == 2 && fb_clean && hp_after_left > 50 && shed_left == 1 && third.panel == PN_LEFT && (fourth.flags & EVF_STRIPPED) && fourth.dmg >= 1.25f * third.dmg - 0.01f,
+        "LEFT state %d (3) after two spikes, RIGHT state %d (2) after two discs, FRONT and BACK clean above HP 50 %d, LEFT shed by the third %d, fourth on the bare frame flags %d (STRIPPED 8) for %.1f against %.1f (>= 1.25x)",
+        left_after2, right_after2, fb_clean, shed_left, fourth.flags, fourth.dmg, third.dmg);
+}
+
 static const scenario_t SCENARIOS[] = {
   { "ghost-sim", sc_ghost_sim },
   { "mound-contact", sc_mound_contact },
@@ -1290,6 +1555,16 @@ static const scenario_t SCENARIOS[] = {
   { "flip-inverts-tall", sc_flip_inverts_tall },
   { "flip-lowboy", sc_flip_lowboy },
   { "flip-bounce", sc_flip_bounce },
+  { "spinner-wedge-glance", sc_spinner_wedge_glance },
+  { "spinner-side-full", sc_spinner_side_full },
+  { "spinner-moving-target", sc_spinner_moving_target },
+  { "spinner-wheel", sc_spinner_wheel },
+  { "hammer-arc", sc_hammer_arc },
+  { "spike-extend", sc_spike_extend },
+  { "crusher-hold", sc_crusher_hold },
+  { "saw-grind", sc_saw_grind },
+  { "flame-burn", sc_flame_burn },
+  { "panel-location", sc_panel_location },
 };
 
 static int scenarios(const char *which) {
