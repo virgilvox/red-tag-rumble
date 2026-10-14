@@ -41,8 +41,25 @@ void clock_chip(const match_t *m, int compact);
 void minimap(const rect_t *r, const match_t *m, const arena_def_t *a, int big);
 /* the off-screen enemy chevron for the seat viewport i shows (9.2); seat is that viewport's seat */
 void chevron(int viewport, const rect_t *vp, int seat);
-/* the count numeral and prompt while b->countout > 0 (F_TITLE in halves and full, F_H1 in a quadrant) */
+/* the count numeral and the self right prompt while b->countout > 0 (F_TITLE in halves and full, F_H1 in a
+ * quadrant); the prompt names the key the build rights itself with (deep-controls 4.6) */
 void countout(const rect_t *vp, const bot_t *b);
+/* -- hit feedback (deep-controls 4.4, graphics 7.2): the event drain of DEEP-plan 5.2 calls these ------ */
+/* a ring at the contact in every viewport: 16 px growing to 28 px over 8 frames, 3 px bone for tap and hit,
+ * 4 px hazard for heavy, 5 px rust for huge; rgb (the attacker's seat colour) is a thin inner ring */
+void hit_marker_all(float x, float y, float z, int band, uint32_t rgb);
+/* the victim seat's strip: the HP number pops, its viewport gets a 12 px rust frame fading over 18 frames */
+void strip_taken(int seat, int band);
+/* the attacker seat's strip: a 10 px live tick at the HP bar's end and the widget word HIT for 20 frames */
+void strip_dealt(int seat);
+/* a panel came off: that side of the strip's bot outline flashes, then stays rust */
+void strip_panel_gone(int seat, int panel);
+/* a 2 s word under the number in one viewport: HIT_WHY[reason] (sim.h), rust, EXPOSED in live; the weak
+ * side indicator shows for the same 2 s */
+void hit_mark_add(int viewport, int reason, float x, float y, float z);
+/* the closing speed of a WEDGE or NONE bot toward its nearest enemy along the nose (0 when the nose is over
+ * 30 degrees off, ram_check's rule); the sim's ram_closing once it writes one. aimed and dist may be NULL */
+float hud_ram_closing(const bot_t *b, int *aimed, float *dist);
 void hazard_tape_strip(const rect_t *vp, float phase);
 void tape_seams(int layout);
 void ko_card(float t);
@@ -90,5 +107,11 @@ int  game_match_card_rows(void);
 int  game_rematch_auto(int *to_lobby);
 /* the rules flash was offered automatically (a fresh save's first evening): any button skips it */
 int  game_rules_auto(void);
+/* the attack coach (deep-controls 4.3): three beats in the first fight of a fresh save for the first human
+ * seat. beat 1 to 3 (0 off), kind the beat 2 line by weapon, tick_t the 0.3 s done check, front_t the 2 s
+ * FRONT. TRY THE SIDE line. Returns 1 while the chip shows */
+enum { COACH_SPIN, COACH_SAW, COACH_TAP, COACH_LIFT, COACH_FLAME, COACH_RAM };
+typedef struct { int seat, beat, kind; float tick_t, front_t; } coach_t;
+int  game_coach(coach_t *out);
 
 #endif

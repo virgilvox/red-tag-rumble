@@ -31,6 +31,8 @@ STR char *ST_REDTAG[]   = { "RED TAGGED", "14 DAYS TO LIVE", "MARKED FOR THE PIL
 STR char *ST_PICKUP[]   = { "FREE PILE", "ONE PERSON'S PANEL", "STILL GOOD" };                                                      /* MENU_OK low */
 STR char *ST_VACUUM     = "NOT A VACUUM";                                                                                           /* MENU_BACK, once */
 STR char *ST_HILL[]     = { "HILL MOVED", "NEW HILL", "OVER THERE" };                                                               /* MENU_MOVE */
+STR char *ST_WEDGED[]   = { "WEDGED", "UNDER YOU", "DOORSTOPPED", "GET OFF THE PLATE" };                                            /* UNDERRIDE, the victim's view */
+STR char *ST_LIMPING[]  = { "LIMPING", "WHEEL GONE SOFT", "ONE SIDE SLOW", "DRIVE IT HOME" };                                         /* WHEEL_HIT, the victim's view */
 /* KO causes, under 16, shown under K.O. and as the placement word; indexed by KO_* in sim.h */
 STR char *KO_CAUSE[]    = { "HP ZERO", "KO BY FLIP", "PITTED", "OFF THE ROOF", "COUNTED OUT", "DECK COUNT" };
 /* results cause lines, under 48, chosen by cause (two for judges) */
@@ -43,7 +45,8 @@ STR char *OPS_LINES[]   = { "CLEAR THE AISLE", "THAT IS NOT WHERE THAT GOES", "I
 STR char *TAGLINES[]    = { "FOURTEEN DAYS. THEN IT IS FREE. OR IT IS A BOT.", "BUILT FROM OTHER PEOPLE'S UNFINISHED PROJECTS.", "A JANITORIAL CO-OP WITH AN ARENA ATTACHED.",
   "NEVER TELL SOMEONE NOT TO MAKE. A WEAPON.", "THERE IS ONLY ONE PLACE TO USE A BANDSAW. HERE.", "TWENTY TAGS. ZERO REFUNDS.", "OPS WOULD LIKE THE AISLE CLEAR.", "NO BRAKE CLEANER IN THE ARENA." };
 /* attract tips, under 48 */
-STR char *ATTRACT_TIPS[] = { "HOLD A TO SPIN UP. LET GO TO KEEP SPIN.", "B RIGHTS A FLIPPED HAMMER OR FLIPPER.", "HOVER FLOATS OVER SAWS. AND CANNOT PUSH.",
+/* tips 0 and 1 carry the weapon key (KN_A) and the brake key (KN_B) as %s, drawn as keycaps for pad 0 */
+STR char *ATTRACT_TIPS[] = { "HOLD %s TO SPIN UP. A HIT SPENDS THE SPIN.", "%s RIGHTS A FLIPPED HAMMER OR FLIPPER.", "HOVER FLOATS OVER SAWS. AND CANNOT PUSH.",
   "WALKERS GET 4 EXTRA TAGS AND STEP OVER PITS.", "RED TAG: UNDER 30 HP YOU HIT HARDER FOR 8 S.", "DROPPED PANELS ARE HP. DRIVE OVER THEM.", "OPS WAKES IF NOBODY HITS ANYONE FOR 12 S." };
 /* mode blurbs, under 32, lobby */
 STR char *MODE_BLURB[]  = { "1 TO 4. HP ZERO. LAST ONE UP.", "NO HP. FLIP OR FALL.", "LOSERS GET THE HAMMERS.", "HOLD THE SQUARE. 30 POINTS.", "2V2. FRIENDLY FIRE IS HALF.", "3 FIGHTS. NOBODY SITS OUT." };
@@ -82,15 +85,16 @@ STR char *JUDGE_TIE_COST = "TIE. CHEAPER BOT WINS. THAT IS THE RULE.";
 STR char *JUDGE_TIE_FLIP = "TIE. FEWER FLIPS WINS.";
 STR char *JUDGE_DRAW     = "DRAW. NOBODY TELL THE TREASURER.";
 /* rules flash captions, three words or fewer */
-STR char *FLASH_CAPTION[] = { "BUILD A BOT", "HOLD TO SPIN", "HIT THE SIDE", "FLIPPED? B", "HAZARDS HURT", "LAST BOT STANDING", "CONTROLS" };
+STR char *FLASH_CAPTION[] = { "BUILD A BOT", "HOLD TO SPIN", "HIT THE SIDE", "FLIPPED? %s", "HAZARDS HURT", "LAST BOT STANDING", "CONTROLS" };   /* %s: the brake key of pad 0 */
 STR char *FLASH_SMALL_6   = "LOSERS GET THE HAMMERS";
 /* names */
 STR char *WEAPON_ADJ[]  = { "HUMBLE", "POLITE", "POINTY", "HELPFUL", "GRINDY", "TOASTY", "THUMPY", "YEETING", "DRUMMY", "SPINNY", "CLINGY" };   /* WP_NONE..WP_CRUSHER */
 STR char *MELTY_ADJ     = "DIZZY";
 STR char *CHASSIS_NOUN[] = { "BOX", "DOORSTOP", "PANCAKE", "BOWL", "SKELETON", "LUNCHBOX" };
-/* control card */
-STR char *CARD_LINE      = "FLIPPED? B TO RIGHT YOURSELF.  STUCK? OPS IS COMING.";
-STR char *CARD_KEYS      = "KEYBOARD: ARROWS DRIVE, Z WEAPON, X BRAKE, A TAUNT, S CARD, Q BOOST, ENTER PAUSE";
+/* control card (deep-controls 4.8): %s is the brake key's cap */
+STR char *CARD_LINE      = "FLIPPED? %s RIGHTS YOU.  STUCK? OPS IS COMING.";
+STR char *CARD_KB_LINE   = "W TEST FIRES IN THE GARAGE. S HOLDS THIS CARD";
+STR char *S_WEAPON_LINE  = "WEAPON: ";
 /* placement words, under 10 */
 STR char *PLACE_WORD[]   = { "WINNER", "HP ZERO", "FLIPPED", "PITTED", "OFF ROOF", "COUNTED", "DECK", "TIMED OUT" };
 
@@ -122,7 +126,7 @@ STR char *MODE_CARD_2[] = { "", "", "STANDING", "THE HILL", "", "" };
 STR char *S_PRESS_A_TO_JOIN_1 = "PRESS A";
 STR char *S_PRESS_A_TO_JOIN_2 = "TO JOIN";
 STR char *S_FILL_WITH_BOT = "FILL WITH BOT";
-STR char *S_FILL_HINT = "HOLD Y, LEFT RIGHT";
+STR char *S_FILL_HINT = "HOLD %s, LEFT RIGHT";                       /* %s: the Y key of pad 0 */
 STR char *S_READY = "READY";
 STR char *S_ARCADE = "ARCADE";
 STR char *S_TANK = "TANK";
@@ -169,9 +173,9 @@ STR char *S_PRACTICE_BOT = "PRACTICE BOT (AI)";
 STR char *S_NEXT_FIGHT = "NEXT FIGHT";
 STR char *S_N_BOTS = "%d BOTS";
 STR char *S_FIGHT_LENGTH = "FIGHT LENGTH";
-STR char *S_GARAGE_HINT_1 = "HOLD Y: UP DOWN PICKS A ROW,";
+STR char *S_GARAGE_HINT_1 = "HOLD %s: UP DOWN PICKS A ROW,";
 STR char *S_GARAGE_HINT_2 = "LEFT RIGHT STEPS IT";
-STR char *S_AI_TOGGLE_HINT = "HOLD Y, LEFT RIGHT SETS IT";
+STR char *S_AI_TOGGLE_HINT = "HOLD %s, LEFT RIGHT SETS IT";
 STR char *S_PRACTICE_ROW = "PRACTICE BOT";
 STR char *S_TOAST_TIME_TRIMMED = "TIME UP. SEAT %d WAS %s, SO IT WAS TRIMMED";
 /* the PAINT row: scheme number and decal set (3.7) */
@@ -181,14 +185,16 @@ STR char *BAR_NAME[]    = { "SPEED", "HIT", "TOUGH" };
 STR char *S_SCHEME = "SCHEME %d";
 /* vote (10.12) */
 STR char *S_PICK_AN_ARENA = "PICK AN ARENA";
-STR char *S_VOTE_RULE = "STICK PICKS. A VOTES. MAJORITY WINS. TIES GO RANDOM.";
+STR char *S_VOTE_RULE_1 = "%s TO PICK.";                                 /* KN_STICK */
+STR char *S_VOTE_RULE_2 = "%s TO VOTE. MAJORITY WINS. TIES GO RANDOM.";  /* KN_A */
 STR char *ARENA_NAME[]  = { "THE BAY", "THE LASER ROOM", "THE FREE PILE", "THE DOCK", "THE SHOP", "THE ROOF" };
 /* fight (10.4, 10.5) */
-STR char *STATUS_WORD[] = { "", "SPINNING UP", "FULL SPIN", "EMPTY", "STUNNED", "INVERTED", "BURNING", "RED TAG", "LIFTED", "CLAMPED" };
-enum { SW_NONE, SW_SPINNING_UP, SW_FULL_SPIN, SW_EMPTY, SW_STUNNED, SW_INVERTED, SW_BURNING, SW_RED_TAG, SW_LIFTED, SW_CLAMPED };
+STR char *STATUS_WORD[] = { "", "SPINNING UP", "FULL SPIN", "EMPTY", "STUNNED", "INVERTED", "BURNING", "RED TAG", "LIFTED", "CLAMPED", "WEDGED", "LIMPING" };
+/* SW_WEDGED and SW_LIMPING are the strip's own (a ridden bot, a hit wheel or track); sim_status_word never returns them */
+enum { SW_NONE, SW_SPINNING_UP, SW_FULL_SPIN, SW_EMPTY, SW_STUNNED, SW_INVERTED, SW_BURNING, SW_RED_TAG, SW_LIFTED, SW_CLAMPED, SW_WEDGED, SW_LIMPING };
 STR char *S_RED_TAG = "RED TAG";
 STR char *S_BOOST = "BOOST";
-STR char *S_RIGHT_YOURSELF = "B TO RIGHT YOURSELF";
+STR char *S_RIGHT_YOURSELF = "%s TO RIGHT YOURSELF";                 /* %s: the brake key (HAMMER, FLIPPER) */
 STR char *S_GET_MOVING = "GET MOVING";
 STR char *S_NO_SELF_RIGHT = "INVERTED. NO SELF RIGHT";                 /* the truth under the count: nothing on the pad fixes this */
 STR char *S_NO_SELF_RIGHT_OPS = "INVERTED. OPS COMES AT 5";            /* a 1v1: OPS lifts a helpless bot once the count passes 5 */
@@ -206,9 +212,11 @@ STR char *S_OUT = "OUT";
 STR char *S_YOU_HAVE_HAMMERS = "YOU HAVE THE HAMMERS";
 STR char *S_YOU_HAVE_FLAME = "YOU HAVE THE FLAME";
 STR char *S_YOU_HAVE_FLIPPER = "YOU HAVE THE FLIPPER";
-STR char *S_SEAT_PICK_HAMMER = "STICK PICKS A HAMMER";
-STR char *S_SEAT_PICK_FLAME = "STICK PICKS A JET";
-STR char *S_SEAT_PICK_FLIPPER = "STICK PICKS A PANEL";
+STR char *S_SEAT_PICK_HAMMER = "%s TO PICK A HAMMER";                   /* %s: the drive name, ARROWS or STICK */
+STR char *S_SEAT_PICK_FLAME = "%s TO PICK A JET";
+STR char *S_SEAT_PICK_FLIPPER = "%s TO PICK A PANEL";
+STR char *S_OPS_DRIVER = "YOU DRIVE OPS";
+STR char *S_OPS_GUNNER = "YOU RUN THE LIFTER AND THE SAW";
 STR char *S_SEAT_SWING = "SWING";
 STR char *S_SEAT_FIRE = "FIRE";
 STR char *S_SEAT_COOLDOWN = "COOLDOWN %d.%d S";
@@ -250,7 +258,9 @@ STR char *S_HOW_IT_WORKS = "HOW IT WORKS";
 STR char *S_N_OF_M = "%d OF %d";
 /* controls card (10.24) callouts, two words each */
 STR char *CARD_CALLOUT[] = { "DRIVE", "WEAPON", "BRAKE", "BOOST", "TAUNT", "PAUSE" };
-STR char *CARD_CALLOUT_SUB[] = { "STICK OR D PAD", "A OR RT", "B", "L OR LT", "X", "START" };
+STR char *CARD_SUB_PAD[]  = { "STICK OR D PAD", "A OR RT", "B", "L OR LT", "X", "START" };
+STR char *CARD_SUB_KEYS[] = { "ARROWS", "Z", "X", "Q", "A", "ENTER" };
+STR char *CARD_SUB_BOTH[] = { "ARROWS OR STICK", "Z OR A", "X OR B", "Q OR L", "A OR X", "ENTER OR START" };
 
 /* fight HUD chips, the bracket card and the results eyebrow (draw.c, items 9, 10, 16) */
 STR char *S_HILL = "HILL";
@@ -263,8 +273,55 @@ STR char *S_FINAL = "FINAL";
 STR char *S_BYE = "BYE";
 STR char *S_CHAMPION = "CHAMPION";
 STR char *S_RESULTS_EYEBROW = "%s . %s . %s";
-STR char *S_HOLD_A_QUIT = "HOLD A";
+STR char *S_HOLD_A_QUIT = "HOLD %s";                               /* %s: the weapon key of the pauser */
 STR char *S_EVENING_LABEL = "EVENING";
 STR char *S_ROW_2ND_SHORT = "2ND";
+
+/* -- the attack lens (docs/design/deep-controls.md 4.2 to 4.9) ---- */
+/* the weapon widget's state word (4.2), indexed by WW_* */
+STR char *WIDGET_WORD[] = { "HOLD", "SPIN UP", "READY", "SPENT", "TAP", "TAP: ON", "ON", "SWING", "CLAMP", "LIFT", "CARRY", "EMPTY",
+                            "REFILL", "RAM", "DRIVE AT THEM", "HIT", "INVERTED", "NO BOOST", "BOOST", "BRAKE", "RIGHTING", "SLIPPED" };
+enum { WW_HOLD, WW_SPIN_UP, WW_READY, WW_SPENT, WW_TAP, WW_TAP_ON, WW_ON, WW_SWING, WW_CLAMP, WW_LIFT, WW_CARRY, WW_EMPTY,
+       WW_REFILL, WW_RAM, WW_DRIVE_AT, WW_HIT, WW_INVERTED, WW_NO_BOOST, WW_BOOST, WW_BRAKE, WW_RIGHTING, WW_SLIPPED, WW_COUNT };
+STR char *S_WW_SECONDS = "%d.%d S";            /* a cooldown counting down */
+STR char *S_WW_HOLD_N  = "HOLD %d S";          /* the CRUSHER's hold */
+STR char *S_WW_CARRY_N = "CARRY %d.%d S";      /* the LIFTER's carry */
+STR char *S_BOOST_PROMPT = "BOOST %s";         /* the boost key, once per 20 s on a long drive at the enemy */
+STR char *S_BRAKE_PROMPT = "%s BRAKES";        /* the brake key, once per 20 s near a drop at speed */
+/* why a landed hit was weak or strong (4.4), indexed by HIT_WHY_* in sim.h */
+STR char *HIT_WHY[] = { "", "FRONT ARMOUR", "WEDGE", "SPINNING DOWN", "SHELL", "ARMOUR", "WALL", "EXPOSED", "STRIPPED", "WHEEL" };
+/* the attack coach (4.3): a line with the key as %s, then a plain second line */
+STR char *COACH_1[2]        = { "DRIVE WITH %s", "TURN TOWARD THE ARROW" };
+STR char *COACH_2_SPIN[2]   = { "HOLD %s TO SPIN UP.", "KEEP OFF THE WALL" };
+STR char *COACH_2_SAW[2]    = { "TAP %s: SAW ON", "IT GRINDS WHAT IT TOUCHES" };
+STR char *COACH_2_TAP[2]    = { "TAP %s WHEN THEY ARE CLOSE", "" };
+STR char *COACH_2_LIFT[2]   = { "HOLD %s UNDER THEIR SIDE", "" };
+STR char *COACH_2_FLAME[2]  = { "HOLD %s. IT IS SHORT", "GET CLOSE FIRST" };
+STR char *COACH_2_RAM[2]    = { "DRIVE INTO THEIR SIDE.", "SPEED IS THE WEAPON" };
+STR char *COACH_3[2]        = { "HIT THEIR SIDE, NOT THE FRONT", "THE ARROW MARKS THE WEAK SIDE" };
+STR char *COACH_3_FRONT     = "FRONT. TRY THE SIDE";
+/* the self right prompt under the count (4.6) */
+STR char *S_SR_DRUM_SPIN  = "HOLD %s TO SPIN, THEN TAP IT";
+STR char *S_SR_DRUM_LET   = "LET GO, TAP %s";
+STR char *S_SR_DRUM_TAP   = "TAP %s";
+STR char *S_SR_DRIVES     = "DRIVES UPSIDE DOWN. KEEP MOVING";
+STR char *S_SR_HORIZ      = "UPSIDE DOWN. SPINS, CANNOT STEER";
+STR char *S_SR_HORIZ_OPS  = "SPINS, CANNOT STEER. OPS COMES AT 5";
+STR char *S_TEST_FIRE     = "TEST FIRE";
+/* one line per weapon for the garage and the controls card (4.9): input kind, what it does, reach; under 44 */
+STR char *WEAPON_HOWTO[] = {
+  "NO WEAPON. RAM THEIR SIDE AT SPEED",            /* NONE */
+  "PASSIVE. RAM AT SPEED. SLIDES UNDER THEM",      /* WEDGE: the lip at 0.6 */
+  "TAP. A JAB STRAIGHT AHEAD. REACH 1.0",          /* SPIKE: hb_z1 1.05 */
+  "HOLD. GETS UNDER A TURNED BOT. REACH 0.8",      /* LIFTER: hb_z1 0.8 */
+  "TAP TO TOGGLE. GRINDS ON CONTACT. REACH 0.7",   /* SAW: the circle at 0.7 */
+  "HOLD. SHORT CONE, FUEL RUNS OUT. REACH 1.5",    /* FLAME: the 1.5 cone */
+  "TAP. A SHORT WIND UP, THEN DENTS. REACH 1.0",   /* HAMMER: 15 frames of wind up, hb_z1 1.0 */
+  "TAP. THROWS THEM. 1.8 S RELOAD. REACH 0.9",     /* FLIPPER: cooldown 108 */
+  "HOLD TO SPIN. POPS THEM UP. REACH 0.6",         /* DRUM: 0.55 + 0.3 */
+  "HOLD TO SPIN 2 S. HITS SIDEWAYS. REACH 0.7",    /* HORIZONTAL: 0.15 + 0.55 */
+  "TAP. CLAMPS 2 S. 3 OR 4 PLAYERS. REACH 0.9",    /* CRUSHER: hb_z1 0.9, not in a 1v1 */
+};
+STR char *MELTY_HOWTO = "HOLD TO SPIN. THE WHOLE BOT HITS. REACH 0.5";
 
 #endif

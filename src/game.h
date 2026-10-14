@@ -43,12 +43,13 @@ enum { SEAT_EMPTY, SEAT_HUMAN, SEAT_AI };
 
 /* -- save (14.4) ------------------------------------------------- */
 #define SAVE_MAGIC   0x31525452u   /* 'RTR1' */
-#define SAVE_VERSION 1
+#define SAVE_VERSION 2       /* 2: coach_done (deep-controls 6.5); a version 1 save is upgraded by game.c with it zeroed */
 typedef struct {
   uint32_t magic;            /* 0x31525452 'RTR1' */
-  uint32_t version;          /* 1 */
+  uint32_t version;          /* SAVE_VERSION */
   uint32_t crc;              /* crc32 of everything after this field */
   uint8_t  split, one_camera, fight_len, comeback, shake, hitstop, stinger_big, sfx, music, colourblind, rumble, ai_level, rules_seen;
+  uint8_t  coach_done;                                  /* the first fight's attack coach has run (deep-controls 4.3) */
   uint8_t  scheme[4];                                   /* 0 arcade, 1 tank per seat */
   build_t  fav_build[4];                                /* the last locked build per seat */
   uint16_t best_evening_wins; uint8_t best_seat;
