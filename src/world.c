@@ -75,6 +75,8 @@ static t3_material *glass(uint32_t c, float opacity) {
   m->transparent = true; m->opacity = opacity; m->depth_write = false;
   return m;
 }
+/* a mesh that takes over the creation reference of its own material */
+static t3_mesh *mesh_take(t3_geometry *g, t3_material *m) { t3_mesh *me = t3_mesh_new(g, m); t3_release(m); return me; }
 static t3_material *lexan_mat(void) {
   static t3_material *m;
   if (!m) { m = t3_mesh_standard_material_new(0x9fe0c8); m->transparent = true; m->opacity = 0.35f; m->roughness = 0.15f; m->metalness = 0.1f; m->depth_write = false; }
@@ -221,8 +223,9 @@ static t3_geometry *wedge_geometry(float w, float d, float h) {
 /* a box with every edge cut at 45 degrees by c (44 triangles; c 0 gives the plain 12) */
 static void sp_cbox(soup_t *s, float w, float h, float d, float c) {
   float X = w / 2, Y = h / 2, Z = d / 2, ctr[3] = { 0, 0, 0 };
-  float m = w < h ? w : h; if (d < m) m = d;
+  float m = w < h ? w : h, big = w > h ? w : h; if (d < m) m = d; if (d > big) big = d;
   if (c > m * 0.45f) c = m * 0.45f;
+  if (big < 0.15f || m < 0.025f) c = 0;          /* a bevel on a small part is under a pixel: 12 triangles, not 44 */
   if (c <= 0.0005f) {
     float v[8][3];
     for (int k = 0; k < 8; k++) { v[k][0] = k & 1 ? X : -X; v[k][1] = k & 2 ? Y : -Y; v[k][2] = k & 4 ? Z : -Z; }
@@ -274,11 +277,12 @@ static void sp_cyl2(soup_t *s, float r, float r2, float h, int seg, int axis) {
 static void sp_cyl(soup_t *s, float r, float h, int seg, int axis) { sp_cyl2(s, r, r, h, seg, axis); }
 static void sp_cyl_at(soup_t *s, float r, float h, int seg, int axis, float x, float y, float z) { soup_push_at(s, x, y, z, 0, 0, 0); sp_cyl(s, r, h, seg, axis); soup_pop(s); }
 
-/* a hexagonal bolt head on a face that looks along +z: a low pyramid, base radius r, height t (6 triangles) */
+/* a bolt head on a face that looks along +z: a low four sided pyramid, base radius r, height t (4 triangles;
+ * a hex head is the same few pixels in a quadrant at half again the cost) */
 static void sp_bolt(soup_t *s, float r, float t) {
   float apex[3] = { 0, 0, t }, ctr[3] = { 0, 0, -t };
-  for (int i = 0; i < 6; i++) {
-    float a0 = i * PI / 3 + PI / 6, a1 = (i + 1) * PI / 3 + PI / 6;
+  for (int i = 0; i < 4; i++) {
+    float a0 = i * PI / 2 + PI / 4, a1 = (i + 1) * PI / 2 + PI / 4;
     float p0[3] = { cosf(a0) * r, sinf(a0) * r, 0 }, p1[3] = { cosf(a1) * r, sinf(a1) * r, 0 };
     soup_tri_out(s, p0, p1, apex, ctr);
   }
@@ -356,6 +360,45 @@ static t3_geometry *geo_keep(int kind, const float *k, t3_geometry *g) {
   geos[ngeos].kind = kind; memcpy(geos[ngeos].k, k, sizeof geos[ngeos].k); geos[ngeos].g = g; ngeos++;
   return g;
 }
+
+/* a soup's geometry as a mesh under parent; nothing when the soup is empty */
+static t3_mesh *soup_mesh(void *parent, soup_t *s, t3_material *m) {
+  if (s->n_ == 0) { if (s->owned) { free(s->p); free(s->n); free(s->uv); free(s->c); } return 0; }
+  t3_geometry *g = soup_finish(s);
+  t3_mesh *me = t3_mesh_new(g, m);
+  t3_object_add(parent, me); t3_release(me); t3_release(g);
+  return me;
+}
+/* a soup that ended up unused */
+static void soup_free_empty(soup_t *s) { if (s->owned) { free(s->p); free(s->n); free(s->uv); free(s->c); } s->p = s->n = s->uv = s->c = 0; s->n_ = 0; }
+/* a cached geometry as a mesh under parent at a place */
+static t3_mesh *geo_mesh(void *parent, t3_geometry *g, t3_material *m, float x, float y, float z) {
+  t3_mesh *me = t3_mesh_new(g, m);
+  t3_object_set_position(me, x, y, z);
+  t3_object_add(parent, me); t3_release(me);
+  return me;
+}
+/* a textured transparent quad material of its own (its opacity animates) */
+static t3_material *glass_map(t3_texture *t, float opacity) {
+  t3_material *m = t3_mesh_basic_material_new(0xffffff);
+  t3_material_set_map(m, t); m->transparent = true; m->opacity = opacity; m->depth_write = false;
+  return m;
+}
+
+/* a quad geometry with its uv window into an atlas (u0, v0, u1, v1) */
+static t3_geometry *quad_geo(float u0, float v0, float u1, float v1) {
+  float key[8] = { u0, v0, u1, v1 };
+  t3_geometry *g = geo_find(GK_QUAD, key);
+  if (g) return g;
+  soup_t s; soup_init(&s, 2);
+  float a[3] = { -0.5f, -0.5f, 0 }, b[3] = { 0.5f, -0.5f, 0 }, c[3] = { 0.5f, 0.5f, 0 }, d[3] = { -0.5f, 0.5f, 0 };
+  float ua[2] = { u0, v0 }, ub[2] = { u1, v0 }, uc[2] = { u1, v1 }, ud[2] = { u0, v1 };
+  soup_emit(&s, a, b, c, 0, 0, 0, ua, ub, uc); soup_emit(&s, a, c, d, 0, 0, 0, ua, uc, ud);
+  return geo_keep(GK_QUAD, key, soup_finish(&s));
+}
+
+/* the textures every bot shares (make_bot_textures) */
+static t3_texture *tex_blob, *tex_ring, *tex_blur, *tex_glint, *tex_decal;
 
 /* a crowd figure as a flat silhouette facing +z (the arena): a torso trapezoid (2 triangles), a head
  * hexagon (4) and two arm quads (4), 10 triangles in all (graphics 5.4; four boxes cost 48, and 240
@@ -598,6 +641,47 @@ void paint_floor(const arena_def_t *a, int w, int h, uint8_t *rgba) {
       fp_rect(&f, x - 1, z - 1, x + 1, z + 1, SEAT_RGB[s], 100);
     }
   }
+  /* the arena has history: tyre marks along the long axis (not on the roof's membrane) */
+  if (a->floor_style != FL_ROOF && a->floor_style != FL_GARAGE) {
+    uint32_t tr = 0x7e3a11u ^ (uint32_t)(a->w * 13 + a->d * 7);
+    int along_x = a->w >= a->d;
+    for (int k = 0; k < 24; k++) {
+      float cx = (rtr_rand_f(&tr) - 0.5f) * a->w * 0.8f, cz = (rtr_rand_f(&tr) - 0.5f) * a->d * 0.8f, len = 1.0f + rtr_rand_f(&tr) * 1.0f, bend = (rtr_rand_f(&tr) - 0.5f) * 0.4f;
+      for (int t = 0; t < 24; t++) {
+        float u = (t / 23.0f - 0.5f) * len, x = along_x ? cx + u : cx + bend * u * u, z = along_x ? cz + bend * u * u : cz + u;
+        for (int sd = -1; sd <= 1; sd += 2) {
+          float ox = along_x ? 0 : sd * 0.18f, oz = along_x ? sd * 0.18f : 0;
+          cv_rect(&f.c, fpx(&f, x + ox) - 1, fpz(&f, z + oz) - 1, 3, 3, 0x1d1915, 40);
+        }
+      }
+    }
+  }
+  /* soft shadow pools under the benches, shelves, HVAC units and servers */
+  for (int i = 0; i < a->nprops; i++) {
+    const prop_def_t *pr = &a->props[i];
+    if (pr->kind != PR_BENCH && pr->kind != PR_SHELF && pr->kind != PR_HVAC && pr->kind != PR_SERVER) continue;
+    float hw2 = pr->w / 2 + 0.4f, hd2 = pr->d / 2 + 0.4f, ca = cosf(pr->ang), sa = sinf(pr->ang), ext = fabsf(ca) * hw2 + fabsf(sa) * hd2, extz = fabsf(sa) * hw2 + fabsf(ca) * hd2;
+    for (int y = fpz(&f, pr->z - extz); y < fpz(&f, pr->z + extz); y++) for (int x = fpx(&f, pr->x - ext); x < fpx(&f, pr->x + ext); x++) {
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      float wx = x / f.ppx - hw - pr->x, wz = y / f.ppz - hd - pr->z, lx = wx * ca - wz * sa, lz = wx * sa + wz * ca;
+      float dx = fabsf(lx) - pr->w / 2, dz = fabsf(lz) - pr->d / 2, d = sqrtf((dx > 0 ? dx * dx : 0) + (dz > 0 ? dz * dz : 0));
+      if (d > 0.4f) continue;
+      uint8_t *pp = f.c.px + ((size_t)y * w + x) * 4; int k = (int)((1 - d / 0.4f) * 70); for (int c = 0; c < 3; c++) pp[c] = (uint8_t)(pp[c] * (255 - k) / 255);
+    }
+  }
+  /* THE DOCK's wet floor catches the strip lights: bone streaks along the closed walls */
+  if (a->floor_style == FL_WET) {
+    for (int sd = 0; sd < 4; sd++) {
+      int open = sd == 0 ? a->open_mask & OPEN_PX : sd == 1 ? a->open_mask & OPEN_NX : sd == 2 ? a->open_mask & OPEN_PZ : a->open_mask & OPEN_NZ;
+      if (open) continue;
+      float len = sd < 2 ? a->d : a->w;
+      for (float p = -len / 2 + 3; p < len / 2 - 1; p += 6) {
+        float x = sd == 0 ? hw - 1.2f : sd == 1 ? -hw + 1.2f : p, z = sd == 2 ? hd - 1.2f : sd == 3 ? -hd + 1.2f : p;
+        float ex = sd < 2 ? 0.06f : 1.0f, ez = sd < 2 ? 1.0f : 0.06f;
+        fp_rect(&f, x - ex, z - ez, x + ex, z + ez, 0xd8d2c6, 70);
+      }
+    }
+  }
   /* shadows pooling against the closed walls */
   for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
     float wx = x / f.ppx - hw, wz = y / f.ppz - hd, dmin = 9;
@@ -620,6 +704,8 @@ typedef struct {
   float lamp;                   /* bumper lamp flash timer */
   float swing;                  /* pulverizer and flipper animation state */
   float spin;                   /* killsaw and screw rotation */
+  t3_mesh *floor_tell;          /* the tell's floor component the chase camera can see (graphics 5.3), shown in the tell only */
+  t3_material *tell2_m;         /* a second emissive tell: the laser beacons */
 } whaz_t;
 
 typedef struct {
@@ -678,8 +764,12 @@ static void tape_rail(void *parent, t3_material *rail, float len, float x, float
   t3_object_add(parent, t); t3_release(t);
 }
 
+static t3_texture *tex_refl;
 static void arena_walls(warena_t *w, const arena_def_t *a) {
   float hw = a->w / 2, hd = a->d / 2, H = 1.1f;
+  /* the walls in as few draws as they can be: every lexan sheet one soup, every frame part (posts, skirting,
+   * the lit top edges, the parapets, the shop walls and the skyline) one vertex coloured soup */
+  soup_t refl, trim, lex; soup_init(&refl, 8); soup_init_vcol(&trim, 900); soup_init(&lex, 8);
   int roof = a->floor_style == FL_ROOF;
   struct { int open; float x, z, len; int along_z; float nx, nz; } side[4] = {
     { a->open_mask & OPEN_PX, hw, 0, a->d, 1, -1, 0 }, { a->open_mask & OPEN_NX, -hw, 0, a->d, 1, 1, 0 },
@@ -690,33 +780,49 @@ static void arena_walls(warena_t *w, const arena_def_t *a) {
     float x = side[s].x, z = side[s].z, len = side[s].len; int az = side[s].along_z;
     if (roof) {
       /* a brick parapet instead of lexan */
-      BOX(w->root, M_PLY(0x5a4a40), az ? 0.5f : len + 0.5f, 0.9f, az ? len + 0.5f : 0.5f, x, 0.45f, z);
-      BOX(w->root, M_PLY(0x8a857c), az ? 0.6f : len + 0.6f, 0.08f, az ? len + 0.6f : 0.6f, x, 0.94f, z);
+      soup_rgb(&trim, 0x5a4a40u); sp_box_at(&trim, az ? 0.5f : len + 0.5f, 0.9f, az ? len + 0.5f : 0.5f, x, 0.45f, z);
+      soup_rgb(&trim, 0x8a857cu); sp_box_at(&trim, az ? 0.6f : len + 0.6f, 0.08f, az ? len + 0.6f : 0.6f, x, 0.94f, z);
       continue;
     }
     /* lexan panel */
-    t3_mesh *lx = t3_mesh_new(g_plane, lexan_mat());
-    t3_object_set_scale(lx, len, H, 1);
-    t3_object_set_rotation(lx, 0, az ? (side[s].nx > 0 ? PI / 2 : -PI / 2) : (side[s].nz > 0 ? 0 : PI), 0);
-    t3_object_set_position(lx, x, H / 2, z);
-    lx->materials[0]->side = T3_DOUBLE_SIDE;
-    t3_object_add(w->root, lx); t3_release(lx);
-    /* base rail and posts */
-    BOX(w->root, M_PAINT(C_TAPE), az ? 0.16f : len + 0.16f, 0.1f, az ? len + 0.16f : 0.16f, x, 0.05f, z);
+    float yaw = az ? (side[s].nx > 0 ? PI / 2 : -PI / 2) : (side[s].nz > 0 ? 0 : PI);
+    soup_push_at(&lex, x, H / 2, z, 0, yaw, 0); sp_quad(&lex, len, H); soup_pop(&lex);
+    /* the reflection: a plane 0.02 inside the sheet with the strip lights and the crowd smeared in it, and
+     * the sheet's lit top edge (graphics 5.2); one soup each for the whole arena */
+    { float ix = x + side[s].nx * 0.02f, iz = z + side[s].nz * 0.02f;
+      soup_push_at(&refl, ix, H / 2 + 0.02f, iz, 0, yaw, 0);
+      float a0[3] = { -len / 2, -H / 2, 0 }, a1[3] = { len / 2, -H / 2, 0 }, a2[3] = { len / 2, H / 2, 0 }, a3[3] = { -len / 2, H / 2, 0 };
+      float u0[2] = { 0, 0 }, u1[2] = { len / 4, 0 }, u2[2] = { len / 4, 1 }, u3[2] = { 0, 1 };
+      soup_emit(&refl, a0, a1, a2, 0, 0, 0, u0, u1, u2); soup_emit(&refl, a0, a2, a3, 0, 0, 0, u0, u2, u3);
+      soup_pop(&refl);
+      soup_rgb(&trim, 0xd8d2c6u); sp_box_at(&trim, az ? 0.02f : len, 0.02f, az ? len : 0.02f, x, H - 0.01f, z);
+      soup_rgb(&trim, 0x1d1915u); sp_cbox_at(&trim, az ? 0.2f : len + 0.2f, 0.14f, az ? len + 0.2f : 0.2f, 0.03f, x, 0.07f, z); }
     tape_rail(w->root, w->rail_m, len + 0.16f, x, H + 0.06f, z, az);
+    soup_rgb(&trim, 0x5a5246u);
     for (float p = -len / 2; p <= len / 2 + 0.01f; p += 4) {
       float px = az ? x : p, pz = az ? p : z;
-      BOX(w->root, M_STEEL(C_STEEL_HI), 0.12f, H + 0.12f, 0.12f, px, (H + 0.12f) / 2, pz);
+      sp_box_at(&trim, 0.12f, H + 0.12f, 0.12f, px, (H + 0.12f) / 2, pz);
     }
   }
+  if (lex.n_) { t3_material *lm = lexan_mat(); lm->side = T3_DOUBLE_SIDE; soup_mesh(w->root, &lex, lm); } else soup_free_empty(&lex);
+  if (!tex_refl) {
+    /* four soft bone streaks (the strip lights), a faint row of char blocks (the crowd), two smudges */
+    canvas_t c = cv_new(256, 32);
+    for (int y = 0; y < 32; y++) for (int x = 0; x < 256; x++) { uint8_t *pp = c.px + ((size_t)y * 256 + x) * 4; pp[0] = 0xec; pp[1] = 0xe3; pp[2] = 0xd3; pp[3] = 0; }
+    for (int k = 0; k < 4; k++) for (int y = 2; y < 9; y++) for (int x = k * 64 + 6; x < k * 64 + 50; x++) { uint8_t *pp = c.px + ((size_t)y * 256 + x) * 4; int e = (x - k * 64 - 6) < 4 || (k * 64 + 50 - x) < 4 || y < 3 || y > 7 ? 90 : 200; pp[3] = (uint8_t)e; }
+    for (int k = 0; k < 32; k++) { int x = k * 8 + (k * 5) % 3, hh = 6 + (k * 7) % 5; for (int y = 32 - hh; y < 32; y++) for (int i = 0; i < 6; i++) { uint8_t *pp = c.px + ((size_t)y * 256 + x + i) * 4; pp[0] = 0x1d; pp[1] = 0x19; pp[2] = 0x15; pp[3] = 120; } }
+    for (int k = 0; k < 2; k++) { int cx = 70 + k * 110, cy = 18; for (int y = -6; y <= 6; y++) for (int x = -14; x <= 14; x++) { float d = sqrtf(x * x / 196.0f + y * y / 36.0f); if (d < 1) { uint8_t *pp = c.px + ((size_t)(cy + y) * 256 + cx + x) * 4; int al = (int)(60 * (1 - d)); if (al > pp[3]) { pp[0] = 0xec; pp[1] = 0xe3; pp[2] = 0xd3; pp[3] = (uint8_t)al; } } } }
+    tex_refl = cv_texture(&c, 1, 1);
+  }
+  if (refl.n_) { t3_material *rm = glass_map(tex_refl, 0.14f); rm->side = T3_DOUBLE_SIDE; soup_mesh(w->root, &refl, rm); t3_release(rm); } else soup_free_empty(&refl);
   /* the surround: an outer concrete floor and dark shop walls with strip lights, or a skyline on the roof */
   t3_mesh *outer = part(w->root, g_plane, M_RUBBER(0x24201b), a->w * 3, a->d * 3, 1, 0, -0.02f, 0);
   rot(outer, -PI / 2, 0, 0);
   if (roof) {
     for (int k = 0; k < 14; k++) {
       float ang = k * 0.45f, r = 22 + (k % 3) * 6, h = 4 + (k * 7) % 9;
-      t3_mesh *b = BOX(w->root, M_PAINT(0x1d1915), 4 + (k % 4), h, 4 + (k % 3), cosf(ang) * r, h / 2 - 1.5f, sinf(ang) * r);
-      (void)b;
+      soup_rgb(&trim, 0x1d1915u); sp_box_at(&trim, 4 + (k % 4), h, 4 + (k % 3), cosf(ang) * r, h / 2 - 1.5f, sinf(ang) * r);
+      part(w->root, g_box, emis(C_HAZARD, 1.2f), 4 + (k % 4) + 0.04f, 0.06f, 4 + (k % 3) + 0.04f, cosf(ang) * r, h - 1.5f + 0.03f, sinf(ang) * r);   /* the amber rim light */
       for (int wy = 0; wy < 3; wy++) part(w->root, g_box, emis(C_HAZARD, 1.5f), 0.3f, 0.3f, 0.3f, cosf(ang) * r + (k % 3) - 1, wy * 1.6f + 0.5f, sinf(ang) * r - 2 - (k % 3) * 0.5f);
     }
   } else {
@@ -724,73 +830,93 @@ static void arena_walls(warena_t *w, const arena_def_t *a) {
       if (side[s].open) continue;
       float dist = 4.2f;
       float x = side[s].x + side[s].nx * -dist, z = side[s].z + side[s].nz * -dist, len = side[s].len + 2 * dist; int az = side[s].along_z;
-      BOX(w->root, M_PLY(0x1d1915), az ? 0.4f : len, 5, az ? len : 0.4f, x, 2.5f, z);
+      soup_rgb(&trim, 0x1d1915u); sp_box_at(&trim, az ? 0.4f : len, 5, az ? len : 0.4f, x, 2.5f, z);
       for (float p = -len / 2 + 3; p < len / 2 - 1; p += 6)
         part(w->root, g_box, emis(a->floor_style == FL_DARK ? C_LIVE : 0xfff1d6, 1.8f), az ? 0.1f : 2.4f, 0.08f, az ? 2.4f : 0.1f, az ? x + side[s].nx * 0.25f : p, 3.6f, az ? p : z + side[s].nz * 0.25f);
     }
   }
+  if (trim.n_) soup_mesh(w->root, &trim, VM_BODY); else soup_free_empty(&trim);
 }
 
-static void prop_box_group(t3_object *parent, const prop_def_t *p, t3_material *m) { BOX(parent, m, p->w, p->h, p->d, 0, p->h / 2, 0); }
+
+/* a prop's static body as one vertex coloured soup, cached by its shape: every bench of a size is one
+ * geometry, so a room of benches is one draw; what moves or glows (the HVAC flag, the server LEDs) and the
+ * sign's printed board stay their own meshes */
+enum { GK_PROP = 40 };
+static t3_geometry *prop_geo(const prop_def_t *p, int idx) {
+  float h = p->h > 0 ? p->h : 0.4f;
+  int variant = p->kind == PR_SHELF ? idx % 5 : 0;
+  float key[8] = { (float)p->kind, p->w, p->d, h, (float)(p->colour & 0xffff), (float)(p->colour >> 16), (float)variant };
+  t3_geometry *g = geo_find(GK_PROP, key);
+  if (g) return g;
+  soup_t s; soup_init_vcol(&s, 400);
+  switch (p->kind) {
+    case PR_BENCH:
+      soup_rgb(&s, 0xa57c4fu); sp_box_at(&s, p->w, 0.08f, p->d, 0, h - 0.04f, 0);
+      soup_rgb(&s, C_STEEL); for (int k = -1; k <= 1; k += 2) sp_box_at(&s, 0.08f, h - 0.08f, p->d * 0.8f, k * (p->w / 2 - 0.1f), (h - 0.08f) / 2, 0);
+      soup_rgb(&s, C_STEEL_HI); sp_box_at(&s, 0.22f, 0.16f, 0.14f, p->w * 0.25f, h + 0.08f, 0);   /* a vice */
+      soup_rgb(&s, C_BONE); sp_cyl_at(&s, 0.06f, 0.1f, 8, 1, -p->w * 0.3f, h + 0.05f, 0.1f);       /* and a mug */
+      break;
+    case PR_HVAC:
+      soup_rgb(&s, 0x8a857cu); sp_box_at(&s, p->w, h, p->d, 0, h / 2, 0);
+      soup_rgb(&s, C_TAPE); sp_cyl_at(&s, p->w * 0.35f, 0.04f, 12, 1, 0, h + 0.02f, 0);
+      soup_rgb(&s, C_STEEL); for (int k = 0; k < 4; k++) sp_box_at(&s, p->w * 0.6f, 0.03f, 0.03f, 0, h * 0.3f + k * 0.12f, p->d / 2 + 0.01f);
+      soup_rgb(&s, C_STEEL_HI); sp_box_at(&s, 0.05f, 1.6f, 0.05f, p->w / 2 - 0.2f, h + 0.8f, p->d / 2 - 0.2f);
+      break;
+    case PR_BOX: {
+      uint32_t c = p->colour ? p->colour : 0xa0773f;
+      soup_rgb(&s, c); sp_box_at(&s, p->w, h, p->d, 0, h / 2, 0);
+      soup_rgb(&s, 0xc9a271u); sp_box_at(&s, p->w * 0.3f, h + 0.01f, p->d + 0.01f, 0, h / 2, 0);
+      break; }
+    case PR_SHELF:
+      soup_rgb(&s, C_STEEL); for (int k = 0; k < 4; k++) sp_box_at(&s, 0.06f, h, 0.06f, (k & 1 ? 1 : -1) * (p->w / 2 - 0.03f), h / 2, (k & 2 ? 1 : -1) * (p->d / 2 - 0.03f));
+      for (int sh = 0; sh < 3; sh++) {
+        float y = 0.3f + sh * (h - 0.4f) / 2;
+        soup_rgb(&s, 0xc8a165u); sp_box_at(&s, p->w, 0.04f, p->d, 0, y, 0);
+        for (int k = 0; k < 3; k++) {
+          static const uint32_t cs[5] = { 0xa0773f, C_RUST, C_INFO, 0x2f8562, C_BONE };
+          float bw = p->w / 3 - 0.1f, bh = 0.25f + 0.1f * ((sh + k) % 2);
+          soup_rgb(&s, cs[(sh + k + variant) % 5]); sp_box_at(&s, bw, bh, p->d * 0.7f, -p->w / 2 + 0.05f + bw / 2 + k * p->w / 3, y + 0.02f + bh / 2, 0);
+        }
+      }
+      break;
+    case PR_SIGN:
+      soup_rgb(&s, C_STEEL); for (int k = -1; k <= 1; k += 2) sp_box_at(&s, 0.08f, h, 0.08f, k * (p->w / 2 - 0.1f), h / 2, 0);
+      break;
+    case PR_SERVER:
+      soup_rgb(&s, 0x1d1915u); sp_box_at(&s, p->w, h, p->d, 0, h / 2, 0);
+      soup_rgb(&s, C_STEEL); for (int k = 0; k < 6; k++) sp_box_at(&s, p->w * 0.8f, 0.06f, 0.02f, 0, 0.2f + k * (h - 0.4f) / 5, p->d / 2 + 0.01f);
+      break;
+    default:
+      soup_rgb(&s, p->colour ? p->colour : C_STEEL); sp_box_at(&s, p->w, h, p->d, 0, h / 2, 0);
+      break;
+  }
+  return geo_keep(GK_PROP, key, soup_finish(&s));
+}
 
 static t3_object *build_prop(warena_t *w, const prop_def_t *p, int idx) {
   t3_object *g = t3_group_new();
   t3_object_set_position(g, p->x, 0, p->z);
   t3_object_set_rotation(g, 0, p->ang, 0);
   float h = p->h > 0 ? p->h : 0.4f;
+  if (p->kind == PR_GATE) return g;
+  geo_mesh(g, prop_geo(p, idx), VM_BODY, 0, 0, 0);
   switch (p->kind) {
-    case PR_BENCH: {
-      BOX(g, M_PLY(0xa57c4f), p->w, 0.08f, p->d, 0, h - 0.04f, 0);
-      BOX(g, M_STEEL(C_STEEL), 0.08f, h - 0.08f, p->d * 0.8f, -p->w / 2 + 0.1f, (h - 0.08f) / 2, 0);
-      BOX(g, M_STEEL(C_STEEL), 0.08f, h - 0.08f, p->d * 0.8f, p->w / 2 - 0.1f, (h - 0.08f) / 2, 0);
-      /* a vice and a mug */
-      BOX(g, M_STEEL(C_STEEL_HI), 0.22f, 0.16f, 0.14f, p->w * 0.25f, h + 0.08f, 0);
-      CYL(g, M_PAINT(C_BONE), 0.06f, 0.1f, -p->w * 0.3f, h + 0.05f, 0.1f);
-      break; }
     case PR_HVAC: {
-      BOX(g, M_STEEL(0x8a857c), p->w, h, p->d, 0, h / 2, 0);
-      part(g, g_disc, M_PAINT(C_TAPE), p->w * 0.35f, 0.04f, p->w * 0.35f, 0, h + 0.02f, 0);
-      for (int k = 0; k < 4; k++) BOX(g, M_PAINT(C_STEEL), p->w * 0.6f, 0.03f, 0.03f, 0, h * 0.3f + k * 0.12f, p->d / 2 + 0.01f);
-      BOX(g, M_STEEL(C_STEEL_HI), 0.05f, 1.6f, 0.05f, p->w / 2 - 0.2f, h + 0.8f, p->d / 2 - 0.2f);
       t3_mesh *flag = part(g, g_plane, M_PAINT(0xd9672b), 0.7f, 0.35f, 1, p->w / 2 - 0.2f + 0.35f, h + 1.4f, p->d / 2 - 0.2f);
       flag->materials[0]->side = T3_DOUBLE_SIDE;
       w->flags[idx] = flag;
       break; }
-    case PR_BOX: {
-      uint32_t c = p->colour ? p->colour : 0xa0773f;
-      BOX(g, M_PLY(c), p->w, h, p->d, 0, h / 2, 0);
-      BOX(g, M_PLY(0xc9a271), p->w * 0.3f, h + 0.01f, p->d + 0.01f, 0, h / 2, 0);
-      break; }
-    case PR_SHELF: {
-      for (int k = 0; k < 4; k++) BOX(g, M_STEEL(C_STEEL), 0.06f, h, 0.06f, (k & 1 ? 1 : -1) * (p->w / 2 - 0.03f), h / 2, (k & 2 ? 1 : -1) * (p->d / 2 - 0.03f));
-      for (int s = 0; s < 3; s++) {
-        float y = 0.3f + s * (h - 0.4f) / 2;
-        BOX(g, M_PLY(0xc8a165), p->w, 0.04f, p->d, 0, y, 0);
-        for (int k = 0; k < 3; k++) {
-          uint32_t cs[5] = { 0xa0773f, C_RUST, C_INFO, 0x2f8562, C_BONE };
-          float bw = p->w / 3 - 0.1f;
-          BOX(g, M_PLY(cs[(s + k + idx) % 5]), bw, 0.25f + 0.1f * ((s + k) % 2), p->d * 0.7f, -p->w / 2 + 0.05f + bw / 2 + k * p->w / 3, y + 0.02f + (0.25f + 0.1f * ((s + k) % 2)) / 2, 0);
-        }
-      }
-      break; }
     case PR_SIGN: {
-      BOX(g, M_STEEL(C_STEEL), 0.08f, h, 0.08f, -p->w / 2 + 0.1f, h / 2, 0);
-      BOX(g, M_STEEL(C_STEEL), 0.08f, h, 0.08f, p->w / 2 - 0.1f, h / 2, 0);
-      t3_material *sm = t3_mesh_basic_material_new(0xffffff); t3_material_set_map(sm, tex_sign); sm->side = T3_DOUBLE_SIDE;
+      static t3_material *sm;
+      if (!sm) { sm = t3_mesh_basic_material_new(0xffffff); t3_material_set_map(sm, tex_sign); sm->side = T3_DOUBLE_SIDE; }
       t3_mesh *b = t3_mesh_new(g_plane, sm); t3_object_set_scale(b, p->w, p->w * 0.5f, 1); t3_object_set_position(b, 0, h - p->w * 0.25f, 0);
-      t3_object_add(g, b); t3_release(b); t3_release(sm);
+      t3_object_add(g, b); t3_release(b);
       break; }
-    case PR_SERVER: {
-      BOX(g, M_PAINT(0x1d1915), p->w, h, p->d, 0, h / 2, 0);
-      for (int k = 0; k < 6; k++) {
-        BOX(g, M_PAINT(C_STEEL), p->w * 0.8f, 0.06f, 0.02f, 0, 0.2f + k * (h - 0.4f) / 5, p->d / 2 + 0.01f);
-        part(g, g_box, emis(k % 2 ? C_LIVE : C_HAZARD, 2.0f), 0.04f, 0.04f, 0.02f, p->w * 0.3f, 0.2f + k * (h - 0.4f) / 5 + 0.08f, p->d / 2 + 0.02f);
-      }
-      break; }
-    case PR_GATE: break;
-    case PR_WALL: default:
-      prop_box_group(g, p, M_PAINT(p->colour ? p->colour : C_STEEL));
+    case PR_SERVER:
+      for (int k = 0; k < 6; k++) part(g, g_box, emis(k % 2 ? C_LIVE : C_HAZARD, 2.0f), 0.04f, 0.04f, 0.02f, p->w * 0.3f, 0.2f + k * (h - 0.4f) / 5 + 0.08f, p->d / 2 + 0.02f);
       break;
+    default: break;
   }
   return g;
 }
@@ -821,22 +947,34 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       BOX(hz->mov2, M_STEEL(0x6f6c66), h->w / 2 - 0.02f, 0.06f, h->d, h->w / 4, 0.03f, 0);
       hz->tell_m = mat_ex(C_HAZARD, 0.5f, 0, C_HAZARD, 0.3f, 0);
       for (int k = 0; k < 4; k++) part(g, g_box, hz->tell_m, 0.16f, 0.06f, 0.16f, (k & 1 ? 1 : -1) * (h->w / 2 + 0.25f), 0.03f, (k & 2 ? 1 : -1) * (h->d / 2 + 0.25f));
+      { soup_t fr; soup_init(&fr, 8); float bw = h->w + 0.7f, bd = h->d + 0.7f, t = 0.3f;
+        soup_push_at(&fr, 0, 0.011f, 0, -PI / 2, 0, 0);
+        soup_push_at(&fr, 0, bd / 2 - t / 2, 0, 0, 0, 0); sp_quad(&fr, bw, t); soup_pop(&fr);
+        soup_push_at(&fr, 0, -bd / 2 + t / 2, 0, 0, 0, 0); sp_quad(&fr, bw, t); soup_pop(&fr);
+        soup_push_at(&fr, bw / 2 - t / 2, 0, 0, 0, 0, 0); sp_quad(&fr, t, bd - 2 * t); soup_pop(&fr);
+        soup_push_at(&fr, -bw / 2 + t / 2, 0, 0, 0, 0, 0); sp_quad(&fr, t, bd - 2 * t); soup_pop(&fr);
+        soup_pop(&fr);
+        hz->floor_tell = soup_mesh(g, &fr, glass(C_RUST, 0)); t3_release(hz->floor_tell->materials[0]); set_vis(hz->floor_tell, 0); }
       break; }
     case HZ_PULVERIZER: {
       inward(a, h->x, h->z, &hz->dir_x, &hz->dir_z);
       float yaw = atan2f(hz->dir_x, hz->dir_z);
       t3_object_set_rotation(g, 0, yaw, 0);
-      /* the post stands at the wall, 1.4 behind the strike square; the arm pivots at its top */
-      BOX(g, M_STEEL(C_STEEL_HI), 0.3f, 2.2f, 0.3f, 0, 1.1f, -1.5f);
-      BOX(g, M_PAINT(C_TAPE), 0.5f, 0.2f, 0.5f, 0, 2.25f, -1.5f);
+      /* the post stands at the wall, 1.4 behind the strike square; the arm pivots at its top: the post and the
+       * arm one cached soup each (every pulverizer shares them) */
+      float kp[8] = { 1 }, ka[8] = { 2 };
+      t3_geometry *pg = geo_find(GK_PROP + 1, kp), *ag = geo_find(GK_PROP + 1, ka);
+      if (!pg) { soup_t ps; soup_init_vcol(&ps, 40); soup_rgb(&ps, C_STEEL_HI); sp_box_at(&ps, 0.3f, 2.2f, 0.3f, 0, 1.1f, 0); soup_rgb(&ps, C_TAPE); sp_box_at(&ps, 0.5f, 0.2f, 0.5f, 0, 2.25f, 0); pg = geo_keep(GK_PROP + 1, kp, soup_finish(&ps)); }
+      if (!ag) { soup_t as; soup_init_vcol(&as, 80); soup_rgb(&as, 0x6f6c66u); sp_box_at(&as, 0.18f, 0.18f, 1.7f, 0, 0, 0.85f); soup_rgb(&as, C_RUST); sp_cbox_at(&as, 0.7f, 0.55f, 0.7f, 0.05f, 0, -0.1f, 1.7f); soup_rgb(&as, C_HAZARD); sp_box_at(&as, 0.72f, 0.1f, 0.72f, 0, -0.1f, 1.7f); ag = geo_keep(GK_PROP + 1, ka, soup_finish(&as)); }
+      geo_mesh(g, pg, VM_BODY, 0, 0, -1.5f);
       hz->tell_m = mat_ex(C_LIVE, 0.5f, 0, C_LIVE, 0.0f, 0);
       part(g, g_box, hz->tell_m, 0.2f, 0.2f, 0.2f, 0, 2.45f, -1.5f);
       hz->mov = group_at(g, 0, 2.0f, -1.5f);
-      BOX(hz->mov, M_STEEL(0x6f6c66), 0.18f, 0.18f, 1.7f, 0, 0, 0.85f);
-      BOX(hz->mov, M_PAINT(C_RUST), 0.7f, 0.55f, 0.7f, 0, -0.1f, 1.7f);
-      BOX(hz->mov, M_PAINT(C_HAZARD), 0.72f, 0.1f, 0.72f, 0, -0.1f, 1.7f);
+      geo_mesh(hz->mov, ag, VM_BODY, 0, 0, 0);
       hz->swing = -1.1f;
       t3_object_set_rotation(hz->mov, hz->swing, 0, 0);
+      hz->floor_tell = mesh_take(g_circle, glass(0x000000, 0)); rot(hz->floor_tell, -PI / 2, 0, 0); t3_object_set_position(hz->floor_tell, 0, 0.013f, 0.2f);
+      t3_object_add(g, hz->floor_tell); t3_release(hz->floor_tell); set_vis(hz->floor_tell, 0);
       break; }
     case HZ_KILLSAW: {
       t3_object_set_rotation(g, 0, h->ang, 0);
@@ -846,17 +984,26 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       hz->tell_m = mat_ex(0x2a241e, 0.6f, 0, C_HAZARD, 0.0f, 0);
       part(g, g_box, hz->tell_m, L, 0.02f, Wd - 0.08f, 0, 0.005f, 0);
       hz->mov = group_at(g, 0, -0.42f, 0);
-      for (int k = 0; k < 2; k++) {
-        t3_object *saw = group_at(hz->mov, (k ? 1 : -1) * L / 4, 0, 0);
-        t3_mesh *d = part(saw, g_cyl12, M_STEEL(0xcfd3d6), 0.36f, 0.05f, 0.36f, 0, 0, 0);
-        rot(d, 0, 0, PI / 2);
-        for (int t = 0; t < 8; t++) { t3_mesh *th = part(saw, g_box, M_STEEL(0xe6e2d8), 0.04f, 0.12f, 0.1f, 0, cosf(t * PI / 4) * 0.4f, sinf(t * PI / 4) * 0.4f); rot(th, -t * PI / 4, 0, 0); }
+      /* each saw one cached soup: a disc and eight wedge teeth */
+      float key[8] = { 0.36f, 0.05f, 8 };
+      t3_geometry *sg = geo_find(GK_DISC, key);
+      if (!sg) {
+        soup_t ss; soup_init_vcol(&ss, 120);
+        soup_rgb(&ss, 0xcfd3d6u); sp_cyl(&ss, 0.36f, 0.05f, 12, 0);
+        soup_rgb(&ss, 0xe6e2d8u); soup_push_at(&ss, 0, 0, 0, 0, 0, -PI / 2); sp_teeth(&ss, 8, 0.34f, 0.1f, 0.04f, 0.1f, 0); soup_pop(&ss);
+        sg = geo_keep(GK_DISC, key, soup_finish(&ss));
       }
+      for (int k = 0; k < 2; k++) { t3_object *saw = group_at(hz->mov, (k ? 1 : -1) * L / 4, 0, 0); geo_mesh(saw, sg, VM_METAL, 0, 0, 0); }
+      /* the tell: a hazard amber quad over the slot */
+      hz->floor_tell = mesh_take(g_plane, glass(C_HAZARD, 0)); t3_object_set_scale(hz->floor_tell, L + 0.2f, Wd + 0.2f, 1);
+      rot(hz->floor_tell, -PI / 2, 0, 0); t3_object_set_position(hz->floor_tell, 0, 0.03f, 0);
+      t3_object_add(g, hz->floor_tell); t3_release(hz->floor_tell); set_vis(hz->floor_tell, 0);
       break; }
     case HZ_FLAME: {
       BOX(g, M_STEEL(C_STEEL), h->w, 0.08f, h->d, 0, 0.04f, 0);
       hz->tell_m = mat_ex(0x1d1915, 0.6f, 0, C_HAZARD, 0.0f, 0);
       for (int k = 0; k < 4; k++) part(g, g_box, hz->tell_m, h->w * 0.8f, 0.02f, h->d * 0.12f, 0, 0.085f, -h->d * 0.3f + k * h->d * 0.2f);
+      for (int k = 0; k < 4; k++) part(g, g_sphere, hz->tell_m, 0.035f, 0.035f, 0.035f, (k & 1 ? 1 : -1) * h->w * 0.42f, 0.11f, (k & 2 ? 1 : -1) * h->d * 0.42f);   /* the pilots */
       hz->glow_m = glass(0xffb347, 0.0f);
       hz->mov = group_at(g, 0, 0.1f, 0);
       t3_mesh *cone = t3_mesh_new(g_cone, hz->glow_m);
@@ -898,6 +1045,7 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       float H = h->p0 > 0 ? h->p0 / 100.0f : 1.0f;
       CYL(g, M_PAINT(0x3a342b), 0.4f, H, 0, H / 2, 0);
       CYL(g, M_PAINT(C_HAZARD), 0.42f, 0.16f, 0, H * 0.55f, 0);
+      part(g, g_cyl12, mat_tape, 0.41f, 0.14f, 0.41f, 0, H * 0.3f, 0);   /* a tape band on the post */
       part(g, g_disc, M_PAINT(C_TAPE), 0.4f, 0.03f, 0.4f, 0, H + 0.015f, 0);
       hz->tell_m = mat_ex(C_HAZARD, 0.4f, 0, C_HAZARD, 0.2f, 0);
       part(g, g_sphere, hz->tell_m, 0.14f, 0.14f, 0.14f, 0, H + 0.12f, 0);
@@ -936,6 +1084,9 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       hz->glow_m = glass(0x000000, 0.0f);
       t3_mesh *sh = t3_mesh_new(g_circle, hz->glow_m); rot(sh, -PI / 2, 0, 0); t3_object_set_position(sh, 0, 0.012f, 0); t3_object_add(g, sh); t3_release(sh);
       hz->mov2 = (t3_object *)sh;
+      { t3_material *rm = glass_map(tex_ring, 0); rm->color = t3_color_hex(C_HAZARD);
+        hz->floor_tell = mesh_take(quad_geo(0, 0, 1, 1), rm); t3_object_set_scale(hz->floor_tell, h->w * 1.3f, h->d * 1.3f, 1); rot(hz->floor_tell, -PI / 2, 0, 0); t3_object_set_position(hz->floor_tell, 0, 0.014f, 0);
+        t3_object_add(g, hz->floor_tell); t3_release(hz->floor_tell); set_vis(hz->floor_tell, 0); }
       hz->mov = group_at(g, 0, 6, 0);
       BOX(hz->mov, M_PAINT(0x8b8578), 0.9f, 0.7f, 0.8f, 0, 0.35f, 0);         /* a dead CRT */
       BOX(hz->mov, M_PAINT(0x1a2a2a), 0.7f, 0.5f, 0.05f, 0, 0.38f, 0.41f);
@@ -947,8 +1098,10 @@ static void build_hazard(warena_t *w, const arena_def_t *a, int i) {
       hz->mov = group_at(g, -hw, 0.3f, 0);
       t3_mesh *beam = t3_mesh_new(g_box, hz->glow_m); t3_object_set_scale(beam, 0.05f, 0.05f, a->d); t3_object_add(hz->mov, beam); t3_release(beam);
       hz->tell_m = mat_ex(C_LIVE, 0.4f, 0, C_LIVE, 0.6f, 0);
+      hz->tell2_m = mat_ex(C_HAZARD, 0.4f, 0, C_HAZARD, 0.1f, 0);
       for (int s = -1; s <= 1; s += 2) {
         BOX(g, M_PAINT(C_TAPE), 0.4f, 0.5f, 0.5f, 0, 0.3f, s * (a->d / 2 - 0.3f));
+        part(g, g_sphere, hz->tell2_m, 0.09f, 0.09f, 0.09f, 0, 0.62f, s * (a->d / 2 - 0.3f));   /* the amber beacon */
         part(g, g_box, hz->tell_m, 0.2f, 0.1f, 0.1f, 0, 0.3f, s * (a->d / 2 - 0.55f));
         BOX(g, M_STEEL(C_STEEL), a->w, 0.06f, 0.06f, 0, 0.05f, s * (a->d / 2 - 0.3f));
       }
@@ -1132,9 +1285,9 @@ typedef struct { uint32_t tint; float mixk, rough, metal, depth, t, c; uint8_t b
 static const armour_look_t ARMOUR_LOOK[AR_COUNT] = {
   /* NONE  */ { 0x000000, 0.00f, 0.60f, 0.20f, 1.0f, 0.012f, 0.006f, 0, 0 },
   /* PLY   */ { 0xb08a55, 0.45f, 0.90f, 0.00f, 1.0f, 0.030f, 0.010f, 4, 4 },
-  /* ALU   */ { 0xe2e4e3, 0.40f, 0.30f, 0.45f, 1.4f, 0.030f, 0.012f, 8, 4 },
+  /* ALU   */ { 0xe2e4e3, 0.40f, 0.30f, 0.45f, 1.4f, 0.030f, 0.012f, 6, 4 },
   /* UHMW  */ { 0xe9e5dc, 0.40f, 0.55f, 0.05f, 0.5f, 0.030f, 0.026f, 0, 0 },
-  /* STEEL */ { 0x6f6c66, 0.35f, 0.40f, 0.50f, 1.0f, 0.030f, 0.012f, 8, 4 },
+  /* STEEL */ { 0x6f6c66, 0.35f, 0.40f, 0.50f, 1.0f, 0.030f, 0.012f, 6, 4 },
   /* TI    */ { 0x8d97a3, 0.35f, 0.35f, 0.45f, 0.8f, 0.030f, 0.012f, 6, 4 },
   /* WEAR  */ { 0x8a4a2c, 0.40f, 0.50f, 0.40f, 0.3f, 0.050f, 0.014f, 12, 6 },
 };
@@ -1146,7 +1299,7 @@ typedef struct { uint8_t panel, kind; float u, v, size, rot; } wdecal_t;
 typedef struct {
   t3_object *root, *body, *drive_g, *weapon_g, *weapon2_g;
   t3_object *wpivot, *w2pivot;                 /* the moving part of each weapon */
-  t3_mesh *shell;                              /* the static body soup */
+  soup_t base;                                 /* the static body soup (chassis, trim, drive, mounts): the plate soup's first part */
   t3_mesh *plates; int pl_cap;                 /* the plate soup, rewritten in place on a state change */
   wplate_t pl[PN_COUNT];
   uint8_t pstate[PN_COUNT]; int plates_dirty;
@@ -1157,7 +1310,7 @@ typedef struct {
   t3_object *legs[6], *knees[6]; int nlegs;
   t3_mesh *belts[4]; int nbelts; t3_mesh *sprockets[4]; int nsprockets; t3_texture *tread_tex;
   t3_mesh *skirt, *fans[2];
-  t3_mesh *ring, *blur, *glint, *led, *blob, *glow, *beacon;   /* glow: the flame cone */
+  t3_mesh *ring, *blur, *glint, *led, *glow, *beacon;          /* glow: the flame cone */
   t3_mesh *seat_ring;                          /* the 3 px seat colour ring under the bot in ONE CAMERA (10.17) */
   t3_mesh *wsub[4];                            /* moving weapon parts: rod, disc, head, piston, ram, collar, pilot */
   t3_mesh *wsub2[4];
@@ -1246,23 +1399,6 @@ static panel_place_t panel_place(const chassis_def_t *c, int panel, float ride) 
 
 static void clear_group(t3_object *g) { while (g->child_count > 0) t3_object_remove(g, g->children[g->child_count - 1]); }
 
-/* a soup's geometry as a mesh under parent; nothing when the soup is empty */
-static t3_mesh *soup_mesh(void *parent, soup_t *s, t3_material *m) {
-  if (s->n_ == 0) { if (s->owned) { free(s->p); free(s->n); free(s->uv); free(s->c); } return 0; }
-  t3_geometry *g = soup_finish(s);
-  t3_mesh *me = t3_mesh_new(g, m);
-  t3_object_add(parent, me); t3_release(me); t3_release(g);
-  return me;
-}
-/* a soup that ended up unused */
-static void soup_free_empty(soup_t *s) { if (s->owned) { free(s->p); free(s->n); free(s->uv); free(s->c); } s->p = s->n = s->uv = s->c = 0; s->n_ = 0; }
-/* a cached geometry as a mesh under parent at a place */
-static t3_mesh *geo_mesh(void *parent, t3_geometry *g, t3_material *m, float x, float y, float z) {
-  t3_mesh *me = t3_mesh_new(g, m);
-  t3_object_set_position(me, x, y, z);
-  t3_object_add(parent, me); t3_release(me);
-  return me;
-}
 
 /* -- plates: four dent states and gone (graphics 4.1, 4.2) ---------- */
 /* a plate's local frame: x across, y up the plate, z out of it; the back face sits on z = 0 */
@@ -1315,7 +1451,7 @@ static void emit_plate(soup_t *s, const wbot_t *b, int panel, float w, float h, 
   if (ar == AR_WEAR && state > 2) state = 2;                              /* WEAR PLATE never hangs */
   crease_t cr = plate_crease(plate_seed(b->build.chassis, panel));
   float f = al->depth, c = al->c; if (c > w * 0.2f) c = w * 0.2f; if (c > h * 0.2f) c = h * 0.2f;
-  int top = panel == PN_TOP || panel == PN_MOUNT, gx = 4, gy = panel == PN_MOUNT ? 2 : 4;
+  int top = panel == PN_TOP || panel == PN_MOUNT, gx = panel == PN_MOUNT ? 2 : 3, gy = gx;
   /* state 2: the plate pulled 5 degrees off the body about the edge away from the pulled corner */
   if (state == 2) { float px = -cr.cx * w * 0.5f; soup_push_at(s, px, 0, 0, 0, -cr.cx * 0.087f, 0); soup_push_at(s, -px, 0, 0, 0, 0, 0); }
   t3_color pc = t3_color_hex(colour), dk = t3_color_hex(BC_CHAR_DK), bright = t3_color_hex(ar == AR_ALU ? C_BONE : (ar == AR_STEEL ? C_RUST : BC_CHAR_DK));
@@ -1504,7 +1640,7 @@ static void emit_plates(soup_t *s, const wbot_t *b) {
 }
 
 /* the plate soup's scratch: one static soup every bot's rewrite goes through, so a state change never allocates */
-#define PLATE_SCRATCH_TRIS 2600
+#define PLATE_SCRATCH_TRIS 4600
 static soup_t plate_scratch;
 static soup_t *plate_soup(void) {
   if (!plate_scratch.p) soup_init_vcol(&plate_scratch, PLATE_SCRATCH_TRIS);
@@ -1537,6 +1673,9 @@ static void dyn_commit(t3_geometry *g, const soup_t *s) {
 static void plates_commit(wbot_t *b) {
   if (!b->plates) return;
   soup_t *s = plate_soup();
+  /* the static body goes first, the plates after it: one soup, one draw */
+  int nb = b->base.n_ < s->cap ? b->base.n_ : s->cap;
+  if (nb > 0) { memcpy(s->p, b->base.p, (size_t)nb * 12); memcpy(s->n, b->base.n, (size_t)nb * 12); memcpy(s->uv, b->base.uv, (size_t)nb * 8); memcpy(s->c, b->base.c, (size_t)nb * 12); s->n_ = nb; }
   emit_plates(s, b);
   dyn_commit(b->plates->geometry, s);
   b->plates_dirty = 0;
@@ -1648,13 +1787,13 @@ static void build_chassis(wbot_t *b, soup_t *sh) {
    * and four bolt heads */
   if (!frame) {
     float pw = c->shape == SH_CIRCLE ? L * 0.6f : W * 0.86f, pl = c->shape == SH_CIRCLE ? L * 0.6f : L * 0.8f;
-    soup_rgb(sh, 0x2f2920u); sp_cbox_at(sh, pw, 0.02f, pl, 0.006f, 0, r - 0.006f, 0);
+    soup_rgb(sh, 0x2f2920u); sp_box_at(sh, pw, 0.02f, pl, 0, r - 0.006f, 0);
     soup_rgb(sh, BC_BRIGHT);
-    for (int k = -1; k <= 1; k += 2) sp_cyl_at(sh, 0.05f, pw * 0.55f, 8, 0, 0, r - 0.05f, k * pl * 0.3f);
-    soup_rgb(sh, C_RUST); sp_cbox_at(sh, pw * 0.4f, 0.07f, pl * 0.3f, 0.01f, 0, r - 0.045f, 0);
+    for (int k = -1; k <= 1; k += 2) sp_cyl_at(sh, 0.05f, pw * 0.55f, 6, 0, 0, r - 0.05f, k * pl * 0.3f);
+    soup_rgb(sh, C_RUST); sp_box_at(sh, pw * 0.4f, 0.07f, pl * 0.3f, 0, r - 0.045f, 0);
     soup_rgb(sh, C_HAZARD); sp_box_at(sh, pw * 0.41f, 0.072f, pl * 0.06f, 0, r - 0.045f, 0);
     soup_rgb(sh, BC_BRIGHT);
-    for (int k = 0; k < 4; k++) { soup_push_at(sh, (k & 1 ? 1 : -1) * pw * 0.42f, r - 0.016f, (k & 2 ? 1 : -1) * pl * 0.44f, PI / 2, 0, 0); sp_bolt(sh, 0.02f, 0.01f); soup_pop(sh); }
+    for (int k = 0; k < 2; k++) { soup_push_at(sh, (k ? 1 : -1) * pw * 0.42f, r - 0.016f, (k ? 1 : -1) * pl * 0.44f, PI / 2, 0, 0); sp_bolt(sh, 0.02f, 0.01f); soup_pop(sh); }
   }
   if (b->is_ops) {
     /* OPS: an amber stripe on the lid; the tape bumper and the beacon mast are built in bot_rebuild */
@@ -1687,7 +1826,7 @@ static void build_chassis(wbot_t *b, soup_t *sh) {
 /* a tyre round the x axis: rounded shoulders, alternate lugs on the tread, a dark hub with a bright cross
  * on its +x face (the outside face; a left wheel is turned round) */
 static t3_geometry *tyre_geo(float r, float w) {
-  int seg = r >= 0.2f ? 10 : 8;
+  int seg = 8;
   float key[8] = { r, w, (float)seg };
   t3_geometry *g = geo_find(GK_TYRE, key);
   if (g) return g;
@@ -1696,7 +1835,7 @@ static t3_geometry *tyre_geo(float r, float w) {
   const float pr[6][2] = { { 0.6f * r, -w / 2 }, { 0.9f * r, -w / 2 }, { r, -0.28f * w }, { r, 0.28f * w }, { 0.9f * r, w / 2 }, { 0.6f * r, w / 2 } };
   for (int j = 0; j < seg; j++) {
     float a0 = j * TAU / seg, a1 = (j + 1) * TAU / seg, am = (a0 + a1) / 2;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 1; i < 5; i++) {
       soup_rgb(&s, i == 2 && (j & 1) ? 0x3d362cu : BC_RUBBER);
       float r0 = pr[i][0], y0 = pr[i][1], r1 = pr[i + 1][0], y1 = pr[i + 1][1];
       float p00[3] = { sinf(a0) * r0, y0, cosf(a0) * r0 }, p01[3] = { sinf(a1) * r0, y0, cosf(a1) * r0 }, p10[3] = { sinf(a0) * r1, y1, cosf(a0) * r1 }, p11[3] = { sinf(a1) * r1, y1, cosf(a1) * r1 };
@@ -1727,8 +1866,8 @@ static t3_geometry *belt_geo(float len, float hgt, float wid) {
   if (g) return g;
   float R = hgt / 2, zc = len / 2 - R;
   float pts[20][2]; int n = 0;                         /* (y, z) round the loop */
-  for (int k = 0; k <= 8; k++) { float a = PI / 2 - k * PI / 8; pts[n][0] = R * sinf(a); pts[n][1] = zc + R * cosf(a); n++; }
-  for (int k = 0; k <= 8; k++) { float a = -PI / 2 - k * PI / 8; pts[n][0] = R * sinf(a); pts[n][1] = -zc + R * cosf(a); n++; }
+  for (int k = 0; k <= 5; k++) { float a = PI / 2 - k * PI / 5; pts[n][0] = R * sinf(a); pts[n][1] = zc + R * cosf(a); n++; }
+  for (int k = 0; k <= 5; k++) { float a = -PI / 2 - k * PI / 5; pts[n][0] = R * sinf(a); pts[n][1] = -zc + R * cosf(a); n++; }
   soup_t s; soup_init(&s, n * 4);
   float v = 0;
   for (int i = 0; i < n; i++) {
@@ -1754,8 +1893,7 @@ static t3_geometry *sprocket_geo(float r, float t) {
   if (g) return g;
   soup_t s; soup_init_vcol(&s, 80);
   soup_push_at(&s, 0, 0, 0, 0, 0, -PI / 2);
-  soup_rgb(&s, BC_STEEL); sp_gear(&s, 7, r, r * 0.78f, t);
-  soup_rgb(&s, BC_BRIGHT); sp_cyl(&s, r * 0.3f, t + 0.02f, 6, 1);
+  soup_rgb(&s, BC_STEEL); sp_gear(&s, 5, r, r * 0.74f, t);
   soup_pop(&s);
   return geo_keep(GK_SPROCKET, key, soup_finish(&s));
 }
@@ -1862,8 +2000,8 @@ static void build_drive(wbot_t *b, const chassis_def_t *c, soup_t *ds, soup_t *s
           for (int e = -1; e <= 1; e += 2) b->sprockets[b->nsprockets++] = geo_mesh(b->drive_g, sprocket_geo(R * 0.82f, bw * 0.55f), VM_METAL, k * x, R + 0.01f, e * zc);
           /* three road wheels along the bottom run, and a side frame between the sprockets */
           soup_rgb(ds, BC_STEEL_DK);
-          for (int r = -1; r <= 1; r++) sp_cyl_at(ds, 0.062f, bw * 0.6f, 8, 0, k * x, 0.085f, r * zc * 0.55f);
-          soup_rgb(ds, BC_CHAR_DK); sp_cbox_at(ds, 0.03f, 0.08f, zc * 1.6f, 0.01f, k * (x - bw * 0.3f), R + 0.01f, 0);
+          for (int r = -1; r <= 1; r += 2) sp_cyl_at(ds, 0.062f, bw * 0.6f, 6, 0, k * x, 0.085f, r * zc * 0.45f);
+          soup_rgb(ds, BC_CHAR_DK); sp_box_at(ds, 0.03f, 0.08f, zc * 1.6f, k * (x - bw * 0.3f), R + 0.01f, 0);
         }
       } else {
         /* LEG TRACKS: per side two knees over tread pods */
@@ -2000,7 +2138,7 @@ static void build_weapon(wbot_t *b, int secondary, soup_t *sh) {
       soup_rgb(&s, C_HAZARD);
       soup_push_at(&s, 0, -rise * 0.86f + 0.017f, run * 0.86f, -(PI / 2 - WEDGE_ANG), 0, 0); sp_quad(&s, W * 1.04f, 0.05f); soup_pop(&s);
       soup_rgb(&s, BC_STEEL_DK);
-      for (int k = -1; k <= 1; k += 2) sp_cbox_at(&s, 0.06f, 0.03f, 0.26f, 0.008f, k * 0.3f * W, -rise + 0.005f, run - 0.15f);
+      for (int k = -1; k <= 1; k += 2) sp_box_at(&s, 0.06f, 0.03f, 0.26f, k * 0.3f * W, -rise + 0.005f, run - 0.15f);
       /* two cheeks from the chassis to the hinge bar */
       BRACKET(0.06f, 0.1f, 0.08f, -W * 0.4f, hy - 0.03f, hz - 0.05f);
       BRACKET(0.06f, 0.1f, 0.08f, W * 0.4f, hy - 0.03f, hz - 0.05f);
@@ -2035,13 +2173,14 @@ static void build_weapon(wbot_t *b, int secondary, soup_t *sh) {
       }
       sp_cbox_at(&s, 0.6f, 0.08f, 0.1f, 0.015f, 0, fy + 0.03f, 0.02f);
       soup_rgb(&s, C_HAZARD); sp_box_at(&s, 0.62f, 0.03f, 0.05f, 0, fy + 0.075f, 0.02f);
+      /* the hydraulic ram from the hinge block to the crossbar rides with the forks (one draw) */
+      soup_push_at(&s, 0, 0.02f, -0.06f, 0.5f, 0, 0);
+      soup_rgb(&s, BC_BRIGHT); sp_cyl_at(&s, 0.035f, 0.2f, 6, 1, 0, 0.1f, 0);
+      soup_rgb(&s, BC_STEEL_DK); sp_cyl_at(&s, 0.05f, 0.08f, 6, 1, 0, 0.0f, 0);
+      soup_pop(&s);
       part_mesh(piv, &s);
       soup_rgb(sh, BC_STEEL_DK);
       for (int k = -1; k <= 1; k += 2) sp_cbox_at(sh, 0.1f, 0.14f, 0.18f, 0.015f, k * 0.24f, y0, z0 - 0.08f);
-      soup_t sr; soup_init_vcol(&sr, 60); soup_rgb(&sr, BC_BRIGHT); sp_cyl_at(&sr, 0.035f, 0.2f, 8, 1, 0, 0.1f, 0);
-      soup_rgb(&sr, BC_STEEL_DK); sp_cyl_at(&sr, 0.05f, 0.08f, 8, 1, 0, 0.0f, 0);
-      t3_mesh *ram = part_mesh(g, &sr); if (ram) { t3_object_set_position(ram, 0, y0 + 0.02f, z0 - 0.06f); t3_object_set_rotation(ram, 0.5f, 0, 0); }
-      b->wsub[si + 1] = ram;
       if (!secondary) { b->glint_x = 0.22f; b->glint_y = fork_y + 0.05f; b->glint_z = z0 + 0.5f; b->glint_parent = b->body; }
       break; }
     case WP_SAW: {
@@ -2157,13 +2296,13 @@ static void build_weapon(wbot_t *b, int secondary, soup_t *sh) {
       t3_object_set_position(piv, 0, dy, dz);
       soup_rgb(sh, BC_STEEL_DK); sp_cbox_at(sh, 0.2f, 0.16f, 0.2f, 0.03f, 0, top + 0.03f, dz);
       t3_object *disc = group_at(piv, 0, 0, 0);
-      soup_rgb(&s, 0x6f6c66u); sp_cyl(&s, 0.46f, 0.05f, 12, 1);
+      soup_rgb(&s, 0x6f6c66u); sp_cyl(&s, 0.46f, 0.05f, 10, 1);
       soup_rgb(&s, BC_BRIGHT); sp_teeth(&s, 4, 0.42f, 0.16f, 0.07f, 0.13f, 0.35f);
       sp_cyl_at(&s, 0.17f, 0.07f, 6, 1, 0, 0.01f, 0);
-      for (int k = 0; k < 6; k++) { float a = k * TAU / 6; soup_push_at(&s, sinf(a) * 0.12f, 0.045f, cosf(a) * 0.12f, -PI / 2, 0, 0); sp_bolt(&s, 0.018f, 0.01f); soup_pop(&s); }
+      for (int k = 0; k < 4; k++) { float a = k * TAU / 4; soup_push_at(&s, sinf(a) * 0.12f, 0.045f, cosf(a) * 0.12f, -PI / 2, 0, 0); sp_bolt(&s, 0.018f, 0.01f); soup_pop(&s); }
       soup_rgb(&s, C_HAZARD);
-      for (int k = 0; k < 12; k++) {
-        float a0 = k * TAU / 12, a1 = (k + 1) * TAU / 12, ri = 0.27f, ro = 0.36f, y = 0.027f, ctr[3] = { 0, -1, 0 };
+      for (int k = 0; k < 10; k++) {
+        float a0 = k * TAU / 10, a1 = (k + 1) * TAU / 10, ri = 0.27f, ro = 0.36f, y = 0.027f, ctr[3] = { 0, -1, 0 };
         float p0[3] = { sinf(a0) * ri, y, cosf(a0) * ri }, p1[3] = { sinf(a1) * ri, y, cosf(a1) * ri }, p2[3] = { sinf(a1) * ro, y, cosf(a1) * ro }, p3[3] = { sinf(a0) * ro, y, cosf(a0) * ro };
         soup_quad_out(&s, p0, p1, p2, p3, ctr);
       }
@@ -2207,7 +2346,6 @@ static float drive_ride(int drive) {
 
 /* textures every bot shares: the oriented blob shadow, the floor danger ring, the spinner blur atlas, the
  * ready glint star and the hit decal atlas (graphics 4.3, 4.8, 5.1) */
-static t3_texture *tex_blob, *tex_ring, *tex_blur, *tex_glint, *tex_decal;
 static t3_material *mat_decal, *mat_glint;
 static float smooth01(float e0, float e1, float x) { float t = (x - e0) / (e1 - e0); if (t < 0) t = 0; if (t > 1) t = 1; return t * t * (3 - 2 * t); }
 static void make_bot_textures(void) {
@@ -2272,29 +2410,18 @@ static void make_bot_textures(void) {
   mat_decal = t3_mesh_standard_material_new(0xffffff); t3_material_set_map(mat_decal, tex_decal);
   mat_decal->roughness = 0.8f; mat_decal->metalness = 0; mat_decal->transparent = true; mat_decal->opacity = 0.9f; mat_decal->depth_write = false;
 }
-/* a textured transparent quad material of its own (its opacity animates) */
-static t3_material *glass_map(t3_texture *t, float opacity) {
-  t3_material *m = t3_mesh_basic_material_new(0xffffff);
-  t3_material_set_map(m, t); m->transparent = true; m->opacity = opacity; m->depth_write = false;
-  return m;
-}
-/* a quad geometry with its uv window into an atlas (u0, v0, u1, v1) */
-static t3_geometry *quad_geo(float u0, float v0, float u1, float v1) {
-  float key[8] = { u0, v0, u1, v1 };
-  t3_geometry *g = geo_find(GK_QUAD, key);
-  if (g) return g;
-  soup_t s; soup_init(&s, 2);
-  float a[3] = { -0.5f, -0.5f, 0 }, b[3] = { 0.5f, -0.5f, 0 }, c[3] = { 0.5f, 0.5f, 0 }, d[3] = { -0.5f, 0.5f, 0 };
-  float ua[2] = { u0, v0 }, ub[2] = { u1, v0 }, uc[2] = { u1, v1 }, ud[2] = { u0, v1 };
-  soup_emit(&s, a, b, c, 0, 0, 0, ua, ub, uc); soup_emit(&s, a, c, d, 0, 0, 0, ua, uc, ud);
-  return geo_keep(GK_QUAD, key, soup_finish(&s));
-}
 
+static t3_instanced_mesh *bot_blobs;
+static void blob_hide(int slot) {
+  if (!bot_blobs || slot < 0 || slot >= MAX_BOTS) return;
+  t3_mat4 z; t3_mat4_compose(&z, (t3_vec3){ 0, -9, 0 }, t3_quat_identity(), (t3_vec3){ 0.0001f, 0.0001f, 0.0001f });
+  t3_instanced_mesh_set_matrix_at(bot_blobs, slot, &z); bot_blobs->instance_matrix->version++;
+}
 static void bot_alloc(wbot_t *b, int slot) {
   if (b->root) return;
   b->root = t3_group_new();
   b->body = group_at(b->root, 0, 0, 0);
-  b->drive_g = group_at(b->root, 0, 0, 0);
+  b->drive_g = group_at(b->body, 0, 0, 0);     /* the drive rides in the body: one soup carries both (bot_rebuild) */
   b->weapon_g = group_at(b->body, 0, 0, 0);
   b->weapon2_g = group_at(b->body, 0, 0, 0);
   /* the floor danger ring under a spinner (graphics 4.8): a textured quad, the two rings in the canvas */
@@ -2302,9 +2429,14 @@ static void bot_alloc(wbot_t *b, int slot) {
   t3_object_add(&S->base, b->ring); t3_release(b->ring); set_vis(b->ring, 0);
   t3_material *lm = t3_mesh_basic_material_new(C_LIVE);
   b->led = t3_mesh_new(g_box, lm); t3_object_set_scale(b->led, 0.1f, 0.02f, 0.03f); t3_object_add(b->root, b->led); t3_release(b->led); t3_release(lm); set_vis(b->led, 0);
-  t3_material *bm = glass_map(tex_blob, 0.42f);
-  b->blob = t3_mesh_new(quad_geo(0, 0, 1, 1), bm); t3_object_add(&S->base, b->blob); t3_release(b->blob); t3_release(bm);
-  set_vis(b->blob, 0);
+  /* every bot's blob shadow is one instance of one mesh: five shadows, one draw */
+  if (!bot_blobs) {
+    t3_material *bm = glass_map(tex_blob, 0.5f);
+    bot_blobs = t3_instanced_mesh_new(quad_geo(0, 0, 1, 1), bm, MAX_BOTS); t3_release(bm);
+    bot_blobs->mesh.base.frustum_culled = false;
+    t3_object_add(&S->base, bot_blobs); t3_release(bot_blobs);
+    for (int i = 0; i < MAX_BOTS; i++) blob_hide(i);
+  }
   t3_material *srm = t3_mesh_basic_material_new(C_BONE);
   b->seat_ring = t3_mesh_new(g_ring, srm); rot(b->seat_ring, -PI / 2, 0, 0); t3_object_add(&S->base, b->seat_ring); t3_release(b->seat_ring); t3_release(srm);
   set_vis(b->seat_ring, 0);
@@ -2347,8 +2479,21 @@ static int plate_capacity(wbot_t *b) {
   return most + 600;
 }
 
+#ifdef RTR_TRACE
+/* the triangles a bot draws with every part shown (hidden spares and damage meshes left out) and its object count */
+static void bot_count(const t3_object *o, int *tris, int *objs) {
+  (*objs)++;
+  if (!o->visible) return;
+  if (o->type == T3_MESH) { const t3_geometry *g = ((const t3_mesh *)o)->geometry; if (g && g->attributes[T3_ATTR_POSITION]) { int t = (g->draw_count >= 0 ? g->draw_count : g->attributes[T3_ATTR_POSITION]->count) / 3; *tris += t;
+} }
+  for (int i = 0; i < o->child_count; i++) bot_count(o->children[i], tris, objs);
+}
+#endif
+
 static void bot_rebuild(wbot_t *b) {
-  clear_group(b->body); clear_group(b->drive_g);
+  clear_group(b->drive_g); clear_group(b->body);
+  if (b->base.p) { free(b->base.p); free(b->base.n); free(b->base.uv); free(b->base.c); memset(&b->base, 0, sizeof b->base); }
+  b->drive_g = group_at(b->body, 0, 0, 0);
   /* the tread material holds its own reference to the stripe map; ours goes with the old drive */
   if (b->tread_tex) { t3_release(b->tread_tex); b->tread_tex = 0; }
   b->hammer_max = 0.5f; b->hammer_last = -0.6f; b->panels_hidden = 0;
@@ -2362,18 +2507,17 @@ static void bot_rebuild(wbot_t *b) {
   const chassis_def_t *c = &CHASSIS[b->build.chassis];
   b->ride_y = drive_ride(b->build.drive);
   b->len = c->len * (b->is_ops ? 1.4f : 1); b->wid = c->wid;
-  soup_t sh, ds; soup_init_vcol(&sh, 2400); soup_init_vcol(&ds, 900);
+  soup_t sh; soup_init_vcol(&sh, 3200);
   build_chassis(b, &sh);
-  build_drive(b, c, &ds, &sh);
+  build_drive(b, c, &sh, &sh);                 /* the drive's static parts go in the body soup too: one draw fewer a bot */
   if (b->build.drive != DR_MELTY) {
     build_weapon(b, 0, &sh);
     if (b->build.weapon2 != WP_NONE) build_weapon(b, 1, &sh);
   }
-  b->shell = soup_mesh(b->body, &sh, VM_BODY);
-  soup_mesh(b->drive_g, &ds, VM_BODY);
-  /* the plates: one soup, sized for the worst mix of states, rewritten in place */
+  b->base = sh;                                /* kept: every plate rewrite copies it in first */
+  /* the body and its plates: one soup, sized for the body and the worst mix of plate states, rewritten in place */
   const armour_look_t *al = &ARMOUR_LOOK[bot_armour(b)];
-  b->pl_cap = plate_capacity(b);
+  b->pl_cap = b->base.n_ + plate_capacity(b);
   t3_geometry *pg = dyn_geometry(b->pl_cap, 1);
   b->plates = t3_mesh_new(pg, vmat(al->rough, al->metal)); t3_release(pg);
   t3_object_add(b->body, b->plates); t3_release(b->plates);
@@ -2453,11 +2597,13 @@ static void bot_rebuild(wbot_t *b) {
   if (b->radius < rr) b->radius = rr;
   b->seat_ring->materials[0]->color = t3_color_hex(b->is_ops ? C_HAZARD : b->seat_colour);
   t3_object_set_scale(b->seat_ring, b->radius * 1.15f, b->radius * 1.15f, 1);
-  float bw = (b->build.drive == DR_HOVER ? b->radius * 1.6f : c->wid * 1.3f + 0.2f), bl = (b->build.drive == DR_HOVER ? b->radius * 1.6f : b->len * 1.3f + 0.1f);
-  t3_object_set_scale(b->blob, bw, bl, 1);
   set_vis(b->led, b->build.drive == DR_MELTY);
   t3_object_set_position(b->led, 0, b->top_y + al->t + 0.015f, b->len * 0.3f);
   b->built = 1;
+#ifdef RTR_TRACE
+  { int tris = 0, objs = 0; bot_count(b->root, &tris, &objs);
+    char m[96]; snprintf(m, sizeof m, "[bot] slot=%d ch=%d dr=%d wp=%d ar=%d tris=%d objs=%d", (int)(b - bots), b->build.chassis, b->build.drive, b->build.weapon, b->build.armour, tris, objs); wc_log(m, (unsigned)strlen(m)); }
+#endif
 }
 
 void world_bot_build(int slot, const build_t *bd, uint32_t seat_colour) {
@@ -2484,7 +2630,7 @@ void world_bot_visible(int slot, int on) {
   if (slot < 0 || slot >= MAX_BOTS || !bots[slot].root) return;
   bots[slot].visible = on;
   bots[slot].root->visible = on != 0;
-  set_vis(bots[slot].blob, on);
+  if (!on) blob_hide(slot);
   if (!on) { set_vis(bots[slot].seat_ring, 0); set_vis(bots[slot].ring, 0); }
 }
 
@@ -2517,11 +2663,12 @@ static void place_blob(wbot_t *b, float x, float y, float z, float h, float vx, 
   float fy = attached ? arena_floor_y(attached, x, z) : 0, up = y - fy; if (up < 0) up = 0;
   float k = 1 - up / 3; if (k < 0.2f) k = 0.2f;
   float bx = x + 0.1f * -0.83f + vx * (up / 7), bz = z + 0.1f * -0.55f + vz * (up / 7);
-  t3_object_set_position(b->blob, bx, 0.012f + fy, bz);
-  t3_object_set_rotation(b->blob, -PI / 2, 0, h);
+  int slot = (int)(b - bots);
   float bw = (b->build.drive == DR_HOVER ? b->radius * 1.6f : b->wid * 1.3f + 0.2f), bl = (b->build.drive == DR_HOVER ? b->radius * 1.6f : b->len * 1.3f + 0.1f);
-  t3_object_set_scale(b->blob, bw * (0.6f + 0.4f * k), bl * (0.6f + 0.4f * k), 1);
-  b->blob->materials[0]->opacity = 0.5f * k;
+  /* the fade with height is in the size: the instances share one opacity */
+  float sk = (0.6f + 0.4f * k) * (0.5f + 0.5f * k);
+  t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ bx, 0.012f + fy, bz }, t3_quat_multiply(t3_quat_from_axis_angle((t3_vec3){ 0, 1, 0 }, h), t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2)), (t3_vec3){ bw * sk, bl * sk, 1 });
+  t3_instanced_mesh_set_matrix_at(bot_blobs, slot, &m); bot_blobs->instance_matrix->version++;
 }
 
 void world_bot_pose(int slot, float x, float y, float z, float heading, int inverted) {
@@ -2634,7 +2781,6 @@ static void pose_weapon(wbot_t *b, const bot_t *bt, int secondary, float dt) {
     case WP_LIFTER: {
       float lift = bt->lift;
       t3_object_set_rotation(piv, -lift * 0.9f, 0, 0);
-      t3_mesh *ram = b->wsub[si + 1]; if (ram) t3_object_set_scale(ram, 1, 1 + lift * 1.2f, 1);
       break; }
     case WP_HAMMER: {
       float st = 1, ang = hammer_angle(b, bt, active, cooldown, &st);
@@ -2735,6 +2881,7 @@ static void sync_drive(wbot_t *b, const bot_t *bt, float speed, float dt) {
     }
     float bob = (speed > 0.05f ? 0.03f * sinf(b->gait * 2) : 0);
     t3_object_set_position(b->body, 0, bob, 0);
+    t3_object_set_position(b->drive_g, 0, -bob, 0);    /* the body bobs on its legs, the feet stay down */
   }
   if (b->skirt) {
     /* the skirt squashes when a bot presses on it, and sags when the hover is nearly done */
@@ -2903,7 +3050,7 @@ static void sync_bot(wbot_t *b, const bot_t *bt, float alpha, float dt) {
     float ch = cosf(h), sh = sinf(h), fy = attached ? arena_floor_y(attached, x, z) : 0;
     t3_object_set_position(b->ring, x + b->ring_z * sh, fy + 0.014f, z + b->ring_z * ch);
     t3_object_set_rotation(b->ring, -PI / 2, 0, b->spin_vis * 0.05f);
-    b->ring->materials[0]->opacity = sp * 90.0f / 255.0f;
+    b->ring->materials[0]->opacity = sp * J_SPIN_RING_A / 255.0f;
     set_vis(b->ring, sp > 0.05f && bt->alive && !burst);
   }
   if (b->build.drive == DR_MELTY && b->blur) {
@@ -3001,31 +3148,65 @@ void world_weapon_test_fire(int slot) {
 }
 
 /* -- debris and pickup rings -------------------------------------- */
-static t3_instanced_mesh *debris_mesh;
+/* three instanced meshes (graphics 4.10): plates as bevelled plates, wheels as tyres, everything else (chips,
+ * cardboard, bench wood, bumpers, a thrown track) as boxes; and a soft blob under each airborne piece */
+enum { DM_PLATE, DM_WHEEL, DM_BOX, DM_COUNT };
+static t3_instanced_mesh *debris_im[DM_COUNT], *debris_blob;
 static t3_mesh *pickup_rings[MAX_DEBRIS];
 
+static t3_geometry *debris_plate_geo(void) {
+  soup_t s; soup_init(&s, 60); sp_cbox(&s, 1, 1, 1, 0.22f); return soup_finish(&s);
+}
+static t3_geometry *debris_wheel_geo(void) {
+  soup_t s; soup_init(&s, 60);
+  soup_push_at(&s, 0, 0, 0, 0, 0, -PI / 2);
+  const float pr[6][2] = { { 0, -0.5f }, { 0.85f, -0.5f }, { 1, -0.25f }, { 1, 0.25f }, { 0.85f, 0.5f }, { 0, 0.5f } };
+  sp_lathe(&s, pr, 6, 8, 0, TAU);
+  soup_pop(&s);
+  return soup_finish(&s);
+}
+/* an instanced mesh draws only its first n instances: the live pieces are packed at the front */
+static void im_drawn(t3_instanced_mesh *im, int n) { im->count = n; im->mesh.base.visible = n > 0; }
+static void debris_hide_all(void) {
+  for (int k = 0; k < DM_COUNT; k++) im_drawn(debris_im[k], 0);
+  im_drawn(debris_blob, 0);
+  for (int i = 0; i < MAX_DEBRIS; i++) set_vis(pickup_rings[i], 0);
+}
+
 static void debris_init(void) {
-  t3_material *m = t3_mesh_basic_material_new(0xffffff);
-  debris_mesh = t3_instanced_mesh_new(g_box, m, MAX_DEBRIS);
-  debris_mesh->mesh.base.frustum_culled = false;
-  t3_object_add(&S->base, debris_mesh); t3_release(debris_mesh); t3_release(m);
-  t3_mat4 zero; t3_mat4_compose(&zero, (t3_vec3){ 0, -5, 0 }, t3_quat_identity(), (t3_vec3){ 0.001f, 0.001f, 0.001f });
+  t3_geometry *gp = debris_plate_geo(), *gw = debris_wheel_geo();
+  t3_geometry *gs[DM_COUNT] = { gp, gw, g_box };
+  for (int k = 0; k < DM_COUNT; k++) {
+    t3_material *m = t3_mesh_standard_material_new(0xffffff); m->roughness = k == DM_WHEEL ? 0.9f : 0.5f; m->metalness = k == DM_PLATE ? 0.35f : 0.1f;
+    debris_im[k] = t3_instanced_mesh_new(gs[k], m, MAX_DEBRIS);
+    debris_im[k]->mesh.base.frustum_culled = false;
+    t3_object_add(&S->base, debris_im[k]); t3_release(debris_im[k]); t3_release(m);
+    for (int i = 0; i < MAX_DEBRIS; i++) t3_instanced_mesh_set_color_at(debris_im[k], i, t3_color_hex(C_STEEL));
+  }
+  t3_release(gp); t3_release(gw);
+  t3_material *bm = glass_map(tex_blob, 0.5f);
+  debris_blob = t3_instanced_mesh_new(quad_geo(0, 0, 1, 1), bm, MAX_DEBRIS); t3_release(bm);
+  debris_blob->mesh.base.frustum_culled = false;
+  t3_object_add(&S->base, debris_blob); t3_release(debris_blob);
   for (int i = 0; i < MAX_DEBRIS; i++) {
-    t3_instanced_mesh_set_matrix_at(debris_mesh, i, &zero);
-    t3_instanced_mesh_set_color_at(debris_mesh, i, t3_color_hex(C_STEEL));
     t3_material *rm = glass(C_LIVE, 0.8f);
     pickup_rings[i] = t3_mesh_new(g_ring, rm); rot(pickup_rings[i], -PI / 2, 0, 0); t3_object_set_scale(pickup_rings[i], 0.5f, 0.5f, 1);
     t3_object_add(&S->base, pickup_rings[i]); t3_release(pickup_rings[i]); t3_release(rm);
     set_vis(pickup_rings[i], 0);
   }
+  debris_hide_all();
 }
 
-/* debris_t.colour: 0 the owner's body paint, 1 the owner's armour tint, 2 steel (wheels),
- * 3 cardboard, 4 bench wood, 5 bone, 6 rust; kind picks the box proportions */
+/* debris_t.colour: 0 the owner's body paint, 1 the owner's armour tint, 2 rubber (wheels),
+ * 3 cardboard, 4 bench wood, 5 bone, 6 rust. A bot's plate is its plate paint and a wheel or a track
+ * rubber whatever the colour byte says */
 static uint32_t debris_colour(const debris_t *d) {
+  const wbot_t *o = d->owner < MAX_BOTS && bots[d->owner].built ? &bots[d->owner] : 0;
+  if (o && d->kind == DB_PANEL) { paint_t pt = bot_paint(o); return plate_colour(o, d->panel == PN_TOP || d->panel == PN_MOUNT ? pt.lid : pt.plate); }
+  if (d->kind == DB_WHEEL || d->kind == DB_TREAD) return 0x262019;
   switch (d->colour) {
-    case 0: { if (d->owner < MAX_BOTS && bots[d->owner].built) return paint_colour(PAINT_SCHEMES[bots[d->owner].build.paint % PAINT_COUNT].body, bots[d->owner].seat_colour); return C_STEEL; }
-    case 1: { if (d->owner < MAX_BOTS && bots[d->owner].built) { const armour_def_t *a = &ARMOURS[bots[d->owner].build.armour]; (void)a; uint32_t tints[AR_COUNT] = { C_STEEL, 0xb08a55, 0xd7dadc, 0xe9e5dc, 0x6f6c66, 0x8d97a3, 0x4f3a2d }; return tints[bots[d->owner].build.armour % AR_COUNT]; } return C_STEEL; }
+    case 0: { if (o) return plate_colour(o, bot_paint(o).plate); return C_STEEL; }
+    case 1: { if (o) { uint32_t tints[AR_COUNT] = { C_STEEL, 0xb08a55, 0xd7dadc, 0xe9e5dc, 0x6f6c66, 0x8d97a3, 0x4f3a2d }; return tints[o->build.armour % AR_COUNT]; } return C_STEEL; }
     case 2: return 0x1d1915;
     case 3: return 0xa0773f;
     case 4: return 0xa57c4f;
@@ -3035,27 +3216,47 @@ static uint32_t debris_colour(const debris_t *d) {
 }
 
 static void sync_debris(const match_t *m, float alpha) {
-  (void)alpha;
+  int nk[DM_COUNT] = { 0 }, nb = 0;
   for (int i = 0; i < MAX_DEBRIS; i++) {
     const debris_t *d = &m->debris[i];
-    t3_mat4 mat4;
-    if (i >= m->ndebris || d->life <= 0) {
-      t3_mat4_compose(&mat4, (t3_vec3){ 0, -5, 0 }, t3_quat_identity(), (t3_vec3){ 0.001f, 0.001f, 0.001f });
-      t3_instanced_mesh_set_matrix_at(debris_mesh, i, &mat4);
-      set_vis(pickup_rings[i], 0);
-      continue;
-    }
+    if (i >= m->ndebris || d->life <= 0) { set_vis(pickup_rings[i], 0); continue; }
     float fade = d->life < J_DEBRIS_FADE ? (float)d->life / J_DEBRIS_FADE : 1;
-    t3_vec3 sc = d->kind == DB_WHEEL ? (t3_vec3){ 0.3f, 0.3f, 0.14f } : d->kind == DB_CHIP ? (t3_vec3){ 0.12f, 0.06f, 0.12f } : d->kind == DB_CARDBOARD ? (t3_vec3){ 0.4f, 0.25f, 0.35f } : d->kind == DB_BENCH ? (t3_vec3){ 0.5f, 0.08f, 0.3f } : (t3_vec3){ 0.45f, 0.04f, 0.35f };
+    float t = (m->frame + alpha) * DT;
+    int k = d->kind == DB_PANEL ? DM_PLATE : d->kind == DB_WHEEL ? DM_WHEEL : DM_BOX;
+    t3_vec3 sc; t3_quat q; float fy = attached ? arena_floor_y(attached, d->x, d->z) : 0, lift;
+    if (k == DM_PLATE) {
+      const wbot_t *o = d->owner < MAX_BOTS && bots[d->owner].built ? &bots[d->owner] : 0;
+      float pw = o && d->panel < PN_COUNT && o->pl[d->panel].on ? o->pl[d->panel].w : 0.45f, ph = o && d->panel < PN_COUNT && o->pl[d->panel].on ? o->pl[d->panel].h : 0.35f;
+      sc = (t3_vec3){ pw, 0.03f, ph };
+      q = d->bounced && d->y < fy + 0.05f ? t3_quat_from_axis_angle((t3_vec3){ 0, 1, 0 }, i * 1.7f) : t3_quat_from_axis_angle((t3_vec3){ 0.3f, 1, 0.2f }, d->spin * t * 2.0f + i);
+      lift = 0.02f;
+    } else if (k == DM_WHEEL) {
+      /* a wheel rolls about its axle along its travel, and lies on its side once it has bounced */
+      float r = 0.17f, head = atan2f(d->vx, d->vz);
+      sc = (t3_vec3){ 0.14f, r, r };
+      if (d->bounced && d->y < fy + 0.2f) { q = t3_quat_multiply(t3_quat_from_axis_angle((t3_vec3){ 0, 1, 0 }, i * 1.3f), t3_quat_from_axis_angle((t3_vec3){ 0, 0, 1 }, PI / 2)); lift = 0.07f; }
+      else { q = t3_quat_multiply(t3_quat_from_axis_angle((t3_vec3){ 0, 1, 0 }, head + PI / 2), t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, t * 9 + i)); lift = r; }
+    } else {
+      sc = d->kind == DB_CHIP ? (t3_vec3){ 0.12f, 0.06f, 0.12f } : d->kind == DB_CARDBOARD ? (t3_vec3){ 0.4f, 0.25f, 0.35f } : d->kind == DB_BENCH ? (t3_vec3){ 0.5f, 0.08f, 0.3f }
+         : d->kind == DB_TREAD ? (t3_vec3){ 0.26f, 0.04f, 0.9f } : (t3_vec3){ 0.3f, 0.2f, 0.3f };
+      q = t3_quat_from_axis_angle((t3_vec3){ 0.3f, 1, 0.2f }, (d->kind == DB_TREAD ? 0.3f : 1.0f) * d->spin * t * 2.0f + i);
+      lift = sc.y / 2 + 0.01f;
+    }
     sc.x *= fade; sc.y *= fade; sc.z *= fade;
-    t3_quat q = t3_quat_from_axis_angle((t3_vec3){ 0.3f, 1, 0.2f }, d->spin * (m->frame + alpha) * DT * 2.0f + i);
-    t3_mat4_compose(&mat4, (t3_vec3){ d->x, d->y + sc.y / 2 + 0.01f, d->z }, q, sc);
-    t3_instanced_mesh_set_matrix_at(debris_mesh, i, &mat4);
-    t3_instanced_mesh_set_color_at(debris_mesh, i, t3_color_hex(debris_colour(d)));
+    t3_mat4 mat4; t3_mat4_compose(&mat4, (t3_vec3){ d->x, d->y + lift, d->z }, q, sc);
+    t3_instanced_mesh_set_matrix_at(debris_im[k], nk[k], &mat4);
+    t3_instanced_mesh_set_color_at(debris_im[k], nk[k]++, t3_color_hex(debris_colour(d)));
+    float up = d->y - fy;
+    if (up > 0.06f && (k != DM_BOX || d->kind == DB_TREAD)) {
+      float bs = (k == DM_PLATE ? 0.6f : 0.4f) * (1 - up / 4 > 0.3f ? 1 - up / 4 : 0.3f);
+      t3_mat4 bmx; t3_mat4_compose(&bmx, (t3_vec3){ d->x, fy + 0.013f, d->z }, t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2), (t3_vec3){ bs, bs, 1 });
+      t3_instanced_mesh_set_matrix_at(debris_blob, nb++, &bmx);
+    }
     set_vis(pickup_rings[i], d->pickup);
     if (d->pickup) { t3_object_set_position(pickup_rings[i], d->x, 0.02f, d->z); float ps = 0.5f + 0.06f * sinf(world_t * 5 + i); t3_object_set_scale(pickup_rings[i], ps, ps, 1); }
   }
-  debris_mesh->instance_matrix->version++; if (debris_mesh->instance_color) debris_mesh->instance_color->version++;
+  for (int k = 0; k < DM_COUNT; k++) { im_drawn(debris_im[k], nk[k]); debris_im[k]->instance_matrix->version++; if (debris_im[k]->instance_color) debris_im[k]->instance_color->version++; }
+  im_drawn(debris_blob, nb); debris_blob->instance_matrix->version++;
 }
 
 /* -- hazards, every frame ----------------------------------------- */
@@ -3080,6 +3281,7 @@ static void sync_hazards(const match_t *m, float dt) {
         t3_object_set_position(hz->mov, -open * hd->w / 2, drop, 0);
         t3_object_set_position(hz->mov2, open * hd->w / 2, drop, 0);
         hz->tell_m->emissive_intensity = 0.3f + 2.5f * (tell ? pulse : (active ? 1 : 0));
+        if (hz->floor_tell) { set_vis(hz->floor_tell, tell); hz->floor_tell->materials[0]->opacity = 0.45f * pulse; }
         break; }
       case HZ_PULVERIZER: {
         float target = active ? (phase < 0.2f ? -1.1f + phase / 0.2f * 1.25f : (phase < 0.4f ? 0.15f - (phase - 0.2f) / 0.2f * 1.25f : -1.1f)) : -1.1f;
@@ -3087,14 +3289,21 @@ static void sync_hazards(const match_t *m, float dt) {
         hz->swing += (target - hz->swing) * fminf(1, dt * 30);
         t3_object_set_rotation(hz->mov, hz->swing + (tell ? sinf(world_t * 30) * 0.03f : 0), 0, 0);
         hz->tell_m->emissive_intensity = tell ? 1.0f + 2.0f * pulse : 0;
+        /* a char blob grows under the strike square through the tell */
+        if (hz->floor_tell) {
+          float g = tell && hd->tell_s > 0 && hd->period > 0 ? fminf(1, fmaxf(0, (hd->tell_s - (hd->period - phase)) / hd->tell_s)) : (tell ? 1 : 0);
+          set_vis(hz->floor_tell, tell); t3_object_set_scale(hz->floor_tell, 1.2f * g + 0.01f, 1.2f * g + 0.01f, 1); hz->floor_tell->materials[0]->opacity = 0.45f * g;
+        }
         break; }
       case HZ_KILLSAW: {
         float up = active ? fminf(1, phase / 0.25f) : 0;
         if (active && phase > hd->active_s - 0.25f) up = fmaxf(0, (hd->active_s - phase) / 0.25f);
         t3_object_set_position(hz->mov, 0, -0.42f + up * 0.6f, 0);
+        set_vis(hz->mov, up > 0.001f);                       /* under the floor the saws are not drawn */
         hz->spin += (active ? 45.0f : 8.0f) * dt;
         for (int c = 0; c < hz->mov->child_count; c++) t3_object_set_rotation(hz->mov->children[c], hz->spin, 0, 0);
         hz->tell_m->emissive_intensity = tell ? 2.5f * pulse : (active ? 1.0f : 0);
+        if (hz->floor_tell) { set_vis(hz->floor_tell, tell); hz->floor_tell->materials[0]->opacity = 0.35f * pulse; }
         break; }
       case HZ_FLAME: {
         float on = active ? 1 : 0;
@@ -3117,6 +3326,7 @@ static void sync_hazards(const match_t *m, float dt) {
       case HZ_FLOORFLIP: {
         float ang = active ? -0.9f * fminf(1, phase / 0.1f) * fmaxf(0, 1 - fmaxf(0, phase - 0.25f) / 0.4f) : 0;
         t3_object_set_rotation(hz->mov, ang, 0, 0);
+        t3_object_set_position(hz->mov, 0, 0.03f + (tell ? 0.02f * pulse : 0), -hd->d / 2);   /* the panel twitches in the tell */
         hz->tell_m->emissive_intensity = tell ? 2.5f * pulse : 0.3f;
         break; }
       case HZ_DROPZONE: {
@@ -3126,12 +3336,14 @@ static void sync_hazards(const match_t *m, float dt) {
         t3_object_set_scale(sh, 0.9f * grow + 0.01f, 0.9f * grow + 0.01f, 1);
         if (active) { set_vis(hz->mov, 1); float t = fminf(1, phase / 0.35f); t3_object_set_position(hz->mov, 0, 6 * (1 - t) * (1 - t), 0); }
         else set_vis(hz->mov, 0);
+        if (hz->floor_tell) { set_vis(hz->floor_tell, tell); hz->floor_tell->materials[0]->opacity = 0.6f * pulse; }
         break; }
       case HZ_LASER: {
         float x = active ? -a->w / 2 + (phase / fmaxf(0.01f, hd->active_s)) * a->w : -a->w / 2;
         t3_object_set_position(hz->mov, x, 0.3f, 0);
         hz->glow_m->opacity = active ? 0.9f : (tell ? 0.25f * pulse : 0);
         hz->tell_m->emissive_intensity = tell ? 1.0f + 2.0f * pulse : (active ? 3.0f : 0.6f);
+        if (hz->tell2_m) hz->tell2_m->emissive_intensity = tell ? (fmodf(world_t * 4, 1.0f) < 0.5f ? 3.0f : 0.2f) : (active ? 2.0f : 0.1f);
         break; }
       case HZ_WIND: {
         float gust = active ? 1 : (tell ? 0.4f * pulse : 0.1f);
@@ -3289,7 +3501,9 @@ void world_sync(const match_t *m, float alpha) {
   }
   else if (attached && attached != &GARAGE_BAY) sync_hazards(0, dt);
   /* debris is hidden outside a match */
-  if (!in_match && debris_mesh) { t3_mat4 zero; t3_mat4_compose(&zero, (t3_vec3){ 0, -5, 0 }, t3_quat_identity(), (t3_vec3){ 0.001f, 0.001f, 0.001f }); for (int i = 0; i < MAX_DEBRIS; i++) { t3_instanced_mesh_set_matrix_at(debris_mesh, i, &zero); set_vis(pickup_rings[i], 0); } debris_mesh->instance_matrix->version++; }
+  static int debris_hidden;
+  if (in_match) debris_hidden = 0;
+  else if (debris_im[0] && !debris_hidden) { debris_hide_all(); debris_hidden = 1; }
 }
 
 /* -- turntables --------------------------------------------------- */
@@ -3354,6 +3568,8 @@ void world_crowd(int frame, float level) {
 /* every object under the scene, visible or not (the [draw] log's objs=) */
 static int count_objects(const t3_object *o) { int n = 1; for (int i = 0; i < o->child_count; i++) n += count_objects(o->children[i]); return n; }
 int world_object_count(void) { return S ? count_objects(&S->base) - 1 : 0; }
+
+
 
 /* -- init --------------------------------------------------------- */
 void world_init(void) {
@@ -3432,9 +3648,11 @@ static void warm_show(int on) {
       for (int p = 0; p < PN_COUNT; p++) if (b->hang[p]) set_vis(b->hang[p], 0);
     }
   }
-  if (debris_mesh) {
-    t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ 0, on ? 0.3f : -5.0f, 0.6f }, t3_quat_identity(), on ? (t3_vec3){ 0.3f, 0.3f, 0.14f } : (t3_vec3){ 0.001f, 0.001f, 0.001f });
-    t3_instanced_mesh_set_matrix_at(debris_mesh, 0, &m); debris_mesh->instance_matrix->version++;
+  if (debris_im[0]) {
+    if (on) {
+      for (int k = 0; k < DM_COUNT; k++) { t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ -1.0f + k, 0.3f, 0.6f }, t3_quat_identity(), (t3_vec3){ 0.3f, 0.3f, 0.3f }); t3_instanced_mesh_set_matrix_at(debris_im[k], 0, &m); im_drawn(debris_im[k], 1); debris_im[k]->instance_matrix->version++; }
+      t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ 0, 0.02f, 0.6f }, t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2), (t3_vec3){ 0.5f, 0.5f, 1 }); t3_instanced_mesh_set_matrix_at(debris_blob, 0, &m); im_drawn(debris_blob, 1); debris_blob->instance_matrix->version++;
+    } else debris_hide_all();
     set_vis(pickup_rings[0], on);
   }
   if (attached_idx >= 0 && arenas[attached_idx].hill) set_vis(arenas[attached_idx].hill, on);

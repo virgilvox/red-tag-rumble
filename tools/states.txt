@@ -33,3 +33,6 @@ standard+vcol+l1201
 standard+vcol+instbig+l1201
 standard+map+trans+l1201
 basic+map+trans+ds
+standard+instbig+icol+l1201
+basic+map+trans+instbig
+basic+map+trans+rep+ds
