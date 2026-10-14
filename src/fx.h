@@ -21,8 +21,11 @@ void fx_event(const event_t *e, const match_t *m);
 void fx_update(float dt, int frozen);
 /* face flash quad i toward viewport i's camera before that viewport renders */
 void fx_face(int viewport);
-/* smoke and fire emitters follow HP: 50 grey, 30 black plus fire (world_sync calls it per alive bot) */
-void fx_bot_damage_state(int slot, float hp, float x, float y, float z);
+/* smoke and fire emitters follow HP: 50 grey, 30 black plus fire; a BURNING bot shows the fire
+ * whatever its HP (world_sync calls it per alive bot) */
+void fx_bot_damage_state(int slot, float hp, int burning, float x, float y, float z);
+/* the boot compile: show one of every particle so every fx program links before play; 0 hides them */
+void fx_warm(int on);
 /* the spark colour for an armour and red tag state (3.6, 5.3) */
 uint32_t fx_spark_colour(int armour, int red_tag, uint32_t *rng);
 /* the viewport white flash alpha this frame (huge and clash bands), 0 when none */
