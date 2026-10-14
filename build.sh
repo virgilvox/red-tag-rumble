@@ -48,8 +48,9 @@ if [ "${1:-}" = balance ]; then
 fi
 
 if [ "${1:-}" = music ]; then
-  # the songs to assets/music/*.wav (16 bit mono, MUSIC_RATE Hz, default 24000)
-  # and every SFX to build/sfx_preview.wav; the tool prints peak and RMS per file
+  # the songs to assets/music/*.wav (16 bit mono, MUSIC_RATE Hz, default 22050), the three
+  # 20 s song previews under the hits to build/preview-*.wav and every SFX to
+  # build/sfx_preview.wav; the tool prints peak, true peak, RMS and balance per file
   mkdir -p "$OUT" "$ROOT/assets/music"
   (cd "$ROOT" && clang++ -std=c++17 -O2 -Wall -fno-exceptions -fno-rtti -ffp-contract=off -DMUSIC_BAKE -DBELLOWS_FAST_MATH=1 \
     -I third_party/bellows -I src tools/bake_music.cpp src/audio_band.cpp -o "$OUT/bake_music")

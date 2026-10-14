@@ -7,18 +7,27 @@
  *      sparks and saw contact, a buzzer for horns and klaxons, FM bells for
  *      the menus and a gong for the KO, four continuous spinner whines, and a
  *      crowd bed of filtered pink noise that swells on big hits. Everything
- *      two players can fire at once is pooled. A slap delay, no plate.
+ *      two players can fire at once is pooled. A slap delay, no plate. Every
+ *      stinger is tuned to the songs' palette (E minor: E G B D, the impacts
+ *      on E1) and its follow-up events sit on the fight's sixteenth grid, so
+ *      a hit lands in key and in time with the music under it.
  *
  *   2. The songs, compiled only with MUSIC_BAKE (tools/bake_music.cpp renders
  *      them to assets/music/NAME.wav) or MUSIC_LIVE (composing on the Mac, the
- *      cart plays them live). Written the DO-OCRACY way: a form of sections,
- *      a chord per bar, a layer mask per section and a written lead line; a
- *      16 step conductor plays drums, acid, pad, arpeggio, stabs and the lead
- *      from those. All three songs are in E minor so DiatonicBelow holds.
+ *      cart plays them live). A form of sections, a chord root per bar, a
+ *      layer mask per section, a drum pattern and a bass pattern per section;
+ *      a 16 step conductor plays the kit, the metal, the distorted bass, the
+ *      stabs, the pad, the riser riff and the sirens from those. Everything
+ *      is in E, Phrygian flavoured (the F and the Bb in the bass) so it stays
+ *      dark; the stingers share the pitch set.
  *
- *        1 GARAGE    "Shelf Life"   100 bpm   pad, slow arpeggio, sparse hat, sub, a lead on B
- *        2 ARENA     "Red Tag"      150 bpm   intro, build, drop, drop with a counter line
- *        3 OVERTIME  "Doors Lock"   170 bpm   the drop with a roll every section
+ *        1 GARAGE    "Shelf Life"   100 bpm   a low industrial groove: heavy kick, anvil and clinks,
+ *                                             distorted sub bass, sparse stabs, a drone on the B half
+ *        2 ARENA     "Red Tag"      156 bpm   a half time stomp verse and a breakbeat chorus over one
+ *                                             distorted bass riff, metal on the off beats, a riser riff
+ *                                             stem that the game fades in for the last 20 s or low HP
+ *        3 OVERTIME  "Doors Lock"   172 bpm   a pulsing eighth note bass whose filter climbs the whole
+ *                                             loop, a gated noise riser, two tritone sirens, a roll
  *
  * Compiled with em++ -std=c++17 -fno-exceptions -fno-rtti -DBELLOWS_FAST_MATH=1
  * for the cart and clang++ -DMUSIC_BAKE for the bake. Nothing here touches
@@ -40,7 +49,6 @@
 
 #if defined(MUSIC_BAKE) || defined(MUSIC_LIVE)
 #define RTR_SONGS 1
-#include "bellows/engines/pluck.h"
 #include "bellows/fx/modfx.h"
 #else
 #define RTR_SONGS 0
@@ -55,65 +63,127 @@ namespace {
 constexpr int kBlock = BELLOWS_BLOCK_SIZE;
 float Mtof(float n) { return 440.0f * powf(2.0f, (n - 69.0f) / 12.0f); }
 
-/* -- the songs (data) ----------------------------------------------
- * Notes are NAME+OCTAVE:LENGTH in sixteenths, '-' is a rest, '|' ends a bar. */
+/* -- the songs (data) ---------------------------------------------- */
 
 enum Layer : uint16_t {
-  L_ACID = 1,     /* the 303 line */
-  L_KICK = 2,     /* four on the floor */
-  L_BREAK = 4,    /* breakbeat kick and snare */
+  L_BASS = 1,      /* the distorted bass riff */
+  L_KICK = 2,
+  L_SNARE = 4,
   L_HAT = 8,
-  L_PERC = 16,    /* claps on the backbeat */
-  L_PAD = 32,
-  L_HYPNO = 64,   /* the arpeggio */
-  L_LEAD = 128,
-  L_COUNTER = 256,
-  L_STAB = 512,   /* rave chord stabs */
-  L_ROLL = 1024,  /* snare roll into the next section */
-  L_SUB = 2048,   /* a soft held sub instead of the acid line */
+  L_METAL = 16,    /* clinks and the anvil */
+  L_STAB = 32,     /* square stabs through a saturator */
+  L_PAD = 64,      /* a low detuned drone, one chord per bar */
+  L_LEAD = 128,    /* the riser riff */
+  L_SIREN = 256,   /* two sweeping saws a tritone apart */
+  L_RISER = 512,   /* gated pink noise through a climbing bandpass */
+  L_ROLL = 1024,   /* snare roll over the back half of the last bar */
 };
 
 #ifdef MUSIC_BAKE
-/* the stems: drums, lead, and everything else */
-constexpr uint16_t MASK_DRUMS = L_KICK | L_BREAK | L_ROLL | L_HAT | L_PERC;
-constexpr uint16_t MASK_LEAD = L_LEAD | L_COUNTER;
+/* the stems: the kit, the metal and the stabs are the drums stem (slow motion
+ * keeps it alone); the riff is the lead stem; everything else is the base */
+constexpr uint16_t MASK_DRUMS = L_KICK | L_SNARE | L_HAT | L_METAL | L_STAB | L_ROLL;
+constexpr uint16_t MASK_LEAD = L_LEAD;
 constexpr uint16_t MASK_BASE = static_cast<uint16_t>(~(MASK_DRUMS | MASK_LEAD));
 #endif
 
-const char* const LEAD_SHELF =
-  "B4:8 -:8 | G4:4 A4:4 B4:8 | E5:8 -:8 | D5:4 B4:4 G4:8 | "
-  "B4:8 -:8 | G4:4 A4:4 B4:8 | E5:4 D5:4 B4:4 A4:4 | G4:16 |";
-const char* const LEAD_RED_TAG =
-  "E5:2 -:2 E5:2 G5:2 -:2 A5:2 -:2 G5:2 | E5:2 -:2 D5:2 -:2 B4:4 D5:4 | "
-  "E5:2 -:2 E5:2 G5:2 -:2 B5:2 -:2 C6:2 | B5:4 A5:4 G5:4 F#5:4 | "
-  "E5:2 -:2 E5:2 G5:2 -:2 A5:2 -:2 G5:2 | E5:2 -:2 D5:2 -:2 B4:4 D5:4 | "
-  "G5:2 -:2 A5:2 B5:2 -:2 D6:2 -:2 E6:2 | D6:4 B5:4 G5:4 E5:4 |";
-
-struct SectionDef { const char* tag; int bars; const char* chords; uint16_t layers; const char* lead; };
-
-constexpr uint16_t DROP = L_KICK | L_BREAK | L_HAT | L_PERC | L_ACID | L_STAB;
-const SectionDef GARAGE[] = {
-  {"A", 8, "Em Em C G Em Em D Bm", L_PAD | L_HYPNO | L_HAT | L_SUB, nullptr},
-  {"B", 8, "Em Em C G Am Am D Em", L_PAD | L_HYPNO | L_HAT | L_SUB | L_LEAD, LEAD_SHELF},
+/* drum patterns: velocity per sixteenth, 0 is none. k kick, s snare, h closed
+ * hat, o open hat, m metal clink, a anvil */
+struct DrumPat { float k[16], s[16], h[16], o[16], m[16], a[16]; };
+enum { P_GARAGE, P_STOMP, P_BREAK, P_RUSH, P_COUNT };
+const DrumPat DRUMS[P_COUNT] = {
+  /* GARAGE: the kick on one, the and of two and three; snare on two and four
+   * doubled by the anvil; off beat hats; clinks scattered */
+  {{1, 0, 0, 0, 0, 0, .8f, 0, .9f, 0, 0, 0, 0, 0, 0, 0},
+   {0, 0, 0, 0, .9f, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0},
+   {0, 0, .35f, 0, 0, 0, .35f, 0, 0, 0, .35f, 0, 0, 0, .35f, 0},
+   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+   {0, 0, .3f, 0, 0, 0, 0, .4f, 0, 0, .5f, 0, 0, 0, 0, .3f},
+   {0, 0, 0, 0, .6f, 0, 0, 0, 0, 0, 0, 0, .8f, 0, 0, 0}},
+  /* STOMP: half time, kick on one and the and of three, snare on three with
+   * the anvil, clinks on every off beat */
+  {{1, 0, 0, .5f, 0, 0, 0, 0, 0, 0, .9f, 0, 0, 0, 0, 0},
+   {0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, .3f, 0},
+   {.45f, 0, .3f, 0, 0, 0, .3f, 0, .45f, 0, .3f, 0, 0, 0, .3f, 0},
+   {0, 0, 0, 0, .5f, 0, 0, 0, 0, 0, 0, 0, .5f, 0, 0, 0},
+   {0, 0, .5f, 0, 0, 0, .35f, 0, 0, 0, .5f, 0, 0, 0, .35f, 0},
+   {0, 0, 0, 0, 0, 0, 0, 0, .8f, 0, 0, 0, 0, 0, 0, 0}},
+  /* BREAK: the breakbeat, sixteenth hats with the open hat on the off beats,
+   * metal on the and of two and four, the anvil under the backbeat */
+  {{1, 0, .7f, 0, 0, 0, 0, 0, 0, 0, 1, .6f, 0, 0, 0, 0},
+   {0, 0, 0, 0, 1, 0, 0, .3f, 0, .25f, 0, 0, 1, 0, 0, .4f},
+   {.4f, .28f, 0, .28f, .4f, .28f, 0, .28f, .4f, .28f, 0, .28f, .4f, .28f, 0, .28f},
+   {0, 0, .45f, 0, 0, 0, .45f, 0, 0, 0, .45f, 0, 0, 0, .45f, 0},
+   {0, 0, 0, 0, 0, 0, .6f, 0, 0, 0, 0, 0, 0, 0, .6f, 0},
+   {0, 0, 0, 0, .6f, 0, 0, 0, 0, 0, 0, 0, .6f, 0, 0, 0}},
+  /* RUSH: four on the floor with a pushed kick, backbeat snare and ghosts,
+   * sixteenth hats, open on the off beats */
+  {{1, 0, 0, 0, 1, 0, .6f, 0, 1, 0, 0, 0, 1, 0, .6f, 0},
+   {0, 0, 0, 0, .9f, 0, 0, .3f, 0, 0, 0, 0, 1, 0, 0, .35f},
+   {.42f, .3f, 0, .3f, .42f, .3f, 0, .3f, .42f, .3f, 0, .3f, .42f, .3f, 0, .3f},
+   {0, 0, .45f, 0, 0, 0, .45f, 0, 0, 0, .45f, 0, 0, 0, .45f, 0},
+   {0, 0, .5f, 0, 0, 0, 0, 0, 0, 0, .5f, 0, 0, 0, 0, 0},
+   {0, 0, 0, 0, .5f, 0, 0, 0, 0, 0, 0, 0, .7f, 0, 0, 0}},
 };
+
+/* bass patterns: semitones over the bar's root (-1 rest) and the gate in
+ * sixteenths */
+struct BassPat { int8_t n[16]; uint8_t g[16]; };
+enum { B_GARAGE, B_FIGHT, B_PULSE, B_COUNT };
+const BassPat BASSES[B_COUNT] = {
+  /* GARAGE: root, root, root, the minor third, the flat two, root */
+  {{0, -1, -1, 0, -1, -1, 0, -1, 3, -1, 1, -1, 0, -1, -1, -1},
+   {3, 0, 0, 1, 0, 0, 2, 0, 1, 0, 2, 0, 3, 0, 0, 0}},
+  /* FIGHT: a stomping sixteenth riff with the tritone on the and of three
+   * and the flat two pushing into the next bar */
+  {{0, -1, 0, 0, -1, -1, 0, 0, 3, -1, 6, -1, 0, -1, 1, 1},
+   {2, 0, 1, 1, 0, 0, 1, 1, 1, 0, 2, 0, 2, 0, 1, 1}},
+  /* PULSE: every eighth, a push on the last sixteenth */
+  {{0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, 0},
+   {1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1}},
+};
+
+struct SectionDef { const char* tag; int bars; const char* chords; uint16_t layers; int drums, bass; };
+
+constexpr uint16_t KIT = L_KICK | L_SNARE | L_HAT | L_METAL;
+const SectionDef GARAGE[] = {
+  {"A", 8, "Em Em Em Em Em Em F F", L_BASS | KIT | L_STAB, P_GARAGE, B_GARAGE},
+  {"B", 8, "Em Em Em Em G G F F", L_BASS | KIT | L_STAB | L_PAD, P_GARAGE, B_GARAGE},
+};
+/* the two ARENA sections share chords, bass and layers outside the kit so the
+ * one baked base stem is true under both */
 const SectionDef ARENA[] = {
-  {"INTRO", 8, "Em Em Em Em C C D D", L_KICK | L_HAT | L_ACID, nullptr},
-  {"BUILD", 8, "Em Em Em Em C C D D", DROP | L_ROLL, nullptr},
-  {"DROP", 8, "Em Em Em Em C C D D", DROP | L_LEAD, LEAD_RED_TAG},
-  {"DROP2", 8, "Em Em Em Em C C D D", DROP | L_LEAD | L_COUNTER, LEAD_RED_TAG},
+  {"STOMP", 8, "Em Em Em Em Em Em G F", L_BASS | KIT | L_LEAD, P_STOMP, B_FIGHT},
+  {"BREAK", 8, "Em Em Em Em Em Em G F", L_BASS | KIT | L_STAB | L_LEAD | L_ROLL, P_BREAK, B_FIGHT},
 };
 const SectionDef OVERTIME[] = {
-  {"RUSH", 8, "Em Em C D Em Em C D", DROP | L_LEAD | L_STAB | L_ROLL, LEAD_RED_TAG},
+  {"RUSH", 8, "Em Em F F Em Em G F", L_BASS | KIT | L_STAB | L_SIREN | L_RISER | L_ROLL, P_RUSH, B_PULSE},
 };
 constexpr int kGarageN = sizeof GARAGE / sizeof GARAGE[0];
 constexpr int kArenaN = sizeof ARENA / sizeof ARENA[0];
 constexpr int kOvertimeN = sizeof OVERTIME / sizeof OVERTIME[0];
-constexpr int kLoop[4] = {0, 0, 1, 0};
-constexpr float kBpm[4] = {0.0f, 100.0f, 150.0f, 170.0f};
+constexpr int kLoop[4] = {0, 0, 0, 0};
+constexpr float kBpm[4] = {0.0f, 100.0f, 156.0f, 172.0f};
 /* the trims tools/bake_music.cpp measured (its "gains" line: the full mix of
- * each song at -1 dBFS, the garage 6 dB under), so the live songs sit where
- * the baked stems do; re-copy after any patch change */
-constexpr float kSongTrim[4] = {0.0f, 0.403f, 0.365f, 0.308f};
+ * each song at the ceiling) times the mode trims audio_pcm.c applies to the
+ * stems, so the live songs sit where the baked stems do; re-copy after any
+ * patch change */
+constexpr float kSongTrim[4] = {0.0f, 0.440f, 0.277f, 0.355f};
+
+/* the fight's grid for the stingers: a beat, an eighth, a sixteenth in ms */
+constexpr int kBeatMs = static_cast<int>(60000.0f / kBpm[2] + 0.5f);
+constexpr int kEighthMs = kBeatMs / 2;
+constexpr int kSixteenthMs = kBeatMs / 4;
+
+/* the riser riff: a two bar motif in semitones over E4, transposed up through
+ * the chord tones every two bars (E, G, B, E) while its filter opens */
+struct Note { int16_t step; int8_t semis; uint8_t dur; };
+const Note RIFF[] = {
+  {0, 0, 2}, {3, 0, 1}, {4, 3, 2}, {6, 5, 2}, {8, 7, 2}, {10, 10, 2}, {12, 7, 2}, {14, 5, 1}, {15, 3, 1},
+  {16, 0, 2}, {19, 0, 1}, {20, 3, 2}, {22, 7, 2}, {24, 12, 4}, {28, 10, 2}, {30, 7, 2},
+};
+constexpr int kRiffN = sizeof RIFF / sizeof RIFF[0];
+constexpr int RIFF_T[4] = {0, 3, 7, 12};
 
 const SectionDef* FormOf(int mode, int* count) {
   if (mode == 3) { *count = kOvertimeN; return OVERTIME; }
@@ -127,13 +197,10 @@ int StepSamples(int mode, float sr) {
 }
 
 #if RTR_SONGS
-struct Note { int16_t step; int8_t midi; uint8_t dur; };   /* step from the section start; midi 0 = rest */
 struct Section {
   const SectionDef* def;
   int roots[8];
   bool minor[8];
-  Note lead[96];
-  int nlead;
 };
 
 int PitchClass(char c) {
@@ -152,49 +219,17 @@ void ParseSection(const SectionDef* d, Section* s) {
     while (*c && *c != ' ') c++;
     s->roots[b] = pc;
   }
-  s->nlead = 0;
-  if (!d->lead) return;
-  const char* p = d->lead;
-  int step = 0;
-  while (*p && s->nlead < 96) {
-    while (*p == ' ') p++;
-    if (*p == '|') { step = ((step + 15) / 16) * 16; p++; continue; }
-    if (!*p) break;
-    int midi = 0;
-    if (*p == '-') { p++; }
-    else {
-      int pc = PitchClass(*p++);
-      if (*p == '#') { pc++; p++; } else if (*p == 'b') { pc--; p++; }
-      int oct = *p++ - '0';
-      midi = 12 * (oct + 1) + pc;
-    }
-    int dur = 4;
-    if (*p == ':') { p++; dur = 0; while (*p >= '0' && *p <= '9') dur = dur * 10 + (*p++ - '0'); }
-    s->lead[s->nlead++] = Note{static_cast<int16_t>(step), static_cast<int8_t>(midi), static_cast<uint8_t>(dur)};
-    step += dur;
-  }
 }
-
-/* E minor: the counter line sits a diatonic third below the lead */
-int DiatonicBelow(int midi) {
-  static const int kScale[7] = {4, 6, 7, 9, 11, 0, 2};   /* E F# G A B C D */
-  int pc = midi % 12;
-  for (int i = 0; i < 7; i++) if (kScale[i] == pc) {
-    int down = kScale[(i + 5) % 7];
-    int d = pc - down;
-    if (d <= 0) d += 12;
-    return midi - d;
-  }
-  return midi - 3;
-}
-
-/* the acid line: semitones over the bar's root, accents, -1 rests */
-const int8_t ACID_N[16] = {0, -1, 12, 0, 0, 1, -1, 12, 0, -1, 10, 0, 12, 0, 7, 3};
-const uint8_t ACID_A[16] = {1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0};
-/* the breakbeat: kick, snare and ghost notes (velocity, 0 = none) */
-const float BRK_K[16] = {1, 0, .7f, 0, 0, 0, 0, 0, 0, 0, 1, .6f, 0, 0, 0, 0};
-const float BRK_S[16] = {0, 0, 0, 0, 1, 0, 0, .3f, 0, .25f, 0, 0, 1, 0, 0, .4f};
 #endif
+
+/* the stinger palette: E minor chord tones (E G B D) above a base E, with a
+ * hair of detune from the same draw so repeats never read as one sample */
+float Pal(int base_e, float r) {
+  static const int kTone[4] = {0, 3, 7, 10};
+  int i = static_cast<int>(r * 4.0f) & 3;
+  return static_cast<float>(base_e + kTone[i]) + (r * 4.0f - static_cast<float>(i)) * 0.4f - 0.2f;
+}
+constexpr float kImpactHz = 41.2f;   /* E1 */
 
 /* -- the band ---------------------------------------------------- */
 
@@ -287,41 +322,67 @@ class Band {
     for (int i = 0; i < kArenaN; i++) ParseSection(&ARENA[i], &arena_[i]);
     for (int i = 0; i < kOvertimeN; i++) ParseSection(&OVERTIME[i], &overtime_[i]);
     rng_snare_.Init("rtr::kit::snare");
-    rng_acid_.Init("rtr::acid");
-    rng_str_.Init("rtr::hypno");
-    rng_ctr_.Init("rtr::counter");
+    rng_bass_.Init("rtr::bass");
+    rng_metal_.Init("rtr::metal");
+    rng_stab_.Init("rtr::stab");
+    rng_pad_.Init("rtr::pad");
+    rng_lead_.Init("rtr::lead");
+    rng_siren_.Init("rtr::siren");
+    rng_riser_.Init("rtr::riser");
     rng_jit_.Init("rtr::jitter");
 
-    bellows::Hat::Params oh; oh.decay = 0.22f; oh.tone = 0.95f;
-    ohat_.Init(sr, oh);
-    bellows::Fm::Params pad;
-    pad.ops = 2; pad.algorithm = 1; pad.feedback = 0.05f; pad.brightness = 0.25f;
-    pad.attack = 0.6f; pad.decay = 0.8f; pad.sustain = 0.85f; pad.release = 0.9f;
-    pad.m_attack = 0.6f; pad.m_decay = 1.0f; pad.m_sustain = 0.4f; pad.m_release = 0.8f;
-    pad.ratio[0] = 1.0f; pad.ratio[1] = 2.0f; pad.level[1] = 0.35f;
-    for (int i = 0; i < 6; ++i) pad_.at(i).Init(sr, pad);
-    bellows::Fm::Params stb;
-    stb.ops = 2; stb.algorithm = 1; stb.feedback = 0.45f; stb.brightness = 0.7f;
-    stb.attack = 0.002f; stb.decay = 0.18f; stb.sustain = 0.0f; stb.release = 0.12f;
-    stb.ratio[0] = 1.0f; stb.ratio[1] = 1.0f; stb.level[1] = 0.8f;
-    for (int i = 0; i < 4; ++i) stab_.at(i).Init(sr, stb);
-    String::Params hy; hy.damp = 0.18f; hy.pick_pos = 0.2f; hy.decay = 0.5f; hy.level = 0.9f;
-    for (int i = 0; i < 4; ++i) hypno_.at(i).Init(sr, &rng_str_, hy);
-    bellows::Va::Params ctr; ctr.shape = 3.0f; ctr.cutoff = 1400.0f; ctr.detune = 4.0f; ctr.attack = 0.01f; ctr.sustain = 0.6f; ctr.release = 0.15f;
-    counter_.Init(sr, &rng_ctr_, ctr);
+    kick_.Init(sr);
+    snare_.Init(sr, &rng_snare_);
+    hat_.Init(sr);
+    ohat_.Init(sr);
+    bellows::Modal::Params clink;
+    clink.material = 0.0f; clink.decay = 0.35f; clink.strike_hardness = 0.95f; clink.brightness = 0.75f; clink.level = 0.6f;
+    for (int i = 0; i < 4; ++i) metal_.at(i).Init(sr, &rng_metal_, clink);
+    bellows::Modal::Params anvil;
+    anvil.material = 0.0f; anvil.decay = 0.9f; anvil.strike_hardness = 0.9f; anvil.brightness = 0.45f; anvil.level = 0.6f;
+    anvil_.Init(sr, &rng_metal_, anvil);
+    bass_.Init(sr, &rng_bass_);
+    bellows::Va::Params stb;
+    stb.shape = 1.0f; stb.detune = 18.0f; stb.cutoff = 300.0f; stb.resonance = 0.3f; stb.filter_type = 1.0f; stb.env_amount = 2.8f;
+    stb.attack = 0.002f; stb.decay = 0.22f; stb.sustain = 0.0f; stb.release = 0.08f;
+    stb.f_attack = 0.001f; stb.f_decay = 0.11f; stb.f_sustain = 0.0f; stb.f_release = 0.08f;
+    for (int i = 0; i < 4; ++i) stab_.at(i).Init(sr, &rng_stab_, stb);
+    bellows::Va::Params pad;
+    pad.shape = 0.0f; pad.detune = 22.0f; pad.cutoff = 420.0f; pad.resonance = 0.15f; pad.filter_type = 1.0f; pad.env_amount = 0.0f;
+    pad.attack = 0.8f; pad.decay = 1.0f; pad.sustain = 0.8f; pad.release = 1.2f; pad.vel_level = 0.0f;
+    for (int i = 0; i < 3; ++i) pad_.at(i).Init(sr, &rng_pad_, pad);
+    lead_.Init(sr, &rng_lead_);
+    bellows::Va::Params sir;
+    sir.shape = 0.0f; sir.detune = 0.0f; sir.cutoff = 2200.0f; sir.resonance = 0.2f; sir.filter_type = 1.0f;
+    sir.attack = 0.3f; sir.decay = 0.1f; sir.sustain = 1.0f; sir.release = 0.3f; sir.vel_level = 0.0f;
+    for (int i = 0; i < 2; ++i) siren_[i].Init(sr, &rng_siren_, sir);
+    riser_.Init(sr, bellows::NoiseColor::kPink, &rng_riser_);
+    riser_bp_.Init(sr); riser_bp_.SetMode(bellows::SvfMode::kBp); riser_bp_.Set(300.0f, 2.0f);
     bellows::StereoDelay<500>::Params d;
-    d.time_l = 0.33f; d.time_r = 0.22f; d.feedback = 0.38f; d.cross_feedback = 0.15f; d.damping = 3200.0f; d.mix = 1.0f;
+    d.time_l = 0.29f; d.time_r = 0.19f; d.feedback = 0.36f; d.cross_feedback = 0.15f; d.damping = 3000.0f; d.mix = 1.0f;
     echo_.Init(sr, d);
-    bellows::Chorus<>::Params ch; ch.rate = 1.2f; ch.depth = 0.45f; ch.mix = 0.35f;
+    bellows::Chorus<>::Params ch; ch.rate = 0.9f; ch.depth = 0.4f; ch.mix = 0.3f;
     chorus_.Init(sr, ch);
-    bellows::Saturator<1>::Params sat; sat.drive = 2.2f; sat.tone = 0.1f;
-    acid_sat_.Init(sr, sat);
-    bellows::Saturator<1>::Params ds; ds.drive = 1.6f; ds.tone = 0.0f;
+    bellows::Saturator<2>::Params bs; bs.drive = 6.0f; bs.tone = 0.4f;
+    bass_sat_.Init(sr, bs);
+    bellows::Saturator<1>::Params ss; ss.drive = 3.0f; ss.tone = 0.1f;
+    stab_sat_.Init(sr, ss);
+    bellows::Saturator<1>::Params ls; ls.drive = 2.5f; ls.tone = 0.15f;
+    lead_sat_.Init(sr, ls);
+    bellows::Saturator<1>::Params ds; ds.drive = 1.8f; ds.tone = 0.0f;
     drum_sat_.Init(sr, ds);
-    SetGenre(G_GARAGE);
+    /* a fresh band after a bake render: the delay lines empty, every held
+     * voice let go (a Va keeps its envelope stage across Init, so a siren
+     * left sounding would leak into the next stem) */
+    echo_.Reset();
+    siren_[0].NoteOff(); siren_[1].NoteOff(); bass_.NoteOff(); lead_.NoteOff();
+    for (int i = 0; i < 3; ++i) pad_.at(i).NoteOff();
     mode_ = 0; pending_mode_ = -1; mask_ = 0xffff; hold_ = false;
     g_base_ = g_base_t_ = 1.0f; g_drums_ = g_drums_t_ = 1.0f; g_lead_ = g_lead_t_ = 1.0f;
+    siren_on_ = false; siren_rel_ = 0; npad_ = 0; cur_lay_ = 0; riser_pulse_ = 0.0f; siren_ph_[0] = 0.0f; siren_ph_[1] = 0.0f;
+    bass_gate_ = 0; lead_gate_ = 0;
 #endif
+    slap_.Reset();
     nev_ = 0; frame_ = 0; buzz_gen_ = 0; duck_ = 1.0f;
     ready_ = true;
   }
@@ -357,52 +418,61 @@ class Band {
   }
   void Buzz(int at_ms, float midi, float vel, int len_ms) { Push(at_ms, I_BUZZ, Mtof(midi), vel); Push(at_ms + len_ms, I_BUZZ_OFF, 0, 0); }
 
-  /* the twelve patches of 11.3; var is SFXV_* */
+  /* the twelve patches of 11.3 on the songs' palette; var is SFXV_*. Pitches
+   * are E minor chord tones, impacts sit on E1, and every follow-up event is
+   * a sixteenth, an eighth or a beat of the fight tempo away */
   void Sfx(int s, int var) {
     const float r = rng_bells_.Next();
     const float low = var == SFXV_LOW ? 1.0f : 0.0f;
     switch (s) {
-      case SFX_MENU_MOVE: Push(0, I_HAT, 900, 0.25f); Push(0, I_BELL, Mtof(84), 0.3f); break;
+      case SFX_MENU_MOVE: Push(0, I_HAT, 900, 0.25f); Push(0, I_BELL, Mtof(88), 0.3f); break;
       case SFX_MENU_OK:
-        if (low) { Push(0, I_BELL, Mtof(67), 0.4f); Push(50, I_BELL, Mtof(72), 0.4f); }
-        else { Push(0, I_BELL, Mtof(72), 0.6f); Push(50, I_BELL, Mtof(79), 0.6f); }
+        if (low) { Push(0, I_BELL, Mtof(71), 0.4f); Push(kSixteenthMs / 2, I_BELL, Mtof(76), 0.4f); }
+        else { Push(0, I_BELL, Mtof(76), 0.6f); Push(kSixteenthMs / 2, I_BELL, Mtof(83), 0.6f); }
         break;
-      case SFX_MENU_BACK: Push(0, I_BELL, Mtof(67), 0.5f); Push(60, I_BELL, Mtof(62), 0.5f); break;
-      case SFX_LOCK: Push(0, I_IMPACT, 60, 0.6f); Push(0, I_BELL, Mtof(76), 0.7f); Push(40, I_BELL, Mtof(83), 0.7f); break;
-      case SFX_COUNT: Push(0, I_BELL, Mtof(69), 0.8f); break;
+      case SFX_MENU_BACK: Push(0, I_BELL, Mtof(71), 0.5f); Push(kSixteenthMs / 2, I_BELL, Mtof(64), 0.5f); break;
+      case SFX_LOCK: Push(0, I_IMPACT, kImpactHz, 0.6f); Push(0, I_BELL, Mtof(76), 0.7f); Push(kSixteenthMs / 2, I_BELL, Mtof(83), 0.7f); break;
+      case SFX_COUNT:
+        /* the countdown and the T minus 10 ticks on E5; the short variant
+         * is the count-out tick */
+        if (var == SFXV_SHORT) { Push(0, I_BELL, Mtof(76), 0.5f); Push(0, I_HAT, 1100, 0.2f); }
+        else Push(0, I_BELL, Mtof(76), 0.8f);
+        break;
       case SFX_HORN:
-        if (low) { Buzz(0, 38, 1.0f, 400); }                       /* OPS inbound */
-        else { Push(0, I_BUZZ, Mtof(45), 1.0f); Push(30, I_BUZZ, Mtof(52), 1.0f); Push(600, I_BUZZ_OFF, 0, 0); }
+        if (low) { Buzz(0, 40, 1.0f, kBeatMs); }                   /* OPS inbound: E2 for a beat */
+        else { Push(0, I_BUZZ, Mtof(47), 1.0f); Push(30, I_BUZZ, Mtof(52), 1.0f); Push(kBeatMs * 3 / 2, I_BUZZ_OFF, 0, 0); }   /* B2 into E3, a beat and a half */
         break;
       case SFX_HIT_LIGHT:
-        Push(0, I_SPARK, Mtof(60 + r * 12), 0.5f);
-        if (!low) Push(0, I_CLANG, Mtof(70 + rng_bells_.Next() * 6), 0.4f);   /* the low variant is a landing or a wall: no metal */
+        Push(0, I_SPARK, Mtof(Pal(64, r)), 0.6f);
+        if (!low) Push(0, I_CLANG, Mtof(Pal(76, rng_bells_.Next())), 0.5f);   /* the low variant is a landing or a wall: no metal */
         break;
       case SFX_HIT_HEAVY:
-        Push(0, I_IMPACT, 42, 1.0f); Push(0, I_CLANG, Mtof(55 + r * 6), 0.9f);
-        Push(0, I_SPARK, Mtof(58 + rng_bells_.Next() * 10), 0.8f); Push(20, I_CLANG, Mtof(62), 0.5f);
+        Push(0, I_IMPACT, kImpactHz, 1.0f); Push(0, I_CLANG, Mtof(Pal(52, r)), 0.9f);
+        Push(0, I_SPARK, Mtof(Pal(64, rng_bells_.Next())), 0.8f); Push(kSixteenthMs / 4, I_CLANG, Mtof(64), 0.5f);
         break;
       case SFX_CLASH: {
         const float g = low ? 0.6f : 1.0f;                           /* 0.6 for the spinner wall hit */
-        Push(0, I_IMPACT, 38, 1.0f * g);
-        Push(0, I_CLANG, Mtof(50 + r * 6), 1.0f * g); Push(30, I_CLANG, Mtof(57 + rng_bells_.Next() * 6), 1.0f * g);
-        Push(0, I_SPARK, Mtof(62 + rng_bells_.Next() * 8), 1.0f * g); Push(40, I_SPARK, Mtof(66 + rng_bells_.Next() * 8), 1.0f * g);
-        Push(90, I_SPARK, Mtof(70 + rng_bells_.Next() * 8), 1.0f * g);
+        Push(0, I_IMPACT, kImpactHz, 1.0f * g);
+        Push(0, I_CLANG, Mtof(Pal(40, r)), 1.0f * g); Push(30, I_CLANG, Mtof(Pal(52, rng_bells_.Next())), 1.0f * g);
+        Push(0, I_SPARK, Mtof(Pal(64, rng_bells_.Next())), 1.0f * g); Push(kSixteenthMs / 2, I_SPARK, Mtof(Pal(64, rng_bells_.Next())), 1.0f * g);
+        Push(kSixteenthMs, I_SPARK, Mtof(Pal(76, rng_bells_.Next())), 1.0f * g);
         break;
       }
       case SFX_LAUNCH:
-        Push(0, I_SPARK, Mtof(48), 0.7f); Push(45, I_SPARK, Mtof(56), 0.7f); Push(90, I_SPARK, Mtof(64), 0.6f);
+        Push(0, I_SPARK, Mtof(52), 0.7f); Push(kSixteenthMs / 2, I_SPARK, Mtof(59), 0.7f); Push(kSixteenthMs, I_SPARK, Mtof(64), 0.6f);
         Push(0, I_BELL, Mtof(88), 0.3f);
         break;
       case SFX_KLAXON:
-        if (var == SFXV_TELL) { Buzz(0, 50, 0.5f, 150); Buzz(400, 50, 0.5f, 150); }
-        else if (var == SFXV_SHORT) { Buzz(0, 50, 0.7f, 80); }
+        /* Bb2, the tritone against E, as the OVERTIME sirens; the tell
+         * repeats one beat later */
+        if (var == SFXV_TELL) { Buzz(0, 46, 0.5f, 150); Buzz(kBeatMs, 46, 0.5f, 150); }
+        else if (var == SFXV_SHORT) { Buzz(0, 46, 0.7f, 80); }
         else if (low) { Push(0, I_HAT, 1200, 0.3f); }               /* the inverted count tick */
-        else { Buzz(0, 50, 0.7f, 150); }
+        else { Buzz(0, 46, 0.7f, 150); }
         break;
       case SFX_KO:
-        Push(0, I_IMPACT, 36, 1.0f); Push(0, I_GONG, Mtof(43), 1.0f);
-        Push(80, I_CLANG, Mtof(50), 0.8f); Push(120, I_SPARK, Mtof(55 + r * 6), 0.6f);
+        Push(0, I_IMPACT, kImpactHz, 1.0f); Push(0, I_GONG, Mtof(40), 1.0f);
+        Push(kSixteenthMs, I_CLANG, Mtof(52), 0.8f); Push(kEighthMs, I_SPARK, Mtof(Pal(52, r)), 0.6f);
         break;
       default: break;
     }
@@ -502,19 +572,25 @@ class Band {
   }
 
   /* the live band over a buffer that already holds the PCM stems */
-  void Render(float* l, float* r, int n) {
+  void Render(float* l, float* r, int n) { RenderInner(l, r, n, true); }
+  /* the bake's preview: the SFX and the master chain only, no conductor, so
+   * the song can come from RenderMusic at the cart's stem gains */
+  void RenderSfx(float* l, float* r, int n) { RenderInner(l, r, n, false); }
+
+ private:
+  void RenderInner(float* l, float* r, int n, bool songs) {
     int i = 0;
     while (i < n) {
       int span = n - i;
 #if RTR_SONGS
-      if (mode_ > 0 && countdown_ <= 0) { Step(); countdown_ = samples_per_step_; }
-      if (mode_ > 0 && span > countdown_) span = countdown_;
+      if (songs && mode_ > 0 && countdown_ <= 0) { Step(); countdown_ = samples_per_step_; }
+      if (songs && mode_ > 0 && span > countdown_) span = countdown_;
 #endif
       if (span > kBlock) span = kBlock;
       Fire(span);
-      SfxSpan(l, r, i, span);
+      SfxSpan(l, r, i, span, songs);
 #if RTR_SONGS
-      if (mode_ > 0) countdown_ -= span;
+      if (songs && mode_ > 0) countdown_ -= span;
 #endif
       frame_ += static_cast<uint32_t>(span);
       i += span;
@@ -523,7 +599,6 @@ class Band {
     limiter_.Process(l, r, 0, n);
   }
 
- private:
   void Fire(int span) {
     int k = 0;
     for (int e = 0; e < nev_; ++e) {
@@ -565,8 +640,10 @@ class Band {
 
   /* SFX gains are measured, not the reference rack's: Bellows engines differ
    * by 10x in native loudness (tools/bake_music.cpp prints the peak and RMS
-   * of every patch) */
-  void SfxSpan(float* l, float* r, int from, int n) {
+   * of every patch). The buses are trimmed so a HIT_HEAVY at the default
+   * level peaks near -5 dBFS before the limiter and only CLASH and KO reach
+   * the ceiling; the stems under them are trimmed in audio_pcm.c */
+  void SfxSpan(float* l, float* r, int from, int n, bool songs) {
     for (int i = 0; i < n; ++i) { sl_[i] = sr_buf_[i] = 0.0f; }
     const float g = sfx_gain_;
     /* the impact bus: kick and clangs through one tanh for glue */
@@ -577,15 +654,15 @@ class Band {
       clang_.Process(bl_, br_, 0, n);
       punch_.Process(bl_, br_, 0, n);
       for (int i = 0; i < n; ++i) {
-        float a = bl_[i] * 0.9f * g, b = br_[i] * 0.9f * g;
+        float a = bl_[i] * 0.68f * g, b = br_[i] * 0.68f * g;
         l[from + i] += a; r[from + i] += b;
         sl_[i] += 0.25f * a; sr_buf_[i] += 0.25f * b;
       }
     }
-    Mix(spark_, 0.4f * g, 0.3f * g, 0.0f, l, r, from, n);
-    Mix(buzz_, 0.7f * g, 0.0f, 0.0f, l, r, from, n);
+    Mix(spark_, 0.3f * g, 0.22f * g, 0.0f, l, r, from, n);
+    Mix(buzz_, 0.6f * g, 0.0f, 0.0f, l, r, from, n);
     Mix(bells_, 0.5f * g, 0.25f * g, 0.0f, l, r, from, n);
-    Mix(gong_, 0.42f * g, 0.2f * g, 0.0f, l, r, from, n);
+    Mix(gong_, 0.5f * g, 0.2f * g, 0.0f, l, r, from, n);
     Mix(tick_, 3.0f * g, 0.0f, 0.1f, l, r, from, n);
     Mix(clap_, 0.8f * g, 0.3f * g, -0.1f, l, r, from, n);
     /* the whines: a level ramp across the span so throttle changes never click */
@@ -600,7 +677,7 @@ class Band {
       for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
       whine_[w].Process(dl_, dr_, 0, n);
       float gl = kWhinePan[w] > 0 ? 1.0f - kWhinePan[w] : 1.0f, gr = kWhinePan[w] < 0 ? 1.0f + kWhinePan[w] : 1.0f;
-      const float wg = 0.18f * g * duck_;
+      const float wg = 0.1f * g * duck_;
       for (int i = 0; i < n; ++i) {
         float t = g0 + (g1 - g0) * (static_cast<float>(i) / static_cast<float>(n));
         l[from + i] += dl_[i] * gl * t * wg; r[from + i] += dr_[i] * gr * t * wg;
@@ -614,7 +691,7 @@ class Band {
       float c = target > crowd_gain_ ? 0.06f : 0.012f;
       crowd_gain_ += (target - crowd_gain_) * c;
       if (crowd_gain_ > 0.001f) {
-        const float cg = 1.2f * g * duck_ * crowd_gain_;
+        const float cg = 0.9f * g * duck_ * crowd_gain_;
         const float lfo_inc = 0.3f * 6.2831853f / sr_;
         for (int i = 0; i < n; ++i) {
           float x = crowd_.Process();
@@ -630,7 +707,7 @@ class Band {
     slap_.Process(sl_, sr_buf_, 0, n);
     for (int i = 0; i < n; ++i) { l[from + i] += 0.5f * sl_[i]; r[from + i] += 0.5f * sr_buf_[i]; }
 #if RTR_SONGS
-    if (mode_ > 0) {
+    if (songs && mode_ > 0) {
       for (int i = 0; i < n; ++i) { yl_[i] = yr_[i] = 0.0f; }
       const float mg = music_gain_ * duck_ * kSongTrim[mode_];
       MusicSpan(l, r, from, n, mg);
@@ -638,63 +715,64 @@ class Band {
       const float eg = 0.6f * mg;
       for (int i = 0; i < n; ++i) { l[from + i] += eg * yl_[i]; r[from + i] += eg * yr_[i]; }
     }
+#else
+    (void)songs;
 #endif
   }
 
 #if RTR_SONGS
-  enum Genre { G_GARAGE, G_FIGHT, G_RUSH };
-  using String = bellows::Pluck<70>;
-
-  void SetGenre(Genre g) {
-    genre_ = g;
-    acid_p_ = bellows::Va::Params();
-    acid_p_.shape = 0.0f; acid_p_.detune = 0.0f; acid_p_.resonance = g == G_GARAGE ? 0.15f : 0.82f;
-    acid_p_.cutoff = g == G_GARAGE ? 260.0f : 400.0f; acid_p_.env_amount = g == G_GARAGE ? 0.4f : 2.6f;
-    acid_p_.attack = 0.002f; acid_p_.decay = 0.18f; acid_p_.sustain = g == G_GARAGE ? 0.7f : 0.25f; acid_p_.release = 0.05f;
-    acid_p_.f_attack = 0.001f; acid_p_.f_decay = 0.14f; acid_p_.f_sustain = 0.0f; acid_p_.f_release = 0.05f;
-    acid_p_.sub = g == G_GARAGE ? 0.8f : 0.2f;
-    acid_.Init(sr_, &rng_acid_, acid_p_);
-
-    bellows::Fm::Params lead;
+  /* the kit and the synths voiced per song */
+  void Voice() {
     bellows::Kick::Params kp;
     bellows::Snare::Params sp;
-    bellows::Hat::Params hp;
-    if (g == G_GARAGE) {
-      /* a soft glassy bell lead for the shelf */
-      lead.ops = 2; lead.algorithm = 1; lead.feedback = 0.0f; lead.brightness = 0.45f;
-      lead.ratio[0] = 1; lead.ratio[1] = 3.5f; lead.level[1] = 0.5f;
-      lead.attack = 0.01f; lead.decay = 1.2f; lead.sustain = 0.25f; lead.release = 0.8f;
-      kp.decay = 0.25f; kp.drive = 1.2f; kp.pitch_decay = 0.06f;
-      sp.decay = 0.16f; sp.tone = 0.5f; sp.snap = 0.2f;
-      hp.decay = 0.035f; hp.tone = 1.2f;
+    bellows::Hat::Params hp, oh;
+    bellows::Va::Params bp, lp;
+    if (mode_ == 1) {
+      kp.decay = 0.45f; kp.drive = 5.0f; kp.click_tune = 8.0f; kp.pitch_decay = 0.07f; kick_hz_ = 44.0f;
+      sp.tone = 0.35f; sp.decay = 0.22f; sp.snap = 0.35f; snare_hz_ = 170.0f;
+      hp.decay = 0.035f; hp.tone = 0.85f; oh.decay = 0.2f; oh.tone = 0.9f;
+    } else if (mode_ == 2) {
+      kp.decay = 0.32f; kp.drive = 5.5f; kp.click_tune = 9.0f; kp.pitch_decay = 0.05f; kick_hz_ = 46.0f;
+      sp.tone = 0.5f; sp.decay = 0.17f; sp.snap = 0.3f; snare_hz_ = 190.0f;
+      hp.decay = 0.035f; hp.tone = 1.0f; oh.decay = 0.16f; oh.tone = 1.0f;
     } else {
-      /* a hard saw-ish FM lead with feedback, heavy drums */
-      lead.ops = 2; lead.algorithm = 1; lead.feedback = g == G_RUSH ? 0.65f : 0.55f; lead.brightness = 0.6f;
-      lead.ratio[0] = 1; lead.ratio[1] = 1; lead.level[1] = 0.7f;
-      lead.attack = 0.003f; lead.decay = 0.25f; lead.sustain = 0.55f; lead.release = 0.08f;
-      kp.decay = 0.4f; kp.pitch_decay = 0.06f; kp.drive = g == G_RUSH ? 4.0f : 3.2f; kp.click_tune = 7.0f;
-      sp.decay = 0.2f; sp.tone = 0.45f; sp.snap = 0.28f;
-      hp.decay = 0.04f; hp.tone = 1.25f;
+      kp.decay = 0.28f; kp.drive = 6.0f; kp.click_tune = 9.0f; kp.pitch_decay = 0.045f; kick_hz_ = 47.0f;
+      sp.tone = 0.55f; sp.decay = 0.14f; sp.snap = 0.3f; snare_hz_ = 200.0f;
+      hp.decay = 0.03f; hp.tone = 1.05f; oh.decay = 0.14f; oh.tone = 1.05f;
     }
-    lead_.Init(sr_, lead);
     kick_.Init(sr_, kp);
     snare_.Init(sr_, &rng_snare_, sp);
     hat_.Init(sr_, hp);
+    ohat_.Init(sr_, oh);
+    /* the bass: a saw with its square sub an octave down through the ladder,
+     * then six times into a tanh; the cutoff is written per step */
+    bp.shape = 0.0f; bp.detune = 6.0f; bp.sub = 0.5f; bp.cutoff = 400.0f; bp.resonance = 0.4f; bp.filter_type = 0.0f;
+    bp.env_amount = 1.4f; bp.f_attack = 0.001f; bp.f_decay = mode_ == 1 ? 0.14f : 0.09f; bp.f_sustain = 0.1f; bp.f_release = 0.05f;
+    bp.attack = 0.002f; bp.decay = 0.2f; bp.sustain = 0.7f; bp.release = 0.04f; bp.vel_level = 0.4f;
+    bass_p_ = bp;
+    bass_.SetParams(bass_p_);
+    /* the riser riff: a wide saw through the ladder, its cutoff set per bar */
+    lp.shape = 0.0f; lp.detune = 14.0f; lp.cutoff = 500.0f; lp.resonance = 0.3f; lp.filter_type = 0.0f; lp.env_amount = 1.0f;
+    lp.f_attack = 0.002f; lp.f_decay = 0.1f; lp.f_sustain = 0.2f; lp.f_release = 0.06f;
+    lp.attack = 0.003f; lp.decay = 0.15f; lp.sustain = 0.5f; lp.release = 0.06f; lp.vel_level = 0.3f;
+    lead_p_ = lp;
+    lead_.SetParams(lead_p_);
   }
 
   void ApplyMode() {
     mode_ = pending_mode_;
     pending_mode_ = -1;
-    section_ = 0; bar_ = 0; step_ = 0; pass_ = 0; countdown_ = 0; lead_off_ = 0; acid_gate_ = 0;
+    section_ = 0; bar_ = 0; step_ = 0; pass_ = 0; countdown_ = 0; bass_gate_ = 0; lead_gate_ = 0; cur_lay_ = 0;
     mask_ = 0xffff; hold_ = false;
-    acid_.NoteOff(); lead_.NoteOff(); counter_.NoteOff(); PadRelease();
+    bass_.NoteOff(); lead_.NoteOff(); PadRelease(); SirenOff();
+    riser_pulse_ = 0.0f;
     if (mode_ <= 0) { mode_ = 0; return; }
     samples_per_step_ = StepSamples(mode_, sr_);
-    SetGenre(mode_ == 3 ? G_RUSH : mode_ == 2 ? G_FIGHT : G_GARAGE);
+    Voice();
     bellows::StereoDelay<500>::Params d;
     float beat = 60.0f / kBpm[mode_];
-    d.time_l = beat * 0.75f; d.time_r = beat * 0.5f; d.feedback = mode_ == 1 ? 0.48f : 0.36f;
-    d.cross_feedback = 0.15f; d.damping = 3200.0f; d.mix = 1.0f;
+    d.time_l = beat * 0.75f; d.time_r = beat * 0.5f; d.feedback = mode_ == 1 ? 0.42f : 0.34f;
+    d.cross_feedback = 0.15f; d.damping = 3000.0f; d.mix = 1.0f;
     echo_.SetParams(d);
     last_chord_ = -1;
   }
@@ -706,28 +784,41 @@ class Band {
   }
 
   void PadRelease() { for (int i = 0; i < npad_; i++) pad_.NoteOff(pad_ids_[i]); npad_ = 0; }
+  void SirenOff() { if (siren_on_) { siren_[0].NoteOff(); siren_[1].NoteOff(); siren_on_ = false; siren_rel_ = static_cast<int>(0.4f * sr_); } }
 
-  /* smooth voice leading: each chord tone goes to the octave nearest the last voicing */
-  void PadChord(int root, bool minor, float vel) {
-    int tones[3] = {root, (root + (minor ? 3 : 4)) % 12, (root + 7) % 12};
+  /* the drone: the triad voiced low, E3 to D#4 */
+  void PadChord(int root, bool minor) {
+    int tones[3] = {root, root + (minor ? 3 : 4), root + 7};
     PadRelease();
-    float center = pad_center_, sum = 0;
     for (int k = 0; k < 3; k++) {
-      int best = 0;
-      float bd = 1e9f;
-      for (int oct = 3; oct <= 5; oct++) {
-        int m = 12 * (oct + 1) + tones[k];
-        if (m < 50 || m > 76) continue;
-        float d = fabsf(static_cast<float>(m) - center);
-        if (d < bd) { bd = d; best = m; }
-      }
-      if (!best) best = 60 + tones[k];
+      int m = 52 + ((tones[k] - 4 + 24) % 12);
       int id = 1000 + (note_id_++ & 0xfff);
-      pad_.NoteOn(id, Mtof(static_cast<float>(best)), vel, frame_);
+      pad_.NoteOn(id, Mtof(static_cast<float>(m)), 0.6f, frame_);
       pad_ids_[npad_++] = id;
-      sum += static_cast<float>(best);
     }
-    pad_center_ = sum / 3.0f;
+  }
+
+  /* a stab: root, third, fifth and the seventh, voiced E3 to D#4 */
+  void Stab(int root, bool minor, float vel) {
+    int ch[4] = {root, root + (minor ? 3 : 4), root + 7, root + (minor ? 10 : 11)};
+    for (int k = 0; k < 4; k++) {
+      int m = 52 + ((ch[k] - 4 + 24) % 12);
+      stab_.NoteOn(note_id_++ & 0xfff, Mtof(static_cast<float>(m)), vel, frame_);
+    }
+  }
+
+  /* a stab velocity for this step, or 0: sparse on the shelf, on the one and
+   * the and of two in a chorus, on the one and the and of two in the rush */
+  float StabVel(int s) const {
+    if (mode_ == 1) {
+      if ((bar_ % 4) == 0 && s == 0) return 0.7f;
+      if ((bar_ % 4) == 3 && s == 10) return 0.6f;
+      return 0.0f;
+    }
+    if (s == 0) return mode_ == 3 ? 0.7f : 0.6f;
+    if (s == 6) return 0.5f;
+    if (mode_ == 2 && (bar_ & 1) && s == 11) return 0.45f;
+    return 0.0f;
   }
 
   void Step() {
@@ -745,106 +836,86 @@ class Band {
       }
     }
     const uint16_t lay = sec->def->layers & mask_;
+    cur_lay_ = lay;
     const bool last_bar = bar_ == sec->def->bars - 1;
-    const bool intro = mode_ == 2 && section_ == 0;
     const int root = sec->roots[bar_ % 8];
     const bool minor = sec->minor[bar_ % 8];
     const float jit = 0.06f * rng_jit_.Next();
-    const float soft = mode_ == 1 ? 0.6f : 1.0f;
+    const DrumPat& dp = DRUMS[sec->def->drums];
+    const BassPat& bp = BASSES[sec->def->bass];
+    const int pos = bar_ * 16 + s;                    /* the step within the section */
+    const float through = pos / static_cast<float>(sec->def->bars * 16);
 
     /* drums */
-    bool rolling = (lay & L_ROLL) && last_bar;
-    if (rolling) {
-      float up = 0.5f + 0.5f * s / 16.0f;
-      snare_.NoteOn(190.0f, up);
+    const bool rolling = (lay & L_ROLL) && last_bar && s >= 8;
+    if (rolling) snare_.NoteOn(snare_hz_, 0.45f + 0.55f * (s - 8) / 8.0f);
+    if (lay & L_KICK) {
+      float v = dp.k[s];
+      if (mode_ == 1 && (bar_ & 1) && s == 14) v = 0.7f;      /* the shelf's pushed kick every other bar */
+      if (v > 0 && !(rolling && s >= 14)) kick_.NoteOn(kick_hz_, v);
     }
-    if ((lay & L_KICK) && s % 4 == 0 && !(rolling && s >= 12)) kick_.NoteOn(50.0f, 0.95f * soft);
-    if (lay & L_BREAK) {
-      if (BRK_K[s] > 0) kick_.NoteOn(50.0f, BRK_K[s]);
-      if (BRK_S[s] > 0 && !rolling) snare_.NoteOn(190.0f, BRK_S[s] + jit);
-      if (genre_ == G_RUSH && (s == 6 || s == 14)) kick_.NoteOn(50.0f, 0.7f);
-      if (last_bar && s >= 12 && !rolling) snare_.NoteOn(190.0f, 0.35f + 0.1f * (s - 12));   /* fill */
-    }
+    if ((lay & L_SNARE) && !rolling && dp.s[s] > 0) snare_.NoteOn(snare_hz_, dp.s[s] + jit);
     if (lay & L_HAT) {
-      if (mode_ == 1) {
-        if (s == 6 || s == 14) ohat_.NoteOn(330.0f, 0.4f + jit);        /* sparse: the offbeat open hat */
-        if (s % 4 == 0) hat_.NoteOn(330.0f, 0.3f);
-      } else if (intro) {
-        if (s % 4 == 2) ohat_.NoteOn(330.0f, 0.5f + jit);
-        if (s % 4 == 0) hat_.NoteOn(330.0f, 0.25f);
-      } else {
-        if (s % 4 == 2) ohat_.NoteOn(330.0f, 0.4f + jit);
-        else hat_.NoteOn(330.0f, (s % 2 ? 0.28f : 0.4f) + jit);
-      }
+      float o = dp.o[s];
+      if (mode_ == 1 && bar_ == 7 && s == 14) o = 0.5f;        /* the open hat that turns the shelf's form */
+      if (o > 0) ohat_.NoteOn(330.0f, o + jit);
+      else if (dp.h[s] > 0) hat_.NoteOn(330.0f, dp.h[s] + jit);
     }
-    if ((lay & L_PERC) && (s == 4 || s == 12)) {
-      Push(0, I_CLAP, 0, 0.55f); Push(10, I_CLAP, 0, 0.45f); Push(21, I_CLAP, 0, 0.35f);
+    if (lay & L_METAL) {
+      if (dp.m[s] > 0) metal_.NoteOn(note_id_++ & 0xfff, Mtof(Pal(88, rng_metal_.Next())), dp.m[s] + jit, frame_);
+      if (dp.a[s] > 0) anvil_.NoteOn(Mtof((bar_ & 1) ? 71.0f : 76.0f), dp.a[s]);
     }
 
-    /* the acid line, its filter riding a slow sine; the intro opens up */
-    if ((lay & L_ACID) || (lay & L_SUB)) {
-      float cut;
-      if (lay & L_SUB) cut = 260.0f;
-      else if (intro) cut = 220.0f + 1700.0f * (bar_ * 16 + s) / 128.0f;
-      else cut = 450.0f + 1500.0f * (0.5f + 0.5f * sinf((bar_ * 16 + s) * 6.2831853f / 128.0f));
-      acid_p_.cutoff = cut;
-      acid_p_.env_amount = (lay & L_SUB) ? 0.4f : (ACID_A[s] ? 3.2f : 2.0f);
-      acid_.SetParams(acid_p_);
-      int base = 36 + root;
-      if (base > 47) base -= 12;
-      if (lay & L_SUB) {
-        if (s == 0) acid_.NoteOn(Mtof(static_cast<float>(base)), 0.6f);
-        if (s == 12) acid_.NoteOff();
-      } else if (ACID_N[s] >= 0) {
-        acid_.NoteOn(Mtof(static_cast<float>(base + ACID_N[s])), ACID_A[s] ? 0.95f : 0.7f);
-        acid_gate_ = (s < 15 && ACID_N[s + 1] < 0) ? 2 : 1;
+    /* stabs */
+    if (lay & L_STAB) { float v = StabVel(s); if (v > 0 && !rolling) Stab(root, minor, v); }
+
+    /* the bass: the gate closes first so a one step note ends as the next starts */
+    if (bass_gate_ > 0 && --bass_gate_ == 0) bass_.NoteOff();
+    if (lay & L_BASS) {
+      int n = bp.n[s];
+      if (mode_ == 1 && (bar_ % 4) == 3 && s == 12) n = 6;    /* the tritone turns the shelf's fourth bar */
+      if (n >= 0) {
+        float cut;
+        if (mode_ == 3) cut = 180.0f * powf(2.0f, 3.5f * through);                  /* the riser: three and a half octaves up over the loop */
+        else if (mode_ == 1) cut = 300.0f + (s == 0 ? 120.0f : 0.0f);
+        else cut = 500.0f + (s == 0 || s == 10 ? 200.0f : 0.0f);
+        bass_p_.cutoff = cut;
+        bass_.SetParams(bass_p_);
+        int base = 40 + root;                                   /* E2 and up, the sub an octave under; the F and Bb sit above */
+        if (base > 47) base -= 12;
+        float vel = (s == 0 || s == 10) ? 1.0f : 0.8f;
+        bass_.NoteOn(Mtof(static_cast<float>(base + n)), vel);
+        bass_gate_ = bp.g[s];
       }
     }
-    if (acid_gate_ > 0 && --acid_gate_ == 0 && !(lay & L_SUB)) acid_.NoteOff();
 
-    /* pad: one held chord per bar, voice led */
+    /* the drone: one chord per bar */
     int chord_id = bar_ * 100 + section_;
-    if ((lay & L_PAD) && s == 0 && chord_id != last_chord_) { PadChord(root, minor, 0.62f); last_chord_ = chord_id; }
+    if ((lay & L_PAD) && s == 0 && chord_id != last_chord_) { PadChord(root, minor); last_chord_ = chord_id; }
     if (!(lay & L_PAD) && npad_) PadRelease();
 
-    /* the arpeggio: a slow rising four on the shelf, three against four in a fight */
-    if (lay & L_HYPNO) {
-      int third = root + (minor ? 3 : 4), fifth = root + 7;
-      if (mode_ == 1) {
-        if (s % 4 == 0) {
-          int fig[4] = {root, third, fifth, root + 12};
-          int m = 60 + ((fig[(s / 4) % 4] + 12) % 12) + ((s / 4) % 4 == 3 ? 12 : 0);
-          hypno_.NoteOn(note_id_++ & 0xfff, Mtof(static_cast<float>(m)), 0.45f + jit, frame_);
-        }
-      } else {
-        int fig[3] = {root + 12, fifth, third + 12};
-        int m = 64 + ((fig[step_ % 3] - 4 + 24) % 24);
-        float acc = s % 4 == 0 ? 0.6f : 0.42f;
-        hypno_.NoteOn(note_id_++ & 0xfff, Mtof(static_cast<float>(m)), acc + jit, frame_);
-      }
-    }
-
-    /* rave stabs: a minor seventh on the downbeat and the offbeat after it */
-    if ((lay & L_STAB) && (s == 0 || s == 6 || (bar_ % 2 == 1 && s == 10))) {
-      int ch[4] = {root, root + (minor ? 3 : 4), root + 7, root + (minor ? 10 : 11)};
-      for (int k = 0; k < 4; k++) stab_.NoteOn(note_id_++ & 0xfff, Mtof(static_cast<float>(60 + (ch[k] + 8) % 12 + 4)), 0.55f, frame_);
-    }
-
-    /* the written lead, and a counter line a third below where the section asks */
+    /* the riser riff: the motif over E4 climbs a chord tone every two bars
+     * while the filter opens from 500 Hz to about 4 kHz */
+    if (lead_gate_ > 0 && --lead_gate_ == 0) lead_.NoteOff();
     if (lay & L_LEAD) {
-      int at = bar_ * 16 + s;
-      for (int k = 0; k < sec->nlead; k++) {
-        const Note& nt = sec->lead[k];
-        if (nt.step == at) {
-          if (nt.midi) {
-            lead_.NoteOn(Mtof(static_cast<float>(nt.midi)), mode_ == 1 ? 0.5f : 0.7f);
-            if (lay & L_COUNTER) counter_.NoteOn(Mtof(static_cast<float>(DiatonicBelow(nt.midi) - 12)), 0.5f);
-          } else { lead_.NoteOff(); counter_.NoteOff(); }
-          lead_off_ = nt.dur;
-        }
+      const int local = (bar_ & 1) * 16 + s;
+      const int tr = RIFF_T[(bar_ / 2) & 3];
+      for (int k = 0; k < kRiffN; k++) {
+        if (RIFF[k].step != local) continue;
+        lead_p_.cutoff = 500.0f * powf(2.0f, 0.42f * bar_);
+        lead_.SetParams(lead_p_);
+        lead_.NoteOn(Mtof(static_cast<float>(64 + tr + RIFF[k].semis)), RIFF[k].dur >= 4 ? 1.0f : 0.8f);
+        lead_gate_ = RIFF[k].dur;
       }
-      if (lead_off_ > 0 && --lead_off_ == 0) { lead_.NoteOff(); counter_.NoteOff(); }
-    } else if (s == 0) { lead_.NoteOff(); counter_.NoteOff(); }
+    } else if (s == 0) lead_.NoteOff();
+
+    /* the sirens hold through a section that asks for them */
+    if ((lay & L_SIREN) && !siren_on_) {
+      siren_[0].NoteOn(Mtof(76.0f), 1.0f); siren_[1].NoteOn(Mtof(82.0f), 1.0f); siren_on_ = true;
+    } else if (!(lay & L_SIREN)) SirenOff();
+
+    /* the noise riser pulses on every eighth */
+    if ((lay & L_RISER) && (s & 1) == 0) riser_pulse_ = 1.0f;
     ++step_;
   }
 
@@ -868,50 +939,88 @@ class Band {
     g_drums_ += (g_drums_t_ - g_drums_) * 0.12f;
     g_lead_ += (g_lead_t_ - g_lead_) * 0.12f;
     const float gd = master * g_drums_, gb = master * g_base_, gl = master * g_lead_;
-    if (kick_.Active() || snare_.Active() || hat_.Active() || ohat_.Active()) {
-      /* the drum bus: kick, snare and hats through one tanh, so the kick's
-       * peaks stop ruling the ceiling and the kit glues */
+    /* the drum bus: kick, snare, hats, metal and the stabs through one tanh,
+     * so the kick's peaks stop ruling the ceiling and the kit glues */
+    if (kick_.Active() || snare_.Active() || hat_.Active() || ohat_.Active() || Live(metal_) || anvil_.Active() || Live(stab_)) {
       for (int i = 0; i < n; ++i) { bl_[i] = 0.0f; br_[i] = 0.0f; }
       for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
       kick_.Process(dl_, dr_, 0, n);
-      for (int i = 0; i < n; ++i) { bl_[i] += 0.8f * dl_[i]; br_[i] += 0.8f * dr_[i]; }
+      for (int i = 0; i < n; ++i) { bl_[i] += 0.9f * dl_[i]; br_[i] += 0.9f * dr_[i]; }
       for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
       snare_.Process(dl_, dr_, 0, n);
-      for (int i = 0; i < n; ++i) { bl_[i] += 1.3f * dl_[i]; br_[i] += 1.3f * dr_[i]; yl_[i] += 0.25f * gd * dl_[i]; yr_[i] += 0.25f * gd * dr_[i]; }
+      for (int i = 0; i < n; ++i) { bl_[i] += 1.4f * dl_[i]; br_[i] += 1.4f * dr_[i]; yl_[i] += 0.2f * gd * dl_[i]; yr_[i] += 0.2f * gd * dr_[i]; }
       for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
       hat_.Process(dl_, dr_, 0, n);
-      for (int i = 0; i < n; ++i) { bl_[i] += 3.5f * dl_[i] * 0.82f; br_[i] += 3.5f * dr_[i]; }
+      for (int i = 0; i < n; ++i) { bl_[i] += 3.0f * dl_[i] * 0.85f; br_[i] += 3.0f * dr_[i]; }
       for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
       ohat_.Process(dl_, dr_, 0, n);
-      for (int i = 0; i < n; ++i) { bl_[i] += 2.0f * dl_[i]; br_[i] += 2.0f * dr_[i] * 0.88f; }
+      for (int i = 0; i < n; ++i) { bl_[i] += 1.6f * dl_[i]; br_[i] += 1.6f * dr_[i] * 0.88f; }
+      for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
+      metal_.Process(dl_, dr_, 0, n);
+      anvil_.Process(dl_, dr_, 0, n);
+      for (int i = 0; i < n; ++i) { bl_[i] += 0.8f * dl_[i] * 0.8f; br_[i] += 0.8f * dr_[i]; yl_[i] += 0.35f * gd * dl_[i]; yr_[i] += 0.35f * gd * dr_[i]; }
+      if (Live(stab_)) {
+        for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
+        stab_.Process(dl_, dr_, 0, n);
+        stab_sat_.Process(dl_, dr_, 0, n);
+        for (int i = 0; i < n; ++i) { bl_[i] += 0.6f * dl_[i]; br_[i] += 0.6f * dr_[i]; yl_[i] += 0.3f * gd * dl_[i]; yr_[i] += 0.3f * gd * dr_[i]; }
+      }
       drum_sat_.Process(bl_, br_, 0, n);
       for (int i = 0; i < n; ++i) { l[from + i] += gd * bl_[i]; r[from + i] += gd * br_[i]; }
     }
-    if (acid_.Active()) {
+    if (bass_.Active()) {
       for (int i = 0; i < n; ++i) { bl_[i] = 0.0f; br_[i] = 0.0f; }
-      acid_.Process(bl_, br_, 0, n);
-      acid_sat_.Process(bl_, br_, 0, n);
-      const float ag = (mode_ == 1 ? 0.6f : 3.0f) * gb;
-      const float as = mode_ == 1 ? 0.0f : 0.4f * gb;
+      bass_.Process(bl_, br_, 0, n);
+      bass_sat_.Process(bl_, br_, 0, n);
+      const float ag = 0.55f * gb;
+      for (int i = 0; i < n; ++i) { l[from + i] += ag * bl_[i]; r[from + i] += ag * br_[i]; }
+    }
+    MixM(pad_, 0.1f * gb, 0.08f * gb, 0.0f, l, r, from, n);
+    if (siren_on_ || siren_rel_ > 0) {
+      if (!siren_on_) siren_rel_ -= n;
+      /* two saws a tritone apart, each wandering three semitones either way */
+      static const float kRate[2] = {0.4f, 0.55f};
+      static const float kBase[2] = {76.0f, 82.0f};
+      for (int k = 0; k < 2; ++k) {
+        siren_ph_[k] += kRate[k] * 6.2831853f * n / sr_;
+        if (siren_ph_[k] > 6.2831853f) siren_ph_[k] -= 6.2831853f;
+        siren_[k].SetFreq(Mtof(kBase[k] + 3.0f * bellows::fm::Sin(siren_ph_[k])));
+      }
+      for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
+      siren_[0].Process(dl_, dr_, 0, n);
+      for (int i = 0; i < n; ++i) { l[from + i] += 0.12f * gb * dl_[i] * 0.8f; r[from + i] += 0.12f * gb * dr_[i]; yl_[i] += 0.1f * gb * dl_[i]; yr_[i] += 0.1f * gb * dr_[i]; }
+      for (int i = 0; i < n; ++i) { dl_[i] = 0.0f; dr_[i] = 0.0f; }
+      siren_[1].Process(dl_, dr_, 0, n);
+      for (int i = 0; i < n; ++i) { l[from + i] += 0.12f * gb * dl_[i]; r[from + i] += 0.12f * gb * dr_[i] * 0.8f; yl_[i] += 0.1f * gb * dl_[i]; yr_[i] += 0.1f * gb * dr_[i]; }
+    }
+    if ((cur_lay_ & L_RISER) || riser_pulse_ > 0.002f) {
+      /* pink noise through a bandpass climbing from 300 Hz to about 5 kHz
+       * over the section, gated on every eighth, louder as it climbs */
+      int count; const Section& sec = Current(&count);
+      const int sc = step_ > 0 ? (step_ - 1) % 16 : 0;      /* the step that is sounding */
+      float pos = (bar_ * 16 + sc + (1.0f - countdown_ / static_cast<float>(samples_per_step_))) / static_cast<float>(sec.def->bars * 16);
+      if (pos < 0.0f) pos = 0.0f;
+      if (pos > 1.0f) pos = 1.0f;
+      riser_bp_.Set(300.0f * powf(2.0f, 4.0f * pos), 2.0f);
+      const float lvl = (cur_lay_ & L_RISER) ? (0.1f + 0.5f * pos * pos) * gb : 0.0f;
+      const float dec = expf(-1.0f / (0.07f * sr_));
       for (int i = 0; i < n; ++i) {
-        l[from + i] += ag * bl_[i]; r[from + i] += ag * br_[i];
-        yl_[i] += as * bl_[i]; yr_[i] += as * br_[i];
+        float y = riser_bp_.Process(riser_.Process()) * riser_pulse_ * lvl;
+        riser_pulse_ *= dec;
+        l[from + i] += y; r[from + i] += y;
       }
     }
-    MixM(pad_, 0.03f * gb, 0.012f * gb, 0.0f, l, r, from, n);
-    MixM(stab_, 0.7f * gb, 0.4f * gb, 0.0f, l, r, from, n);
-    MixM(hypno_, 0.5f * gb, 0.9f * gb, -0.22f, l, r, from, n);
     if (lead_.Active()) {
       for (int i = 0; i < n; ++i) { bl_[i] = 0.0f; br_[i] = 0.0f; }
       lead_.Process(bl_, br_, 0, n);
+      lead_sat_.Process(bl_, br_, 0, n);
       chorus_.Process(bl_, br_, 0, n);
-      const float lg = 2.5f * gl, ls = 1.0f * gl;
+      const float lg = 1.2f * gl, ls = 0.6f * gl;
       for (int i = 0; i < n; ++i) {
         l[from + i] += lg * bl_[i]; r[from + i] += lg * br_[i];
         yl_[i] += ls * bl_[i]; yr_[i] += ls * br_[i];
       }
     }
-    MixM(counter_, 0.5f * gl, 0.4f * gl, 0.24f, l, r, from, n);
   }
 #endif
 
@@ -937,30 +1046,35 @@ class Band {
   bellows::Limiter<> limiter_;
 
 #if RTR_SONGS
-  bellows::Rng rng_snare_, rng_acid_, rng_str_, rng_ctr_, rng_jit_;
+  bellows::Rng rng_snare_, rng_bass_, rng_metal_, rng_stab_, rng_pad_, rng_lead_, rng_siren_, rng_riser_, rng_jit_;
   bellows::Kick kick_;
   bellows::Snare snare_;
   bellows::Hat hat_, ohat_;
-  bellows::Va acid_, counter_;
-  bellows::Va::Params acid_p_;
-  bellows::VoicePool<bellows::Fm, 6> pad_;
-  bellows::VoicePool<bellows::Fm, 4> stab_;
-  bellows::VoicePool<String, 4> hypno_;
-  bellows::Fm lead_;
+  bellows::VoicePool<bellows::Modal, 4> metal_;
+  bellows::Modal anvil_;
+  bellows::Va bass_, lead_;
+  bellows::Va::Params bass_p_, lead_p_;
+  bellows::VoicePool<bellows::Va, 4> stab_;
+  bellows::VoicePool<bellows::Va, 3> pad_;
+  bellows::Va siren_[2];
+  bellows::NoiseGen riser_;
+  bellows::Svf riser_bp_;
   bellows::StereoDelay<500> echo_;
   bellows::Chorus<> chorus_;
-  bellows::Saturator<1> acid_sat_, drum_sat_;
+  bellows::Saturator<2> bass_sat_;
+  bellows::Saturator<1> stab_sat_, lead_sat_, drum_sat_;
   Section garage_[kGarageN];
   Section arena_[kArenaN];
   Section overtime_[kOvertimeN];
-  Genre genre_ = G_GARAGE;
-  uint16_t mask_ = 0xffff;
-  bool hold_ = false;
+  uint16_t mask_ = 0xffff, cur_lay_ = 0;
+  bool hold_ = false, siren_on_ = false;
+  int siren_rel_ = 0;
   int mode_ = 0, pending_mode_ = -1, samples_per_step_ = 1, countdown_ = 0;
-  int step_ = 0, bar_ = 0, section_ = 0, pass_ = 0, acid_gate_ = 0, lead_off_ = 0, last_chord_ = -1;
+  int step_ = 0, bar_ = 0, section_ = 0, pass_ = 0, bass_gate_ = 0, lead_gate_ = 0, last_chord_ = -1;
   int pad_ids_[8] = {};
   int npad_ = 0;
-  float pad_center_ = 62.0f;
+  float kick_hz_ = 46.0f, snare_hz_ = 190.0f;
+  float siren_ph_[2] = {}, riser_pulse_ = 0.0f;
   float g_base_ = 1.0f, g_drums_ = 1.0f, g_lead_ = 1.0f, g_base_t_ = 1.0f, g_drums_t_ = 1.0f, g_lead_t_ = 1.0f;
   float yl_[kBlock] = {}, yr_[kBlock] = {};
 #endif
@@ -1059,6 +1173,16 @@ extern "C" void audio_bake_render(float *stereo, int frames) {
     int chunk = frames - done > 4096 ? 4096 : frames - done;
     for (int i = 0; i < chunk; ++i) { L[i] = 0.0f; R[i] = 0.0f; }
     band.RenderMusic(L, R, chunk);
+    for (int i = 0; i < chunk; ++i) { stereo[(done + i) * 2] = L[i]; stereo[(done + i) * 2 + 1] = R[i]; }
+    done += chunk;
+  }
+}
+extern "C" void audio_bake_sfx_render(float *stereo, int frames) {
+  int done = 0;
+  while (done < frames) {
+    int chunk = frames - done > 4096 ? 4096 : frames - done;
+    for (int i = 0; i < chunk; ++i) { L[i] = stereo[(done + i) * 2]; R[i] = stereo[(done + i) * 2 + 1]; }
+    band.RenderSfx(L, R, chunk);
     for (int i = 0; i < chunk; ++i) { stereo[(done + i) * 2] = L[i]; stereo[(done + i) * 2 + 1] = R[i]; }
     done += chunk;
   }

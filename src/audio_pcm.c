@@ -6,10 +6,11 @@
  * audio_band_render, which also owns the master limiter.
  *
  * A song is a list of segments, each a bar count and up to three sounds
- * (base, drums, lead) that start on the same frame. ARENA is INTRO, BUILD,
- * DROP, DROP2 with the loop back to BUILD; the baked files are an 8 bar
- * intro pair plus 8 bar loops per stem, so the 32 bar song costs 6 files of
- * 8 bars instead of 3 files of 32 (see HANDOFF: the size budget). The
+ * (base, drums, lead) that start on the same frame. ARENA is STOMP then
+ * BREAK, looping from the top: one 8 bar base stem under both, a kit stem
+ * per section and one riff stem, so the 16 bar song costs 4 files of 8 bars
+ * (see HANDOFF: the size budget). Every audio_music call and every switch
+ * that lands on a beat writes a [music] line to the log. The
  * sequencer walks the mixer's own 16.16 step so a segment change, the loop
  * and the OVERTIME switch land on an exact source frame: the mix is split
  * at the boundary, the channels are restarted there, and their position is
@@ -40,6 +41,9 @@
 #include <stdio.h>
 static uint64_t probe_out;   /* output frames rendered so far, for the log */
 #endif
+#ifndef MUSIC_LIVE
+#include <stdio.h>           /* snprintf for the [music] log lines */
+#endif
 
 static double carry;
 static uint32_t host_rate = 48000;
@@ -51,21 +55,27 @@ static float duck_t = 1.0f;
 
 #ifndef MUSIC_LIVE
 /* -- the baked stems ------------------------------------------------ */
-enum { W_GARAGE, W_OVERTIME, W_INTRO_BASE, W_INTRO_DRUMS, W_BASE, W_DRUMS, W_LEAD, W_LEAD2, W_COUNT };
+enum { W_GARAGE, W_OVERTIME, W_BASE, W_STOMP, W_BREAK, W_RIFF, W_COUNT };
 static const char *const WAV_NAME[W_COUNT] = {
-  "garage.wav", "overtime.wav", "arena_intro_base.wav", "arena_intro_drums.wav",
-  "arena_base.wav", "arena_drums.wav", "arena_lead.wav", "arena_lead2.wav" };
+  "garage.wav", "overtime.wav", "arena_base.wav", "arena_stomp.wav", "arena_break.wav", "arena_riff.wav" };
 static int snd[W_COUNT];
 
+/* ARENA is the half time STOMP verse then the breakbeat BREAK chorus, looping
+ * from the top: one base stem under both, a kit stem per section, and the
+ * riser riff as the lead stem that audio_tension fades in */
 typedef struct { int bars; int wav[STEMS]; } seg_t;        /* wav: W_* or -1 */
 typedef struct { int nseg, loop; seg_t seg[MAX_SEG]; } song_t;
 static const song_t SONGS[4] = {
   { 0, 0, { { 0, { -1, -1, -1 } } } },
   { 1, 0, { { 16, { W_GARAGE, -1, -1 } } } },
-  { 4, 1, { { 8, { W_INTRO_BASE, W_INTRO_DRUMS, -1 } }, { 8, { W_BASE, W_DRUMS, -1 } },
-            { 8, { W_BASE, W_DRUMS, W_LEAD } }, { 8, { W_BASE, W_DRUMS, W_LEAD2 } } } },
+  { 2, 0, { { 8, { W_BASE, W_STOMP, W_RIFF } }, { 8, { W_BASE, W_BREAK, W_RIFF } } } },
   { 1, 0, { { 8, { W_OVERTIME, -1, -1 } } } },
 };
+/* the stems are baked to the ceiling for 16 bit resolution; this is where a
+ * song sits in the cart before the MUSIC row: the fight 6 to 10 dB under the
+ * hit sounds (tools/bake_music.cpp prints the numbers), the garage a menu */
+static const float MODE_TRIM[4] = { 0.0f, 0.5f, 0.4f, 0.45f };
+static const char *const MODE_NAME[4] = { "off", "GARAGE", "ARENA", "OVERTIME" };
 
 /* the playing song */
 static int play_mode;             /* 0 none */
@@ -81,11 +91,17 @@ static float duck;                             /* ramped duck */
 static int pending_mode = -1;                  /* a switch waiting for the next beat */
 /* the outgoing song during a crossfade */
 static int out_ch[STEMS];
-static float out_fade, out_g[STEMS], out_secs = 0.5f;
+static float out_fade, out_g[STEMS], out_secs = 0.5f, out_trim = 1.0f;
 
 /* the settings rows, 0..10, as a fader law: 6 is -3 dB, 3 is -8 dB */
 static float level_gain(int level) { float x = level / 10.0f; return x <= 0.0f ? 0.0f : powf(x, 0.7f); }
-static float stem_vol(int i) { return g[i] * fade * duck * level_gain(music_level); }
+static float stem_vol(int i) { return g[i] * fade * duck * level_gain(music_level) * MODE_TRIM[play_mode]; }
+
+static void music_log(const char *what, int mode) {
+  char m[64];
+  int n = snprintf(m, sizeof m, "[music] %s %s", what, MODE_NAME[mode & 3]);
+  wc_log(m, (unsigned)(n > 0 ? n : 0));
+}
 
 static void seg_frames(int *frames, int *beat) {
   const song_t *s = &SONGS[play_mode];
@@ -153,7 +169,7 @@ static void load_stems(void) {
     free(b);
     if (snd[i] >= 0 && !src_rate) src_rate = wc_mixer_sounds[snd[i]].sample_rate;
   }
-  if (!src_rate) src_rate = 24000;
+  if (!src_rate) src_rate = 22050;
   for (int i = 0; i < STEMS; i++) { ch[i] = -1; out_ch[i] = -1; g[i] = gt[i] = i == 2 ? 0.0f : 1.0f; gr[i] = 0.1f; }
   duck = 1.0f; fade = 1.0f; fade_t = 1.0f; fade_r = 0.5f;
 }
@@ -172,7 +188,7 @@ static void ramp_gains(float dt) {
   if (out_fade > 0.0f) {
     out_fade -= dt / out_secs;
     if (out_fade <= 0.0f) { out_fade = 0.0f; for (int i = 0; i < STEMS; i++) if (out_ch[i] >= 0) { wc_mixer_stop(out_ch[i]); out_ch[i] = -1; } }
-    else for (int i = 0; i < STEMS; i++) if (out_ch[i] >= 0) wc_mixer_set_volume(out_ch[i], out_g[i] * out_fade * duck * level_gain(music_level));
+    else for (int i = 0; i < STEMS; i++) if (out_ch[i] >= 0) wc_mixer_set_volume(out_ch[i], out_g[i] * out_fade * duck * level_gain(music_level) * out_trim);
   }
   if (play_mode && fade <= 0.0f && fade_t <= 0.0f) { stop_song(); play_mode = 0; }
 }
@@ -209,6 +225,7 @@ static void mix_stems(int offset, int n) {
       printf("[audio] mode %d on the beat at out frame %llu (src pos %llu of beat %d)\n", m, (unsigned long long)(probe_out + (uint64_t)offset), (unsigned long long)(pos16 >> 16), beat);
 #endif
       uint64_t frac = pos16 % beat16;
+      music_log("on the beat", m);
       begin_song(m, 1.0f);
       pos16 = frac;
       for (int i = 0; i < STEMS; i++) if (ch[i] >= 0) wc_mixer_channels[ch[i]].pos_frac = frac;
@@ -223,6 +240,7 @@ static void crossfade_to(int mode, float secs, float fade_from) {
   if (out_fade > 0.0f) for (int i = 0; i < STEMS; i++) if (out_ch[i] >= 0) { wc_mixer_stop(out_ch[i]); out_ch[i] = -1; }
   for (int i = 0; i < STEMS; i++) { out_ch[i] = ch[i]; out_g[i] = g[i]; ch[i] = -1; }
   out_fade = play_mode ? fade : 0.0f;
+  out_trim = MODE_TRIM[play_mode];
   out_secs = secs;
   pending_mode = -1;
   if (mode) begin_song(mode, fade_from); else play_mode = 0;
@@ -255,6 +273,7 @@ void audio_music(int mode) {
 #ifdef MUSIC_LIVE
   audio_band_music(mode);
 #else
+  music_log("mode", mode);
   if (mode == MUSIC_OVERTIME && play_mode == MUSIC_ARENA) { pending_mode = mode; return; }
   if (mode == MUSIC_GARAGE || mode == MUSIC_OFF) { crossfade_to(mode, 0.5f, 0.0f); return; }
   /* a hard cut: ARENA on FIGHT, or anything from silence; the old stems get
