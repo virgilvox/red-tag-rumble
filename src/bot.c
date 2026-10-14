@@ -60,6 +60,7 @@ void bot_setup(bot_t *b, const build_t *build, int seat, int is_ai, int team, fl
   /* parts fly from 50 percent HP on FRAME or AR_NONE, else from 20 (4.9) */
   b->shed_next = (uint8_t)(build->chassis == CH_FRAME ? 50 : build->armour == AR_NONE ? 50 : 20);
   b->still_x = x; b->still_z = z;
+  b->load = 1.0f;                            /* all wheels on the floor (DEEP: the ride takes it away) */
 }
 
 void bot_setup_ops(bot_t *b, float x, float z, float heading, int driven) {

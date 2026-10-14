@@ -100,6 +100,7 @@ typedef struct {
   int16_t grind_t, slide_t, tread_hit, dig_t, dig_cd; float grind_x, grind_z; int8_t wheel_hit_side;
   /* DEEP 2.2: HUD readiness, written every step, never read by the sim */
   float ram_closing; int16_t hit_flash_t, spent_t; uint8_t weapon_ready, can_self_right, self_right_key, last_hit_reason;
+  /* DEEP sim internals */ float load, ride_lift, e_prev; int16_t slide_cd, scrape_t, scrape_cd, bind_t, carry_ride_t, limp_t, crush_t, ride_cd[MAX_BOTS]; uint8_t wheel_fric, ride_full, bounced, tipping, wheel_lost, track_lost, spin_armed, grind_on, flame_on, ride_kind;
 } bot_t;
 
 typedef struct { float x, z, y, vx, vz, vy, spin; int16_t life; uint8_t kind, colour, pickup, owner, bounced, panel; } debris_t;   /* panel: PN_* for DB_PANEL */

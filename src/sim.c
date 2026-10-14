@@ -86,6 +86,19 @@
  * next needs a visible spin up). The spun down zone of 4.7 still opens under 0.3. SPINNER_HIT_MIN is
  * in sim.h (DEEP 2.4) so the HUD reads the same number */
 
+/* the drive and contact model (DEEP-plan 6 steps 3 to 5): a wheel's grip is mu g load, the floor's lateral
+ * hold is that times LAT_GRIP; contacts are impulses with restitution and friction at the contact point */
+#define E_BOTS      0.2f
+#define E_WALLS     0.3f
+#define E_RIDE      0.1f
+#define MU_CONTACT  0.4f
+#define MU_RIDE     0.15f
+#define SLOP        0.01f
+#define TIP_G       9.0f        /* rad/s2: gravity's pull on a tipping body about its edge */
+#define RELAX_RATE  10.0f       /* rad/s: a supported body settles onto the floor's slope */
+#define SLIDE_SPEED 2.0f        /* u/s of lateral slide that is an EV_SLIDE */
+#define SCRAPE_SPEED 1.5f       /* u/s along a wall or on a lid that is an EV_SCRAPE after 6 frames */
+
 /* -- the trig table (4.2) ----------------------------------------- */
 /* 1024 entries over a full turn, built once with a double precision series so
  * the native balance tool and the wasm cart hold identical floats. */
@@ -564,11 +577,44 @@ static int boost_edge(const pad_state_t *in, const pad_state_t *prev) {
 }
 static int btn_edge(const pad_state_t *in, const pad_state_t *prev, int bit) { return (in->buttons & bit) && !(prev->buttons & bit); }
 
+/* the wheel, track or foot model (DEEP-plan 6 step 4, deep-physics 3.3). Forward: the motor drives toward
+ * t x top at accel, a coasting or idle bot's motors brake it, and neither can ask the floor for more than its
+ * grip mu g load. Lateral: the tyres take out the sideways speed in proportion to it (the old bleed rate) up
+ * to the floor's lateral hold mu g LAT_GRIP load, so a gentle turn rolls and a knock slides: TREADS stop a
+ * 6 u/s shove in about 0.6 u, a TWO WHEEL skids twice that, and a slide over 2 u/s is an EV_SLIDE */
+static void wheel_step(match_t *m, int slot, int driving, float t, float top, float accel) {
+  bot_t *b = &m->bots[slot];
+  const drive_def_t *d = &DRIVES[b->build.drive];
+  const arena_def_t *ar = sim_arena(m);
+  float load = b->load < 0 ? 0 : b->load;
+  float mu = d->traction * (b->build.drive == DR_TREAD ? 1.0f : ar->traction_mult);
+  float grip = mu * GRAVITY * load * DT;                            /* the most the floor gives this frame, u/s */
+  float fx, fz, rx, rz; fwd_of(b->b.h, &fx, &fz); right_of(b->b.h, &rx, &rz);
+  float vf = dotp(b->b.vx, b->b.vz, fx, fz), vl = dotp(b->b.vx, b->b.vz, rx, rz);
+  float dv;
+  if (!driving) dv = -vf * 0.10f;                                   /* motors braked: an idle bot rolls to a stop */
+  else if (fabs_f(t) < 0.05f) dv = -vf * 0.19f;                     /* coasting: the old 0.90 twice a frame */
+  else dv = rtr_clamp(t * top - vf, -accel * DT, accel * DT);
+  dv = rtr_clamp(dv, -grip, grip);
+  float hold = grip * LAT_GRIP[b->build.drive] * (b->tread_hit > 0 ? 0.7f : 1.0f);
+  float dl = rtr_clamp(vl * (4.0f + 8.0f * d->traction) * DT, -hold, hold);
+  float nvf = vf + dv, nvl = vl - dl;
+  b->b.vx = fx * nvf + rx * nvl; b->b.vz = fz * nvf + rz * nvl;
+  b->wheel_fric = 1;
+  float sl = fabs_f(nvl);
+  if (sl > 1.0f) { if (b->slide_t < 32000) b->slide_t++; } else b->slide_t = 0;
+  if (sl > SLIDE_SPEED && b->slide_cd == 0 && b->alive) {
+    float s = nvl > 0 ? 1.0f : -1.0f;
+    ev_full(m, EV_SLIDE, slot, slot, 0, b->b.x, b->b.z, b->b.y, sl, rx * s, rz * s, 0, b->build.weapon, 0, 0, sl, 0);
+    b->slide_cd = 30;
+  }
+}
+
 static void drive_step(match_t *m, int slot) {
   bot_t *b = &m->bots[slot];
   const drive_def_t *d = &DRIVES[b->build.drive];
   const arena_def_t *ar = sim_arena(m);
-  b->drive_t = 0; b->drive_s = 0;
+  b->drive_t = 0; b->drive_s = 0; b->wheel_fric = 0;
   if (!b->alive) return;
   const pad_state_t *in = &b->in, *prev = &b->prev_in;
   /* boost, brake, taunt (4.5) */
@@ -582,16 +628,21 @@ static void drive_step(match_t *m, int slot) {
     if (b->taunts <= 4) b->aggro += 60;             /* capped at 4 taunts (2.5) */
     ev_simple(m, EV_TAUNT, slot, slot, 0, b->b.x, b->b.z, b->b.y);
   }
+  /* wheels, tracks or feet on the floor: the tyre model below runs whether or not the bot can drive, so a
+   * stunned or braked bot that is shoved still slides on its grip (DEEP-plan 6 step 4) */
+  int wheels = !d->strafe && !b->airborne && !b->lifted_by && !b->clamped_by && !b->falling && b->pit_state != 2 && !b->is_ops && !(b->inverted && !bot_can_drive(b));
   if (!bot_can_drive(b)) {
     /* no drive, no steering torque: the yaw rate decays on the floor (an inverted or stunned bot used to keep
      * whatever spin it had, forever); a tumbling airborne bot keeps its spin until it lands */
     if (!b->airborne) b->b.w *= 0.85f;
+    if (wheels) wheel_step(m, slot, 0, 0, 0, 0);
     return;
   }
   float sx, sy; stick_vec(in, &sx, &sy);
   float top = bot_top_speed(b);
   if (b->lift > 0.3f && b->carry_t > 0) top *= 0.6f;          /* carrying a victim */
   float accel = d->accel * (b->build.drive == DR_TREAD ? 1.0f : ar->traction_mult);
+  if (b->dig_t > 0) accel *= 1.6f;                            /* DIG IN: the plate scrapes and the motors bite */
   if (arena_on_slope(ar, b->b.x, b->b.z) && b->build.drive != DR_LEGTRACK && b->build.drive != DR_SIX) accel *= 0.6f, top *= 0.6f;
   if (d->strafe) {
     /* HOVER and MELTY: the stick is a world direction relative to the seat's camera forward. The
@@ -606,8 +657,10 @@ static void drive_step(match_t *m, int slot) {
     float mag = len2(dx, dz);
     b->drive_t = mag;
     /* a pinched skirt (a bot pressing on the hover within SKIRT_FRAMES) cuts the thrust to a quarter: a
-     * HOVER cannot push off whatever is leaning on it, which is what lets a wedge shove it anywhere */
+     * HOVER cannot push off whatever is leaning on it, which is what lets a wedge shove it anywhere; a
+     * ridden hover is off the floor and has no thrust at all (load 0) */
     if (b->build.drive == DR_HOVER && b->skirt_t > 0) accel *= 0.25f;
+    accel *= b->load;
     float k = accel / (top > 0 ? top : 1.0f) * DT;
     float dvx = (dx * top - b->b.vx) * k, dvz = (dz * top - b->b.vz) * k;
     if (b->build.drive == DR_HOVER) {
@@ -619,7 +672,9 @@ static void drive_step(match_t *m, int slot) {
         dvx -= lat_x * (1.0f - HOVER_BRAKE); dvz -= lat_z * (1.0f - HOVER_BRAKE);                                 /* so is thrust across the slide */
       }
     }
-    b->b.vx += dvx; b->b.vz += dvz;
+    /* a HOVER with the stick at rest has no thrust: it drifts on its cushion (LAT_GRIP 0.08, the 0.985 drag);
+     * MELTY keeps its skids and stops */
+    if (b->build.drive != DR_HOVER || mag > 0.1f) { b->b.vx += dvx; b->b.vz += dvz; }
     /* the heading follows the direction of travel at up to 3 rad/s (the camera wants a forward; MELTY spins in render) */
     if (mag > 0.1f) { float want = rtr_atan2(dx, dz); float err = rtr_wrap_pi(want - b->b.h); b->b.w = rtr_clamp(err * 6.0f, -3.0f, 3.0f); }
     else b->b.w *= 0.8f;
@@ -635,18 +690,12 @@ static void drive_step(match_t *m, int slot) {
   if (t < 0) t *= 0.8f;                                        /* reverse at 80 percent */
   if (b->inverted) { if (b->build.weapon == WP_HORIZ) { t = 0; s = 0; } }   /* HORIZONTAL inverted spins but cannot steer */
   b->drive_t = t; b->drive_s = s;
-  float fx, fz, rx, rz; fwd_of(b->b.h, &fx, &fz); right_of(b->b.h, &rx, &rz);
-  float vf = dotp(b->b.vx, b->b.vz, fx, fz), vl = dotp(b->b.vx, b->b.vz, rx, rz);
   float speed = len2(b->b.vx, b->b.vz);
-  /* the forward component is driven toward t * top at accel; the lateral one bleeds by traction */
-  float want = t * top;
-  float dv = rtr_clamp(want - vf, -accel * DT, accel * DT);
-  if (fabs_f(t) < 0.05f) dv = -vf * 0.10f;                      /* coasting: drag 0.90 per frame */
-  float nvf = vf + dv, nvl = vl * (1.0f - (4.0f + 8.0f * d->traction) * DT);
-  b->b.vx = fx * nvf + rx * nvl; b->b.vz = fz * nvf + rz * nvl;
+  if (wheels) wheel_step(m, slot, 1, t, top, accel);
   float turn = d->turn_deg * (PI_F / 180.0f);
-  /* stick right (s > 0) is a right turn, which is a heading decrease in this world (see right_of) */
-  float wt = -s * turn * (1.0f - 0.4f * fmin_f(speed / (top > 0 ? top : 1.0f), 1.0f)) * (b->build.weapon == WP_HORIZ && b->spin > 0.6f ? 0.7f : 1.0f);
+  /* stick right (s > 0) is a right turn, which is a heading decrease in this world (see right_of); a bot with
+   * its wheels up turns no better than it drives (load) */
+  float wt = -s * turn * (1.0f - 0.4f * fmin_f(speed / (top > 0 ? top : 1.0f), 1.0f)) * (b->build.weapon == WP_HORIZ && b->spin > 0.6f ? 0.7f : 1.0f) * fmin_f(b->load, 1.0f);
   if (b->inverted) wt *= 0.7f;
   b->b.w += rtr_clamp(wt - b->b.w, -20.0f * DT, 20.0f * DT);
 }
@@ -1015,6 +1064,38 @@ static void ram_check(match_t *m, int i, int j, const contact_t *c) {
 }
 
 /* -- integration, walls and solids (4.4 step 7 and 8) -------------- */
+/* the pitch past which an unsupported bot goes over (deep-physics 3.1), radians */
+static float tip_angle(const bot_t *b) { return (CHASSIS_TIP_DEG[b->build.chassis] + DRIVE_TIP_ADJ_DEG[b->build.drive]) * (PI_F / 180.0f); }
+
+/* the floor's slope under a body: the pitch (nose up) and roll (left up) a supported body settles to */
+static void terrain_slope(const arena_def_t *ar, const body_t *bd, float *pitch, float *roll) {
+  float fx, fz, rx, rz; fwd_of(bd->h, &fx, &fz); right_of(bd->h, &rx, &rz);
+  float nose = arena_floor_y(ar, bd->x + fx * bd->hl, bd->z + fz * bd->hl), tail = arena_floor_y(ar, bd->x - fx * bd->hl, bd->z - fz * bd->hl);
+  float left = arena_floor_y(ar, bd->x + rx * bd->hw, bd->z + rz * bd->hw), right = arena_floor_y(ar, bd->x - rx * bd->hw, bd->z - rz * bd->hw);
+  *pitch = rtr_atan2(nose - tail, 2.0f * bd->hl);
+  *roll = rtr_atan2(left - right, 2.0f * bd->hw);
+}
+
+static void orient_step(match_t *m, int slot) {
+  bot_t *b = &m->bots[slot];
+  body_t *bd = &b->b;
+  if (b->is_ops) { bd->pitch = bd->roll = bd->wp = bd->wr = 0; return; }
+  if (b->airborne && !b->ride_by) {
+    if (b->tipping) {
+      /* going over the wedge's top edge: gravity pulls it back under the tip angle and over past it */
+      float th = tip_angle(b), a = fabs_f(bd->pitch), sg = bd->pitch >= 0 ? 1.0f : -1.0f;
+      if (a < th) bd->wp -= sg * TIP_G * DT; else if (a < PI_F * 0.5f) bd->wp += sg * TIP_G * DT;
+    }
+    bd->pitch += bd->wp * DT; bd->roll += bd->wr * DT;
+    return;
+  }
+  if (b->ride_by || b->lifted_by || b->clamped_by) return;     /* posed by the ride or the hold */
+  float pt, rt; terrain_slope(sim_arena(m), bd, &pt, &rt);
+  bd->pitch += rtr_clamp(pt - bd->pitch, -RELAX_RATE * DT, RELAX_RATE * DT);
+  bd->roll += rtr_clamp(rt - bd->roll, -RELAX_RATE * DT, RELAX_RATE * DT);
+  bd->wp = bd->wr = 0;
+}
+
 static void integrate(match_t *m) {
   const arena_def_t *ar = sim_arena(m);
   for (int i = 0; i < m->nbots; i++) {
@@ -1032,14 +1113,19 @@ static void integrate(match_t *m) {
     /* drag: a bot that is not driving this step (coasting, stunned, braking, dead) loses 10 percent of its
      * plane velocity per frame, HOVER 1.5 percent (4.4 step 7); a driving bot's forward is controlled in
      * drive_step and its lateral bleeds by traction there */
-    if (fabs_f(b->drive_t) < 0.05f || !b->alive) { float k = b->build.drive == DR_HOVER && b->alive && b->skirt_t <= 0 ? 0.985f : 0.90f; bd->vx *= k; bd->vz *= k; }
+    if ((fabs_f(b->drive_t) < 0.05f && !b->wheel_fric) || !b->alive) { float k = b->build.drive == DR_HOVER && b->alive && b->skirt_t <= 0 ? 0.985f : 0.90f; bd->vx *= k; bd->vz *= k; }
     if (!b->alive) bd->w *= 0.9f;
     /* the taunt wiggle: yaw plus and minus 15 degrees at 6 Hz */
     bd->x += bd->vx * DT; bd->z += bd->vz * DT;
     bd->h += bd->w * DT;
     bd->h = rtr_wrap_pi(bd->h);
-    /* the height channel */
+    /* pitch and roll (DEEP-plan 6 step 5): a flier tumbles freely, a wedge tip falls over its edge under
+     * gravity's torque, a supported body settles onto the slope under it; a ridden or held body is posed by
+     * the ride or the hold below */
+    orient_step(m, i);
+    /* the height channel; a ridden bot sits on the wedge at the height the ride gives it */
     float fy = arena_floor_y(ar, bd->x, bd->z);
+    if (b->ride_by && !b->airborne) { b->floor_y = fy; bd->vy = 0; continue; }
     if (b->airborne) {
       bd->vy -= GRAVITY * DT; bd->y += bd->vy * DT;
       if (bd->y > b->peak_y) b->peak_y = bd->y;
@@ -1064,23 +1150,29 @@ static void integrate(match_t *m) {
   }
 }
 
-static void resolve_static(match_t *m, int slot, const contact_t *c, float e, int is_wall, int sol_kind, int sol_idx) {
+static int resolve_static(match_t *m, int slot, const contact_t *c, float e, int is_wall, int sol_kind, int sol_idx) {
   bot_t *b = &m->bots[slot];
   body_t *bd = &b->b;
   float im = bd->inv_mass > 0 ? bd->inv_mass : (b->is_ops ? 1.0f / 6.0f : 2.0f);
-  /* the normal points from the body into the wall; move the body out */
-  bd->x -= c->nx * c->pen * 0.8f; bd->z -= c->nz * c->pen * 0.8f;
-  float vn = dotp(bd->vx, bd->vz, c->nx, c->nz);
-  if (vn <= 0) return;
-  float mass = 1.0f / im;
-  float j = (1.0f + e) * vn * mass;
+  float ii = b->is_ops ? 0 : body_ii(b);
+  /* the normal points from the body into the wall; move the body out past the slop */
+  float corr = fmax_f(c->pen - SLOP, 0) * 0.8f;
+  bd->x -= c->nx * corr; bd->z -= c->nz * corr;
+  /* the contact point's velocity: the body's plus the yaw rate's sweep, w x (rz, -rx) in this world */
+  float rx = c->cx - bd->x, rz = c->cz - bd->z;
+  float vpx = bd->vx + bd->w * rz, vpz = bd->vz - bd->w * rx;
+  float vn = dotp(vpx, vpz, c->nx, c->nz);
+  if (vn <= 0) return 0;
   float tx = -c->nz, tz = c->nx;
-  float vt = dotp(bd->vx, bd->vz, tx, tz);
-  float jt = rtr_clamp(vt * mass, -0.4f * j, 0.4f * j);
+  float rn = rz * c->nx - rx * c->nz, rt = rz * tx - rx * tz;
+  float j = (1.0f + e) * vn / (im + rn * rn * ii);
+  float vt = dotp(vpx, vpz, tx, tz);
+  float jt = rtr_clamp(vt / (im + rt * rt * ii), -MU_CONTACT * j, MU_CONTACT * j);
   float Jx = -(c->nx * j + tx * jt), Jz = -(c->nz * j + tz * jt);
   bd->vx += Jx * im; bd->vz += Jz * im;
-  float ox = c->cx - bd->x, oz = c->cz - bd->z;
-  bd->w += (ox * Jz - oz * Jx) * bd->inv_inertia * 0.5f;
+  bd->w += (rz * Jx - rx * Jz) * ii;                    /* the torque of the impulse about the centre (full, DEEP-plan 6 step 5) */
+  /* a bot sliding along the lexan: walls_step counts the frames and fires EV_SCRAPE */
+  int scraped = is_wall && b->alive && fabs_f(vt) > SCRAPE_SPEED;
   /* wall hit events (4.5) */
   if (vn > 2.0f && b->alive && !b->is_ops) {
     int ev = EV_WALL;
@@ -1090,7 +1182,8 @@ static void resolve_static(match_t *m, int slot, const contact_t *c, float e, in
     else if (b->build.drive == DR_MELTY && b->spin > 0.5f) { b->hp -= WP_MELTY_WALL_DMG; hp_thresholds(m, slot); }
     if (vn > 4.0f && ev == EV_WALL) { b->hp -= 2.0f; hp_thresholds(m, slot); }   /* 2 HP over 4 u/s (5.2) */
     b->wall_hits++;
-    ev_hit(m, ev, slot, slot, 0, c->cx, c->cz, bd->y + 0.2f, ev == EV_SPIN_WALL ? WP_HORIZ_WALL_DMG : vn > 4.0f ? 2.0f : 0, -c->nx, -c->nz);
+    if (ev == EV_SPIN_WALL) ev_full(m, EV_SPIN_WALL, slot, slot, 0, c->cx, c->cz, bd->y + bd->clr + bd->hgt * 0.5f, WP_HORIZ_WALL_DMG, -c->nx, -c->nz, PN_FRONT, WP_HORIZ, 0, HIT_WHY_WALL, vn, j);
+    else ev_full(m, EV_WALL, slot, slot, 0, c->cx, c->cz, bd->y + 0.2f, vn > 4.0f ? 2.0f : 0, -c->nx, -c->nz, 0, EVW_WALL, 0, 0, vn, j);
     /* a bench or a roof bumper takes the impulse as damage */
     if (!is_wall) {
       const arena_def_t *ar = sim_arena(m);
@@ -1104,6 +1197,7 @@ static void resolve_static(match_t *m, int slot, const contact_t *c, float e, in
       }
     }
   }
+  return scraped ? 1 : 0;
 }
 
 static int in_ops_zone(const arena_def_t *a, float x, float z, float grow) {
@@ -1114,6 +1208,7 @@ static void walls_step(match_t *m) {
   const arena_def_t *ar = sim_arena(m);
   solid_t sol[MAX_SOLIDS]; int ns = gather_solids(m, sol);
   float hw = ar->w * 0.5f, hd = ar->d * 0.5f;
+  uint8_t scraped[MAX_BOTS] = { 0 }; contact_t scrape_c[MAX_BOTS]; memset(scrape_c, 0, sizeof scrape_c);
   for (int it = 0; it < 2; it++) {
     for (int i = 0; i < m->nbots; i++) {
       bot_t *b = &m->bots[i];
@@ -1129,7 +1224,7 @@ static void walls_step(match_t *m) {
         float cx, cz, pen = wall_pen(&s, W[k].nx, W[k].nz, W[k].off, &cx, &cz);
         if (pen <= 0) continue;
         contact_t c = { -W[k].nx, -W[k].nz, pen, cx, cz };   /* from the body into the wall */
-        resolve_static(m, i, &c, 0.3f, 1, 0, 0);
+        if (resolve_static(m, i, &c, E_WALLS, 1, 0, 0)) { scraped[i] = 1; scrape_c[i] = c; }
         shape_of(b, &s); touched = 1;
       }
       /* solids: only when the solid's top is above the body's y plus 0.1 */
@@ -1141,7 +1236,7 @@ static void walls_step(match_t *m) {
           /* a post r 0.4: contact impulse 5.0 outward and 4 dmg, 18 frame per bot cooldown (6.2) */
           shape_t ps = { (sol[k].x0 + sol[k].x1) * 0.5f, (sol[k].z0 + sol[k].z1) * 0.5f, 0, 0.4f, 0.4f, 1 };
           contact_t c; if (!collide(&s, &ps, &c)) continue;
-          resolve_static(m, i, &c, 0.3f, 0, SOL_BUMPER, sol[k].idx);
+          resolve_static(m, i, &c, E_WALLS, 0, SOL_BUMPER, sol[k].idx);
           int hi = sol[k].idx;
           if (b->alive && !b->is_ops && b->haz_t[hi] == 0) {
             b->haz_t[hi] = 18;
@@ -1157,15 +1252,50 @@ static void walls_step(match_t *m) {
         contact_t c; if (!collide(&s, &ss, &c)) continue;
         /* SIX WHEEL climbs 0.4 high benches: it rides up instead of stopping */
         if (b->build.drive == DR_SIX && sol[k].top <= 0.45f && b->alive) continue;   /* it rides over the bench */
-        resolve_static(m, i, &c, 0.3f, 0, sol[k].kind, sol[k].idx);
+        resolve_static(m, i, &c, E_WALLS, 0, sol[k].kind, sol[k].idx);
         shape_of(b, &s); touched = 1;
       }
       if (it == 0) b->pinned = (uint8_t)(touched ? (b->pinned | 1) : (b->pinned & ~1));
     }
   }
+  /* six frames sliding along the lexan over 1.5 u/s is a scrape (once per 30) */
+  for (int i = 0; i < m->nbots; i++) {
+    bot_t *b = &m->bots[i];
+    if (scraped[i]) {
+      if (++b->scrape_t == 6 && b->scrape_cd == 0) {
+        float sp = len2(b->b.vx, b->b.vz);
+        ev_full(m, EV_SCRAPE, i, i, SCRAPE_WALL, scrape_c[i].cx, scrape_c[i].cz, b->b.y + 0.1f, sp, -scrape_c[i].nx, -scrape_c[i].nz, 0, EVW_WALL, 0, 0, sp, 0);
+        b->scrape_cd = 30;
+      }
+    } else if (!b->inverted) b->scrape_t = 0;
+  }
 }
 
 /* -- bot vs bot collision and push (4.5) --------------------------- */
+/* the impulse between two bodies at a contact (DEEP-plan 6 step 5): restitution e, Coulomb friction mu, the
+ * full angular term in both directions (the yaw rate's sweep at the contact point, w x r = w (rz, -rx), and
+ * the torque rz Jx - rx Jz), so a corner hit spins a bot the right way */
+static void pair_impulse(bot_t *a, bot_t *b, const contact_t *c, float e, float mu) {
+  float ima = body_im(a), imb = body_im(b), iia = body_ii(a), iib = body_ii(b);
+  if (ima + imb <= 0) return;
+  float rax = c->cx - a->b.x, raz = c->cz - a->b.z, rbx = c->cx - b->b.x, rbz = c->cz - b->b.z;
+  float vax = a->b.vx + a->b.w * raz, vaz = a->b.vz - a->b.w * rax;
+  float vbx = b->b.vx + b->b.w * rbz, vbz = b->b.vz - b->b.w * rbx;
+  float rvx = vbx - vax, rvz = vbz - vaz;
+  float vn = dotp(rvx, rvz, c->nx, c->nz);
+  if (vn >= 0) return;
+  float tx = -c->nz, tz = c->nx;
+  float ran = raz * c->nx - rax * c->nz, rbn = rbz * c->nx - rbx * c->nz, rat = raz * tx - rax * tz, rbt = rbz * tx - rbx * tz;
+  float jn = -(1.0f + e) * vn / (ima + imb + ran * ran * iia + rbn * rbn * iib);
+  float vt = dotp(rvx, rvz, tx, tz);
+  float jt = rtr_clamp(-vt / (ima + imb + rat * rat * iia + rbt * rbt * iib), -mu * jn, mu * jn);
+  float Jx = c->nx * jn + tx * jt, Jz = c->nz * jn + tz * jt;
+  a->b.vx -= Jx * ima; a->b.vz -= Jz * ima;
+  b->b.vx += Jx * imb; b->b.vz += Jz * imb;
+  a->b.w -= (raz * Jx - rax * Jz) * iia;
+  b->b.w += (rbz * Jx - rbx * Jz) * iib;
+}
+
 static void bots_collide(match_t *m) {
   for (int it = 0; it < 2; it++) {
     for (int i = 0; i < m->nbots; i++) {
@@ -1199,27 +1329,16 @@ static void bots_collide(match_t *m) {
         }
         float ka = ima / ims, kb = imb / ims;
         if (ha != hb && ima > 0 && imb > 0) { ka = ha ? 1.0f : 0.0f; kb = 1.0f - ka; }
-        a->b.x -= c.nx * c.pen * 0.8f * ka; a->b.z -= c.nz * c.pen * 0.8f * ka;
-        b->b.x += c.nx * c.pen * 0.8f * kb; b->b.z += c.nz * c.pen * 0.8f * kb;
+        float corr = fmax_f(c.pen - SLOP, 0) * 0.8f;
+        a->b.x -= c.nx * corr * ka; a->b.z -= c.nz * corr * ka;
+        b->b.x += c.nx * corr * kb; b->b.z += c.nz * corr * kb;
         /* OPS never pushes a bot through the lexan: what the wall will not take, OPS gives back */
         if (a->is_ops != b->is_ops) {
           bot_t *o = a->is_ops ? a : b, *v = a->is_ops ? b : a;
           float vx0 = v->b.x, vz0 = v->b.z; clamp_inside(m, v);
           o->b.x += v->b.x - vx0; o->b.z += v->b.z - vz0;
         }
-        float rvx = b->b.vx - a->b.vx, rvz = b->b.vz - a->b.vz;
-        float vn = dotp(rvx, rvz, c.nx, c.nz);
-        if (vn < 0) {
-          float e = 0.2f, jn = -(1.0f + e) * vn / ims;
-          float tx = -c.nz, tz = c.nx, vt = dotp(rvx, rvz, tx, tz);
-          float jt = rtr_clamp(-vt / ims, -0.4f * jn, 0.4f * jn);
-          float Jx = c.nx * jn + tx * jt, Jz = c.nz * jn + tz * jt;
-          a->b.vx -= Jx * ima; a->b.vz -= Jz * ima;
-          b->b.vx += Jx * imb; b->b.vz += Jz * imb;
-          float oax = c.cx - a->b.x, oaz = c.cz - a->b.z, obx = c.cx - b->b.x, obz = c.cz - b->b.z;
-          if (a->alive) a->b.w -= (oax * Jz - oaz * Jx) * a->b.inv_inertia * 0.5f;
-          if (b->alive) b->b.w += (obx * Jz - obz * Jx) * b->b.inv_inertia * 0.5f;
-        }
+        pair_impulse(a, b, &c, ha || hb ? 0.0f : E_BOTS, MU_CONTACT);
         /* push: both driving into the contact */
         if (it == 0 && a->alive && b->alive) {
           float afx, afz, bfx, bfz; fwd_of(a->b.h, &afx, &afz); fwd_of(b->b.h, &bfx, &bfz);
@@ -1230,7 +1349,8 @@ static void bots_collide(match_t *m) {
           if (a->build.drive == DR_HOVER) da = 0;
           if (b->build.drive == DR_HOVER) db = 0;
           if (da > 0.2f && db > 0.2f) {
-            float pa = a->is_ops ? 2.0f * 6.0f : build_push(&a->build), pb = b->is_ops ? 2.0f * 6.0f : build_push(&b->build);
+            /* a bot with its wheels up pushes with what is left on the floor (load): the wedge wins the shove */
+            float pa = a->is_ops ? 2.0f * 6.0f : build_push(&a->build) * a->load, pb = b->is_ops ? 2.0f * 6.0f : build_push(&b->build) * b->load;
             float net = (pa - pb) * 0.5f;             /* an extra force along the normal to both */
             a->b.vx += c.nx * net * ima * DT; a->b.vz += c.nz * net * ima * DT;
             b->b.vx += c.nx * net * imb * DT; b->b.vz += c.nz * net * imb * DT;
@@ -1249,6 +1369,22 @@ static void bots_collide(match_t *m) {
         }
       }
     }
+  }
+}
+
+/* -- support (DEEP-plan 6 step 5 and 6): what share of each bot's grip is on the floor for the next step --
+ * A ridden bot loses DRIVE_RIDE_LOSS x ride_up of it (a HOVER all of it), the wedge under it gains 0.2 x
+ * ride_up (the victim's weight on its plate), two binding plates hold 0.6 for 20 frames, a WALKER limps
+ * at 0.7 for 120 frames after a leg hit */
+static void support_step(match_t *m) {
+  for (int i = 0; i < m->nbots; i++) {
+    bot_t *b = &m->bots[i];
+    float load = 1.0f;
+    if (b->ride_by) load = b->build.drive == DR_HOVER ? 0.0f : 1.0f - DRIVE_RIDE_LOSS[b->build.drive] * (b->ride_full ? 1.0f : b->ride_up);
+    if (b->riding && b->riding - 1 < m->nbots) load = 1.0f + 0.2f * m->bots[b->riding - 1].ride_up;
+    if (b->bind_t > 0) load *= 0.6f;
+    if (b->limp_t > 0) load *= 0.7f;
+    b->load = load < 0 ? 0 : load;
   }
 }
 
@@ -1951,6 +2087,16 @@ static void timers_step(match_t *m) {
     if (b->last_hit_t > 0) b->last_hit_t--;
     if (b->prop_cd > 0) b->prop_cd--;
     if (b->skirt_t > 0) b->skirt_t--;
+    if (b->slide_cd > 0) b->slide_cd--;
+    if (b->scrape_cd > 0) b->scrape_cd--;
+    if (b->bind_t > 0) b->bind_t--;
+    if (b->limp_t > 0) b->limp_t--;
+    if (b->tread_hit > 0) b->tread_hit--;
+    if (b->dig_t > 0) b->dig_t--;
+    if (b->dig_cd > 0) b->dig_cd--;
+    if (b->hit_flash_t > 0) b->hit_flash_t--;
+    if (b->spent_t > 0) b->spent_t--;
+    for (int j = 0; j < MAX_BOTS; j++) if (b->ride_cd[j] > 0) b->ride_cd[j]--;
     if (b->pin_t > 0 && len2(b->b.vx, b->b.vz) >= 0.3f) b->pin_t = 0;
     for (int j = 0; j < MAX_BOTS; j++) { if (b->hit_cd[j] > 0) b->hit_cd[j]--; if (b->hit_cd2[j] > 0) b->hit_cd2[j]--; }
   }
@@ -2002,7 +2148,7 @@ void sim_init(match_t *m, const match_setup_t *s) {
 void sim_step(match_t *m) {
   if (m->hitstop > 0) { m->hitstop--; return; }
   /* 2. previous transforms, the clocks */
-  for (int i = 0; i < m->nbots; i++) { body_t *b = &m->bots[i].b; b->px = b->x; b->pz = b->z; b->ph = b->h; b->py = b->y; }
+  for (int i = 0; i < m->nbots; i++) { body_t *b = &m->bots[i].b; b->px = b->x; b->pz = b->z; b->ph = b->h; b->py = b->y; b->pp = b->pitch; b->pr = b->roll; }
   m->frame++;
   if (!m->over) {
     m->clock_s -= DT;
@@ -2023,8 +2169,9 @@ void sim_step(match_t *m) {
   integrate(m);
   /* 8. walls and solids */
   walls_step(m);
-  /* 9. bot vs bot and push */
+  /* 9. bot vs bot and push, then the support each bot drives on next step */
   bots_collide(m);
+  support_step(m);
   /* 10. clash, hitboxes, holds */
   clash_check(m);
   hit_test(m);

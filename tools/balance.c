@@ -1031,10 +1031,27 @@ static int sc_corpse_hittable(char *msg, int n) {
         "%d corpse hits (flags and dmg wrong on %d), closest gap %d frames (>= 30), first spin drop %.2f (about half of %.2f), corpse moved %.2f, tallies untouched %d", hits, bad, min_gap, drop, usual, moved, tallies);
 }
 
+/* a 6 u/s sideways shove on an idle bot of each drive: the distance it slides before the sideways speed
+ * is under 0.3 (TREADS under 0.8, FOUR WHEEL 1.0 to 1.6, TWO WHEEL 1.6 to 2.4, HOVER over 6) */
+static float slide_of(int drive) {
+  build_t b = { CH_BOX, (uint8_t)drive, WP_NONE, WP_NONE, AR_ALU, 0, 0 }, o = b;
+  sc_init(AR_BAY, &b, &o, 0);
+  sc_place(0, -9.0f, -4.0f, 0); sc_place(1, 9.0f, 5.0f, 0);
+  SM.bots[0].b.vx = 6.0f;                    /* heading 0 faces +z, so +x is straight sideways */
+  float x0 = SM.bots[0].b.x;
+  for (int f = 0; f < 600; f++) { sc_pad(0, 0, 0, 0); sc_pad(1, 0, 0, 0); sc_step(); if (fabsf(SM.bots[0].b.vx) < 0.3f) break; }
+  return SM.bots[0].b.x - x0;
+}
+static int sc_slide_drives(char *msg, int n) {
+  float tr = slide_of(DR_TREAD), fw = slide_of(DR_FOUR), tw = slide_of(DR_TWO), hv = slide_of(DR_HOVER);
+  SC_OK(tr < 0.8f && fw >= 1.0f && fw <= 1.6f && tw >= 1.6f && tw <= 2.4f && hv > 6.0f, "slid TREADS %.2f (< 0.8), FOUR WHEEL %.2f (1.0 to 1.6), TWO WHEEL %.2f (1.6 to 2.4), HOVER %.2f (> 6)", tr, fw, tw, hv);
+}
+
 static const scenario_t SCENARIOS[] = {
   { "ghost-sim", sc_ghost_sim },
   { "mound-contact", sc_mound_contact },
   { "corpse-hittable", sc_corpse_hittable },
+  { "slide-drives", sc_slide_drives },
 };
 
 static int scenarios(const char *which) {
