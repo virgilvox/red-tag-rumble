@@ -171,7 +171,13 @@ static const float DRIVE_TIP_ADJ_DEG[DR_COUNT] __attribute__((unused)) = { -5, 0
  * goes over only from deep on the plate and lands on an edge from the tip; a LOWBOY needs a deep hit on a
  * bot driving in. (deep-physics 3.8 had BOX 4.5, LOWBOY 2.7, LUNCHBOX 6.3: a LUNCHBOX turned past 240 and
  * landed on its back edge, and a standing LOWBOY went over after its bounce) */
-static const float CHASSIS_TUMBLE[CH_COUNT] __attribute__((unused)) = { 3.0f, 4.2f, 1.8f, 4.5f, 5.0f, 5.1f };
+#ifndef TUMBLE_LOWBOY
+#define TUMBLE_LOWBOY 1.8f
+#endif
+#ifndef TUMBLE_BOX
+#define TUMBLE_BOX 3.0f
+#endif
+static const float CHASSIS_TUMBLE[CH_COUNT] __attribute__((unused)) = { TUMBLE_BOX, 4.2f, TUMBLE_LOWBOY, 4.5f, 5.0f, 5.1f };
 /* the closing speed at which a wedge that rode all the way under a chassis tips it over (u/s); a SHELL never
  * tips (it rolls off), a HOVER never tips (it is carried) */
 #ifndef V_TIP_BOX

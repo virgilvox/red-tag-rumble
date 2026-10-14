@@ -74,9 +74,11 @@
 #define KNOCK_HORIZ 6.0f
 #endif
 #define KNOCK_SPIN(w, melty) ((melty) ? 4.0f : (w) == WP_HORIZ ? KNOCK_HORIZ : 4.0f)
-/* the energy a hit must take to land the table's base damage: dmg_raw = base x E_hit / SPIN_E_REF */
+/* the energy a hit must take to land the table's base damage: dmg_raw = base x E_hit / SPIN_E_REF. The plan's
+ * 0.5 made a medium bite the base, but the tooth speed alone puts a full spin bite at 0.64 and most hits at
+ * the 0.80 ceiling, 1.6x the table; at 0.8 a full bite is the table's base and hit sizes stay as R4 tuned them */
 #ifndef SPIN_E_REF
-#define SPIN_E_REF 0.5f
+#define SPIN_E_REF 0.8f
 #endif
 #define DEFLECT_HOP_VY 1.5f
 /* no count-out for stillness in the first 5 s of a fight (an inverted bot still counts) */
@@ -614,7 +616,7 @@ static float apply_hit(match_t *m, hit_t *h) {
   if (h->ev_type >= 0) {
     ev_full(m, h->ev_type, h->att < 0 ? 255 : h->att, h->vic, (int)(h->zone * 10.0f + 0.5f), h->cx, h->cz, h->cy > 0 ? h->cy : v->b.y + v->b.clr + v->b.hgt * 0.5f,
             dmg, h->nx, h->nz, panel, weapon < 0 ? EVW_NONE : weapon, h->flags, reason, h->speed, h->j);
-    v->last_hit_reason = (uint8_t)reason;
+    if (a && (h->ev_type == EV_HIT || h->ev_type == EV_RAM)) a->last_hit_reason = (uint8_t)reason;   /* why my last hit landed as it did */
   }
   /* hit stop (5.1) from the band; the sim applies it so a replay stays aligned */
   if (!m->hitstop_off && (h->ev_type == EV_HIT || h->ev_type == EV_RAM)) {
@@ -1183,9 +1185,11 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
       ev_full(m, EV_LAUNCH, att, vic, LAUNCH_DRUM, v->b.x, v->b.z, v->b.y, 3.0f, nx, nz, edge, WP_DRUM, 0, 0, 3.0f, wp);
     }
   } else knock_at(v, nx * J, nz * J, c->cx, c->cz);
-  /* a spinner glancing off a wedge front hops up the slope (3.6) */
+  /* a spinner glancing off a wedge front is thrown up the slope and back off it (3.6): the hop, and the
+   * plate's push along the normal (the disc cannot bite, so the reaction comes straight back at it) */
   if ((flags & EVF_DEFLECT) && spinner && !a->lifted_by && !a->clamped_by && a->build.drive != DR_HOVER && !a->airborne) {
     a->b.vy = DEFLECT_HOP_VY; a->airborne = 1; a->peak_y = a->b.y; a->bounced = 0;
+    knock(a, -nx * J, -nz * J);
   }
   /* self damage per table, scaled by the energy a spinner gave up; grinding on the referee costs nothing */
   if (self > 0 && wid != WP_HAMMER && !v->is_ops) { a->hp -= self; if (a->is_ops && a->hp < 1) a->hp = 1; hp_thresholds(m, att); }
@@ -1766,8 +1770,11 @@ static void ride_start(match_t *m, int a, int v, int edge, int kind, float cl, f
   A->riding = (uint8_t)(v + 1);
   int w = A->build.weapon == WP_LIFTER && kind == WK_FORKS ? WP_LIFTER : WP_WEDGE;
   ev_full(m, EV_UNDERRIDE, a, v, edge, cx, cz, V->b.y + 0.05f, cl, 0, 0, edge, w, 0, 0, cl, 0);
-  /* the ram lands once, on entry, as today (9 + 9 by closing speed, stun 10, RAM_CD); nothing per frame */
-  if (cl > RAM_MIN_CLOSING && A->hit_cd[v] == 0) {
+  /* the ram lands once, on entry, as today (9 + 9 by closing speed, stun 10, RAM_CD), for a ramming build (a
+   * WEDGE chassis or plate, or a bare front); nothing per frame. A LOWBOY nose or a lifter's forks get under
+   * without the hit */
+  int rammer = A->build.weapon == WP_WEDGE || A->build.weapon == WP_NONE || A->build.chassis == CH_WEDGE;
+  if (rammer && cl > RAM_MIN_CLOSING && A->hit_cd[v] == 0) {
     float nx, nz; edge_normal(V, edge, &nx, &nz);
     float raw = RAM_BASE + RAM_BASE * rtr_clamp((cl - 2.0f) / 4.0f, 0, 1);
     hit_t h = { 0 };
@@ -2072,7 +2079,7 @@ static void landing(match_t *m, int slot) {
   float impact = fabs_f(bd->vy);
   int from_flip = b->flip_pending;
   float dmg = 0;
-  if (from_flip) dmg = 2.0f + 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f);
+  if (from_flip) dmg = b->bounced ? 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f) : 2.0f + 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f);
   else if (b->peak_y - b->floor_y > 1.2f || b->peak_y >= 0.99f) dmg = 8;
   int launcher = b->launched_by ? b->launched_by - 1 : -1;
   int on_bot = 0;
@@ -2081,6 +2088,9 @@ static void landing(match_t *m, int slot) {
     bot_t *o = &m->bots[j];
     if (!o->alive || o->airborne) continue;
     if (b->tipping && j == launcher) continue;          /* tipped off a wedge: it comes down on the slope, not on the bot */
+    /* only a real fall lands on a bot: a flip, or a drop of half a unit; a spinner's hop up a wedge plate or
+     * a ramp lip settles back onto it */
+    if (!from_flip && b->peak_y - b->floor_y < 0.5f) continue;
     shape_t sa, sb; shape_of(b, &sa); shape_of(o, &sb);
     contact_t c;
     if (collide(&sa, &sb, &c)) {
@@ -2113,9 +2123,16 @@ static void landing(match_t *m, int slot) {
   else if (ao > (shell ? D150 : D120)) inv = 1;
   else if (shell && ao > D120) { inv = 0; rolled_up = 1; }
   else if (b->alive) {
-    /* on an edge: one more bounce, the tumble at 0.6x; the landing after it decides */
+    /* on an edge: the fall's damage lands now, then one more bounce with the tumble at 0.6x; the landing
+     * after it decides the face and adds only that small fall */
+    float adj = dmg * (1.0f - ARMOURS[b->build.armour].reduction);
+    if (adj > 0) {
+      b->hp -= adj;
+      if (b->launched_by && from_flip) { bot_t *a = &m->bots[b->launched_by - 1]; a->dealt += adj; if (adj > a->biggest) a->biggest = adj; }
+      hp_thresholds(m, slot);
+    }
+    ev_full(m, EV_LAND, launcher >= 0 ? launcher : slot, slot, LAND_BOUNCE, bd->x, bd->z, bd->y, adj, 0, 1, 0, EVW_LAND, 0, 0, impact, 0);
     b->bounced = 1; bd->vy = 1.6f; bd->wp *= 0.6f; bd->wr *= 0.6f;
-    ev_full(m, EV_LAND, launcher >= 0 ? launcher : slot, slot, LAND_BOUNCE, bd->x, bd->z, bd->y, 0, 0, 0, 0, EVW_LAND, 0, 0, impact, 0);
     return;
   }
   if (!never && !on_bot) {
@@ -2801,7 +2818,7 @@ static void timers_step(match_t *m) {
     bot_t *b = &m->bots[i];
     if (b->hp_max == 0) continue;
     if (b->stun > 0) b->stun--;
-    if (b->cooldown > 0) b->cooldown--;
+    if (b->cooldown > 0) { b->cooldown--; if (b->cooldown == 0 && b->build.weapon == WP_FLIPPER && b->alive && !b->is_ops) tell(m, i, TELL_FLIPPER_RESET, WP_FLIPPER); }
     if (b->cooldown2 > 0) b->cooldown2--;
     if (b->boost > 0) b->boost--;
     if (b->boost_cd > 0) b->boost_cd--;
@@ -2825,6 +2842,46 @@ static void timers_step(match_t *m) {
     for (int j = 0; j < MAX_BOTS; j++) if (b->ride_cd[j] > 0) b->ride_cd[j]--;
     if (b->pin_t > 0 && len2(b->b.vx, b->b.vz) >= 0.3f) b->pin_t = 0;
     for (int j = 0; j < MAX_BOTS; j++) { if (b->hit_cd[j] > 0) b->hit_cd[j]--; if (b->hit_cd2[j] > 0) b->hit_cd2[j]--; }
+  }
+}
+
+/* -- the HUD's readiness fields (DEEP-plan 6 step 12): written every step, never read by the sim -- */
+static void hud_fields(match_t *m) {
+  for (int i = 0; i < m->nbots; i++) {
+    bot_t *b = &m->bots[i];
+    if (b->hp_max == 0 || b->is_ops) continue;
+    int w = b->build.weapon, melty = b->build.drive == DR_MELTY;
+    const weapon_def_t *wd = &WEAPONS[w];
+    int operate = b->alive && !(b->inverted && !wd->inv_operate) && !b->lifted_by && !b->clamped_by && b->lock <= 0;
+    int ready = 0;
+    if (melty) ready = b->spin > SPINNER_HIT_MIN;
+    else switch (w) {
+      case WP_NONE: case WP_WEDGE: ready = b->dig_cd == 0 && b->alive && !b->inverted; break;
+      case WP_HORIZ: case WP_DRUM: ready = b->spin > SPINNER_HIT_MIN && operate; break;
+      case WP_SAW: ready = b->saw_on && b->spin > 0.5f && operate; break;
+      case WP_FLAME: ready = b->fuel > 0 && operate; break;
+      case WP_LIFTER: ready = operate; break;
+      default: ready = operate && b->cooldown == 0 && b->active == 0 && b->windup == 0 && b->clamp == 0 && b->stun <= 0; break;
+    }
+    b->weapon_ready = (uint8_t)ready;
+    b->self_right_key = (uint8_t)(wd->selfright == SR_B ? 1 : wd->selfright == SR_DRUM ? 2 : 0);
+    b->can_self_right = (uint8_t)(wd->selfright == SR_B || (wd->selfright == SR_DRUM && b->spin > 0.5f));
+    /* a ramming build: its closing speed on the nearest enemy along its nose (0 more than 30 degrees off it) */
+    b->ram_closing = 0;
+    if (!melty && (w == WP_NONE || w == WP_WEDGE) && b->alive) {
+      int best = -1; float bd = 1e9f;
+      for (int j = 0; j < m->nbots; j++) {
+        const bot_t *o = &m->bots[j];
+        if (j == i || !o->alive || o->is_ops || o->hp_max == 0 || (m->mode == MODE_2V2 && o->team == b->team)) continue;
+        float d = len2(o->b.x - b->b.x, o->b.z - b->b.z);
+        if (d < bd) { bd = d; best = j; }
+      }
+      if (best >= 0 && bd > 1e-3f) {
+        const bot_t *o = &m->bots[best];
+        float ux = (o->b.x - b->b.x) / bd, uz = (o->b.z - b->b.z) / bd, fx, fz; fwd_of(b->b.h, &fx, &fz);
+        if (dotp(fx, fz, ux, uz) >= 0.866f) b->ram_closing = fmax_f(0, dotp(b->b.vx - o->b.vx, b->b.vz - o->b.vz, ux, uz));
+      }
+    }
   }
 }
 
@@ -2910,6 +2967,7 @@ void sim_step(match_t *m) {
   hill_step(m);
   /* 14. win conditions */
   win_check(m);
+  hud_fields(m);
   /* remember the pads for next step's edges; a taunt wiggles the body in render only */
   for (int i = 0; i < m->nbots; i++) m->bots[i].prev_in = m->bots[i].in;
 }

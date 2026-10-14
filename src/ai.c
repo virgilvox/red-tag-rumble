@@ -279,6 +279,24 @@ static float land_time(const ai_view_t *v) {
   return (v->vy + sqrtf(disc)) / g;
 }
 
+/* a spun up spinner worth backing off from (8.2 EVADE, read against the energy model of sim.c 3.6): its
+ * disc holds over 0.7 of its energy (spin 0.84; a hit takes 35 to 80 percent of it, so a disc that just
+ * landed one is a window, not a threat), it is the right way up, its disc faces me (a HORIZONTAL or DRUM
+ * only cuts forward; a MELTY is all disc), and my build does not shed it (a SHELL dome) */
+static int spinner_threat(const bot_t *me, const ai_view_t *e, float mx, float mz) {
+  if (!bot_is_spinner(e) || e->inverted || e->spin * e->spin <= 0.7f) return 0;
+  if (me->build.chassis == CH_SHELL) return 0;
+  if (e->drive == DR_MELTY && me->build.weapon == WP_FLIPPER) return 0;   /* a flipper throws a melty frame and all: it goes in */
+  if (e->drive != DR_MELTY) {
+    float lx, lz; to_local(e->h, e->x, e->z, mx, mz, &lx, &lz);
+    if (lz < 0) return 0;                                  /* behind the disc */
+  }
+  return 1;
+}
+
+/* an enemy's half length, for the wedge's staging point */
+static float ehl_of(const match_t *m, int slot) { return slot >= 0 && slot < m->nbots ? m->bots[slot].b.hl : 0.5f; }
+
 /* -- the scorer (8.2) ---------------------------------------------- */
 typedef struct {
   float score[GOAL_COUNT];
@@ -311,14 +329,31 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     if (land_time(e) < 0.3f) exposed = 1;                                                 /* landing within 0.3 s */
     if (exposed) sc += 0.3f;
     if (weapon_ready(me)) { sc += 0.2f; ready_bonus = 1; }
-    if (bot_is_spinner(e) && e->spin > 0.7f && !my_spinner && !e->inverted) sc -= 0.4f;   /* an inverted spinner is a target, not a threat */
+    if (spinner_threat(me, e, mx, mz) && !my_spinner) sc -= 0.4f;   /* an inverted spinner is a target, not a threat */
     s->score[GOAL_ATTACK] = sc;
     /* the weakest zone: behind a spinner, the flank of a front weapon, straight at anything else; the
      * point leads the enemy by its velocity so a turning bot closes instead of chasing where it was */
     float lead = skill_of(a)->lead;
     float tx = e->x + e->vx * lead + a->aim_x, tz = e->z + e->vz * lead + a->aim_z;
     float efx, efz, erx, erz; fwd_of(e->h, &efx, &efz); right_of(e->h, &erx, &erz);
-    if (!e->inverted && !e->airborne) {
+    if (!e->inverted && !e->airborne && bot_is_wedge(me) && (e->drive == DR_HOVER || e->drive == DR_MELTY || e->chassis == CH_SHELL)) {
+      /* a skirt, a dome or a spinning frame: any edge (or none) is the edge, so the plate goes straight in,
+       * nose on, and a disc that comes round glances off the plate instead of a side */
+    }
+    else if (!e->inverted && !e->airborne && bot_is_wedge(me)) {
+      /* a wedge gets under an edge, never a wheeled side (sim.c clr_at): it lines up on the enemy's front or
+       * back (a WALKER's front), staged 1.3 u out on that edge's line, then drives straight through it. It
+       * takes the back of a front weapon, the front of a spinner (the disc glances off the plate and the
+       * lower lip gets under its nose), else whichever end is nearer me */
+      int back = front_weapon(e->weapon) || view_is_wedge(e);
+      if (e->drive == DR_WALKER || weapon_spinner(e->weapon)) back = 0;
+      else if (!back) back = dotp(mx - e->x, mz - e->z, efx, efz) < 0;
+      float ex = back ? -efx : efx, ez = back ? -efz : efz;                 /* the edge's outward normal */
+      float along = dotp(mx - e->x, mz - e->z, ex, ez), across = dotp(mx - e->x, mz - e->z, -ez, ex);
+      float stage = ehl_of(m, a->target) + me->b.hl + 0.6f;
+      if (along < stage * 0.8f || absf(across) > along * 0.7f + 0.2f) { tx = e->x + ex * stage; tz = e->z + ez * stage; }
+    }
+    else if (!e->inverted && !e->airborne) {
       if (weapon_spinner(e->weapon) && e->spin > 0.3f && dist > 1.6f) { tx -= efx * 0.9f; tz -= efz * 0.9f; }
       else if ((front_weapon(e->weapon) || view_is_wedge(e) || bot_is_wedge(me)) && dist > 1.4f) {
         /* swing to the flank only from inside its front cone (a wedge's plate is the hardest zone there,
@@ -344,7 +379,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     float sc = 0;
     int wedge_or_treads = bot_is_wedge(me) || me->build.drive == DR_TREAD;
     if (a->difficulty != AI_EASY && a->evade_block_t == 0 && !e->inverted) {
-      if (bot_is_spinner(e) && e->spin > 0.7f && dist < 3.0f && !wedge_or_treads) sc = 0.9f;
+      if (spinner_threat(me, e, mx, mz) && dist < 3.0f && !wedge_or_treads) sc = 0.9f;
       if (e->weapon == WP_HAMMER && e->windup > 0 && dist < 1.5f && sc < 0.6f) sc = 0.6f;
       if (me->hp < 25 && e->hp > 60 && sc < 0.5f) sc = 0.5f;
     }
@@ -386,7 +421,10 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
         if (e->drive == DR_HOVER && hover_ignores(h->type)) continue;
         if (!haz_danger(a, m, i, 1.5f, 0)) continue;
         float d = haz_dist(h, e->x, e->z);
-        if (d < 3.0f && d < bd) { bd = d; best = i; }
+        /* a HOVER only fears the hammers: a wedge carries it to the nearer pulverizer from across the floor
+         * (HANDOFF risk 1, DEEP-plan 6 step 13) */
+        float reach = e->drive == DR_HOVER && h->type == HZ_PULVERIZER && bot_is_wedge(me) ? 8.0f : 3.0f;
+        if (d < reach && d < bd) { bd = d; best = i; }
       }
       if (best >= 0) {
         const hazard_def_t *h = &ar->haz[best];
@@ -646,7 +684,7 @@ static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float
   a->stuck_t++;
   if (a->stuck_t >= 120) {
     float moved = len2(mx - a->progress_x, mz - a->progress_z);
-    if (moved < 0.3f && dist > 0.6f && bot_can_drive(me) && !me->inverted) {
+    if (moved < 0.3f && dist > 0.6f && bot_can_drive(me) && !(me->inverted && me->build.weapon == WP_HORIZ)) {   /* an inverted bot that drives (WEDGE, NONE, DRUM...) backs off too */
       a->reverse_t = 60;
       a->approach_add = rtr_wrap_pi(a->approach_add + DEG(50));
       float nx, nz, wd; a->esc_wall = 0;
@@ -754,19 +792,26 @@ static void weapons(ai_t *a, const match_t *m, const ai_frame_t *f, pad_state_t 
       else if (e && dist < 1.5f) btn |= IN_A;                                          /* raise early, the lift takes 36 frames */
       break;
     }
-    default: break;                                                                    /* WEDGE and NONE ram */
+    case WP_NONE: case WP_WEDGE:
+      /* DIG IN on the approach inside 2 u, nose on: the plate scrapes in and gets under from slow (sim.c) */
+      if (e && !melty && me->dig_cd == 0 && dist < 2.0f + ehl && in_front && !prev_a) btn |= IN_A;
+      break;
+    default: break;
   }
   /* the secondary weapon runs from the same button, so a tap weapon with a SAW on top just saws when touching */
   if (me->build.weapon2 == WP_SAW || me->build.weapon2 == WP_FLAME) { if (e && dist < 1.4f + ehl && in_front) btn |= IN_A; }
   out->buttons |= btn;
 }
 
-/* a lifter carrying someone steers to the nearest hazard square, else the nearest wall */
+/* a lifter carrying someone, or a wedge with a bot up on its plate, steers to the nearest hazard square,
+ * else the nearest wall (an open edge is a wall with no lexan: the carry goes over it) */
 static int lifter_carry_target(const ai_t *a, const match_t *m, const bot_t *me, float *tx, float *tz) {
   const arena_def_t *ar = ai_arena(a, m);
   int holding = -1;
   for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == a->slot + 1) holding = i;
-  if (holding < 0 || me->build.weapon != WP_LIFTER) return 0;
+  if (holding >= 0 && me->build.weapon != WP_LIFTER) holding = -1;
+  if (holding < 0 && me->riding && me->riding - 1 < m->nbots && m->bots[me->riding - 1].ride_up > 0.5f) holding = me->riding - 1;
+  if (holding < 0) return 0;
   int best = -1; float bd = 1e9f;
   for (int i = 0; i < ar->nhaz && i < MAX_HAZ; i++) {
     const hazard_def_t *h = &ar->haz[i];
@@ -868,6 +913,18 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
     return;
   }
 
+  /* ridden by a wedge (DEEP-plan 6 step 13): reverse hard and turn off the plate, the weapon still live (a
+   * flipper or a hammer can answer the bot under its nose) */
+  if (me->ride_by && !me->inverted) {
+    int rider = me->ride_by - 1;
+    float side = 1.0f;
+    if (rider < m->nbots) { float lx, lz; to_local(me->b.h, me->b.x, me->b.z, m->bots[rider].b.x, m->bots[rider].b.z, &lx, &lz); side = lx >= 0 ? -1.0f : 1.0f; (void)lz; }
+    write_stick(out, side, -1.0f);
+    weapons(a, m, f, out);
+    a->prev_buttons = out->buttons;
+    return;
+  }
+
   switch (a->goal) {
     case GOAL_ATTACK: {
       float tx = a->tx, tz = a->tz;
@@ -876,7 +933,7 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
       if (a->target >= 0) {
         const ai_view_t *e = &f->bots[a->target];
         if (lifter_carry_target(a, m, me, &tx, &tz)) { }
-        else if (len2(e->x - me->b.x, e->z - me->b.z) < 1.3f) { tx = e->x; tz = e->z; }
+        else if (len2(e->x - me->b.x, e->z - me->b.z) < 1.3f && !(bot_is_wedge(me) && len2(a->tx - e->x, a->tz - e->z) > 1.0f)) { tx = e->x; tz = e->z; }
       }
       steer_to(a, m, me, tx, tz, out, 1);
       weapons(a, m, f, out);

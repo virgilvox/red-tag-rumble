@@ -167,7 +167,7 @@ static void drive_builtin(const match_t *m, int slot, drv_t *d, pad_state_t *out
 }
 
 /* -- one match ----------------------------------------------------- */
-typedef struct { int winner, how, frames, stuck; int ko_cause[9]; int events[EV_TYPE_COUNT]; } result_t;
+typedef struct { int winner, how, frames, stuck; int ko_cause[9]; int events[EV_TYPE_COUNT]; int und[2], tips, inv_wedge, inv_flip, glances, wheels, bites[2], hits[2]; float dealt[2]; } result_t;
 
 static int g_use_ai;
 static int g_verbose;
@@ -190,18 +190,26 @@ static void run_match(match_setup_t *s, result_t *r, int trace) {
       const event_t *e = &m.ev[k];
       r->events[e->type]++;
       if (e->type == EV_KO || e->type == EV_MINI_KO) r->ko_cause[e->zone < 9 ? e->zone : 8]++;
-      if (trace && (e->type == EV_HIT || e->type == EV_RAM || e->type == EV_KO || e->type == EV_MINI_KO || e->type == EV_LAUNCH || e->type == EV_INVERT || e->type == EV_HAZ_HIT || e->type == EV_OPS_WAKE || e->type == EV_CLASH || e->type == EV_SPIN_WALL || e->type == EV_RED_TAG || e->type == EV_PICKUP || e->type == EV_STUCK || e->type == EV_SELFRIGHT || e->type == EV_COUNT_TICK))
+      if (e->type == EV_UNDERRIDE && e->a < 2) r->und[e->a]++;
+      if (e->type == EV_RIDE_END && e->zone == RIDE_TIPPED) r->tips++;
+      if (e->type == EV_INVERT && e->zone == INV_WEDGE) r->inv_wedge++;
+      if (e->type == EV_INVERT && e->zone == INV_FLIPPER) r->inv_flip++;
+      if (e->type == EV_HIT && (e->flags & EVF_DEFLECT)) r->glances++;
+      if (e->type == EV_WHEEL_HIT) r->wheels++;
+      if ((e->type == EV_HIT || e->type == EV_RAM) && e->a < 2 && e->dmg > 0) r->hits[e->a]++;
+      if (trace && (e->type == EV_HIT || e->type == EV_RAM || e->type == EV_KO || e->type == EV_MINI_KO || e->type == EV_LAUNCH || e->type == EV_INVERT || e->type == EV_HAZ_HIT || e->type == EV_OPS_WAKE || e->type == EV_CLASH || e->type == EV_SPIN_WALL || e->type == EV_RED_TAG || e->type == EV_PICKUP || e->type == EV_STUCK || e->type == EV_SELFRIGHT || e->type == EV_COUNT_TICK || e->type == EV_UNDERRIDE || e->type == EV_RIDE_END || e->type == EV_WEDGE_CLASH || e->type == EV_LAND || e->type == EV_WHEEL_HIT))
         printf("  f=%d ev=%d a=%d b=%d zone=%d dmg=%.1f at (%.2f, %.2f)\n", m.frame, e->type, e->a, e->b, e->zone, e->dmg, e->x, e->z);
     }
     m.nev = 0;
     steps++;
     if (trace && m.frame % (trace > 1 ? 10 : 60) == 0) {
       printf("f=%4d t=%5.1f h=%08x", m.frame, m.clock_s, sim_hash(&m));
-      for (int i = 0; i < m.nbots; i++) { const bot_t *b = &m.bots[i]; if (b->hp_max == 0) continue; printf(" | %d:(%.1f,%.1f,%.2f) hp %.0f sp %.2f%s%s%s", i, b->b.x, b->b.z, b->b.y, b->hp, b->spin, b->inverted ? " INV" : "", b->airborne ? " AIR" : "", b->alive ? "" : " DEAD"); if (b->stuck_t) printf(" thr %.2f h %.2f pin %d st %d", b->drive_t, b->b.h, b->pinned, b->stuck_t); }
+      for (int i = 0; i < m.nbots; i++) { const bot_t *b = &m.bots[i]; if (b->hp_max == 0) continue; printf(" | %d:(%.1f,%.1f,%.2f) v %.1f,%.1f in %d,%d h%.2f w%.2f L%.2f r%d%d hp %.0f sp %.2f g%d%s%s%s", i, b->b.x, b->b.z, b->b.y, b->b.vx, b->b.vz, b->in.lx / 3277, b->in.ly / 3277, b->b.h, b->b.w, b->load, b->ride_by, b->riding, b->hp, b->spin, g_use_ai ? ais[i].goal : -1, b->inverted ? " INV" : "", b->airborne ? " AIR" : "", b->alive ? "" : " DEAD"); if (b->stuck_t) printf(" thr %.2f h %.2f pin %d st %d", b->drive_t, b->b.h, b->pinned, b->stuck_t); }
       printf("\n");
     }
   }
   r->winner = m.winner == 255 ? -1 : m.winner; r->how = m.over ? m.win_how : WIN_NONE; r->frames = m.frame; r->stuck = m.stuck_frames;
+  r->dealt[0] = m.bots[0].dealt; r->dealt[1] = m.bots[1].dealt;
   if (!m.over) r->how = WIN_NONE;
 }
 
@@ -215,6 +223,8 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
   int wins_all[6] = { 0 }, plays_all[6] = { 0 };
   len_t len_pre[6], len_pair[6][6], len_arena[6], len_all; memset(len_pre, 0, sizeof len_pre); memset(len_pair, 0, sizeof len_pair); memset(len_arena, 0, sizeof len_arena); memset(&len_all, 0, sizeof len_all);
   int judges = 0;
+  long und_ro = 0, ro_matches = 0, tips_ro = 0, inv_wedge = 0, inv_flip = 0, glances = 0, wheels = 0;
+  double pre_hits[6] = { 0 }, pre_dealt[6] = { 0 }; int pre_n[6] = { 0 }; int judge_pair[6][6]; memset(judge_pair, 0, sizeof judge_pair);
   int wedge_v_horiz_w = 0, wedge_v_horiz_n = 0, hover_v_tread_bay_w = 0, hover_v_tread_bay_n = 0, hover_v_tread_laser_w = 0, hover_v_tread_laser_n = 0;
   memset(wins, 0, sizeof wins); memset(wins2, 0, sizeof wins2); memset(plays, 0, sizeof plays);
   clock_t t0 = clock();
@@ -231,9 +241,13 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
         s.seed = 1000003u * (uint32_t)(ar * 6 * 6 * 2 + hz * 36 + a * 6 + b) + 7u * (uint32_t)k + 1u;
         result_t r; run_match(&s, &r, 0);
         matches++; frames += r.frames; stuck += r.stuck;
+        if (a == PRE_ROLL_OUT) { und_ro += r.und[0]; ro_matches++; tips_ro += r.tips; }
+        if (b == PRE_ROLL_OUT && a != PRE_ROLL_OUT) { und_ro += r.und[1]; ro_matches++; tips_ro += r.tips; }
+        inv_wedge += r.inv_wedge; inv_flip += r.inv_flip; glances += r.glances; wheels += r.wheels;
+        pre_hits[a] += r.hits[0]; pre_dealt[a] += r.dealt[0]; pre_n[a]++; pre_hits[b] += r.hits[1]; pre_dealt[b] += r.dealt[1]; pre_n[b]++;
         for (int c = 0; c < 9; c++) ko_cause[c] += r.ko_cause[c];
         if (r.how == WIN_NONE) stalls++;
-        if (r.how == WIN_JUDGES) judges++;
+        if (r.how == WIN_JUDGES) { judges++; judge_pair[a < b ? a : b][a < b ? b : a]++; }
         len_add(&len_pre[a], r.frames); if (a != b) len_add(&len_pre[b], r.frames);
         len_add(&len_pair[a < b ? a : b][a < b ? b : a], r.frames); len_add(&len_arena[ar], r.frames); len_add(&len_all, r.frames);
         plays[ar][a][b]++; plays_all[a]++; plays_all[b]++;
@@ -295,6 +309,12 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
   if (hover_v_tread_bay_n) { double p = 100.0 * hover_v_tread_bay_w / hover_v_tread_bay_n; printf("  HOVER (TOAST) vs TREADS (ROLL OUT) in THE BAY: %.0f%% of %d%s%s\n", p, hover_v_tread_bay_n, p >= 45 ? "   under 45 " : "", p >= 45 ? G : ""); if (p >= 45) guard = 1; }
   if (hover_v_tread_laser_n) { double p = 100.0 * hover_v_tread_laser_w / hover_v_tread_laser_n; printf("  HOVER (TOAST) vs TREADS (ROLL OUT) in THE LASER ROOM: %.0f%% of %d%s%s\n", p, hover_v_tread_laser_n, p <= 55 ? "   over 55 " : "", p <= 55 ? G : ""); if (p <= 55) guard = 1; }
   if (guard && g_use_ai) fail = 1;
+  printf("\nthe new mechanics: %.2f underrides per ROLL OUT match (2 to 6), %.2f tips per ROLL OUT match (0.3 to 1), %ld flips by a wedge, %ld by a flipper, %ld glances off a wedge, %ld wheel hits, over %d matches\n",
+         ro_matches ? (double)und_ro / ro_matches : 0, ro_matches ? (double)tips_ro / ro_matches : 0, inv_wedge, inv_flip, glances, wheels, matches);
+  printf("matches to the judges per pair:\n          "); for (int b = 0; b < 6; b++) printf(" %8s", PRESETS[b].name); printf("\n");
+  for (int a = 0; a < 6; a++) { printf("  %-8s", PRESETS[a].name); for (int b = 0; b < 6; b++) { if (b < a) printf("         "); else printf(" %8d", judge_pair[a][b]); } printf("\n"); }
+  printf("hits landed per match and damage per hit (with the burns, landings and holds in the damage):\n");
+  for (int a = 0; a < 6; a++) if (pre_n[a]) printf("  %-10s %5.1f hits, %5.1f dealt, %5.1f a hit\n", PRESETS[a].name, pre_hits[a] / pre_n[a], pre_dealt[a] / pre_n[a], pre_hits[a] > 0 ? pre_dealt[a] / pre_hits[a] : 0);
   printf("\nKO causes:");
   for (int c = 0; c < 9; c++) if (ko_cause[c]) printf(" %s %d;", KO_NAME[c], ko_cause[c]);
   /* every KO cause must happen somewhere in a full robin with hazards on. The AI never parks, so
@@ -1504,13 +1524,13 @@ static int sc_panel_location(char *msg, int n) {
   /* the CHOP faces +z: its local +x (PN_RIGHT) is world +x, PN_LEFT world -x */
   panel_spike(1); panel_spike(1);
   int left_after2 = v->panel_state[PN_LEFT], fb_clean = v->panel_state[PN_FRONT] == 0 && v->panel_state[PN_BACK] == 0; float hp_after_left = v->hp;
-  /* two disc hits on the right from a spinner at 0.7 spin closing at 1 u/s */
+  /* two disc hits on the right from a spinner at 0.85 spin closing at 1 u/s */
   build_t hz; build_preset(&hz, PRE_CHOP);
   SM.bots[0].build = hz; bot_body_from_build(&SM.bots[0].b, &hz);
   for (int k = 0; k < 2; k++) {
-    SM.bots[0].b.x = 1.5f; SM.bots[0].b.z = 0; SM.bots[0].b.h = -HALF_PI; SM.bots[0].spin = 0.7f; memset(SM.bots[0].hit_cd, 0, sizeof SM.bots[0].hit_cd);
+    SM.bots[0].b.x = 1.5f; SM.bots[0].b.z = 0; SM.bots[0].b.h = -HALF_PI; SM.bots[0].spin = 0.85f; memset(SM.bots[0].hit_cd, 0, sizeof SM.bots[0].hit_cd);
     for (int f = 0; f < 30; f++) {
-      sc_pad(0, 0, 0, IN_A); sc_pad(1, 0, 0, 0); SM.bots[1].spin = 0.4f; SM.bots[0].spin = 0.7f; sc_place(1, 0, 0, 0); SM.bots[0].b.vx = -1.0f; SM.bots[0].b.vz = 0; SM.bots[0].b.w = 0;
+      sc_pad(0, 0, 0, IN_A); sc_pad(1, 0, 0, 0); SM.bots[1].spin = 0.4f; SM.bots[0].spin = 0.85f; sc_place(1, 0, 0, 0); SM.bots[0].b.vx = -1.0f; SM.bots[0].b.vz = 0; SM.bots[0].b.w = 0;
       sc_step(); event_t t;
       if (g_verbose) for (int q = 0; q < SNEV; q++) printf("  disc k %d f %d ev %d a %d b %d zone %d dmg %.1f panel %d x %.2f spin %.2f w %d speed %.2f j %.2f flags %d reason %d hp %.1f\n", k, f, SEV[q].type, SEV[q].a, SEV[q].b, SEV[q].zone, SEV[q].dmg, SEV[q].panel, SM.bots[0].b.x, SM.bots[0].spin, SEV[q].weapon, SEV[q].speed, SEV[q].j, SEV[q].flags, SEV[q].reason, SM.bots[1].hp);
       if (sc_hit_on(1, &t)) break;
