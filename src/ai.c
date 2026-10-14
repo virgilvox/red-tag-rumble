@@ -27,7 +27,7 @@ static void right_of(float h, float *rx, float *rz) { *rx = rtr_cos(h); *rz = -r
 static void norm2(float *x, float *z) { float l = len2(*x, *z); if (l > 1e-6f) { *x /= l; *z /= l; } else { *x = 0; *z = 1; } }
 static void rot2(float x, float z, float ang, float *ox, float *oz) {
   float c = rtr_cos(ang), s = rtr_sin(ang);
-  *ox = x * c + z * s; *oz = -x * s + z * c;       /* a positive angle turns right, like a heading */
+  *ox = x * c + z * s; *oz = -x * s + z * c;       /* a positive angle is a heading increase: a turn toward the body's local +x, the left on screen */
 }
 /* a world point in a bot's frame: lx right, lz forward */
 static void to_local(float h, float bx, float bz, float px, float pz, float *lx, float *lz) {
@@ -45,9 +45,23 @@ static const arena_def_t *ai_arena(const ai_t *a, const match_t *m) {
 static int weapon_spinner(int w) { return w == WP_HORIZ || w == WP_DRUM; }
 static int bot_is_spinner(const ai_view_t *v) { return weapon_spinner(v->weapon) || v->drive == DR_MELTY; }
 static int bot_is_wedge(const bot_t *b) { return b->build.chassis == CH_WEDGE || b->build.weapon == WP_WEDGE; }
+static int view_is_wedge(const ai_view_t *v) { return v->chassis == CH_WEDGE || v->weapon == WP_WEDGE; }
 static int front_weapon(int w) { return w == WP_FLIPPER || w == WP_HAMMER || w == WP_SPIKE || w == WP_CRUSHER || w == WP_LIFTER || w == WP_FLAME; }
 static float push_of(const bot_t *b) { return b->is_ops ? 2.0f * 6.0f : build_push(&b->build); }
 static int hover_ignores(int type) { return type == HZ_PIT || type == HZ_KILLSAW || type == HZ_FLAME || type == HZ_FLOORFLIP || type == HZ_SCREW; }
+
+/* -- skill (8.4, and the house brief: EASY gentle, MEDIUM fair, HARD mean) ----
+ * throttle caps the drive; lead is how far ahead (seconds of enemy velocity) the attack point sits;
+ * hesitate is the chance per think that a tap weapon's window is missed; boost allows the L boost;
+ * backoff is how long EASY drives away after it lands a hit, so a new player gets a breath */
+typedef struct { float throttle, lead, hesitate, aim; int boost, backoff; } skill_t;
+static const skill_t SKILL[3] = {
+  /* throttle lead  hesitate aim   boost backoff */
+  { 0.75f, 0.0f, 0.50f, 0.7f, 0, 90 },     /* EASY: slow, no lead, misses half its windows, aims 0.7 u wide, backs off after a hit, never evades */
+  { 1.00f, 0.30f, 0.15f, 0.3f, 1, 0 },     /* MEDIUM: fair */
+  { 1.00f, 0.50f, 0.00f, 0.1f, 1, 0 },     /* HARD: mean; BAIT and the habit memory are HARD only */
+};
+static const skill_t *skill_of(const ai_t *a) { return &SKILL[a->difficulty > AI_HARD ? AI_MEDIUM : a->difficulty]; }
 
 /* can I self-right right now (3.5, 4.8) */
 static int can_selfright(const bot_t *b) {
@@ -83,16 +97,30 @@ static float haz_dist(const hazard_def_t *h, float x, float z) {
   return len2(dx, dz);
 }
 /* a hazard that hurts a bot standing on it: 1 active now, 2 activating within `within` seconds, 0 safe.
- * Always-on hazards count as active. Terrain, the laser, wind, the hill and the deck are never danger squares. */
-static int haz_danger(const hazard_def_t *h, float haz_clock, float within, float *t_to) {
+ * Always-on hazards count as active. Terrain, the laser, wind, the hill and the deck are never danger
+ * squares. The pit runs on the sim's own timeline (closed until its first opening at T minus 60, held in
+ * the hazard state's aux), not the generic phase, so the AI knows it exactly, as 8.1 promises. With
+ * HAZARDS OFF only the bumper posts still hurt. */
+static int haz_danger(const ai_t *a, const match_t *m, int hi, float within, float *t_to) {
+  const arena_def_t *ar = ai_arena(a, m);
+  const hazard_def_t *h = &ar->haz[hi];
   if (t_to) *t_to = 1e9f;
   switch (h->type) {
-    case HZ_PULVERIZER: case HZ_SCREW: case HZ_BUMPER: if (t_to) *t_to = 0; return 1;
-    case HZ_PIT: case HZ_KILLSAW: case HZ_FLAME: case HZ_FLOORFLIP: break;
+    case HZ_BUMPER: if (t_to) *t_to = 0; return 1;
+    case HZ_PULVERIZER: case HZ_SCREW: if (!m->hazards_on) return 0; if (t_to) *t_to = 0; return 1;
+    case HZ_PIT: case HZ_KILLSAW: case HZ_FLAME: case HZ_FLOORFLIP: if (!m->hazards_on) return 0; break;
     default: return 0;
   }
+  if (h->type == HZ_PIT) {
+    float t = m->haz_clock - m->haz[hi].aux;
+    if (t < 0) { if (t_to) *t_to = -t; return -t <= within ? 2 : 0; }
+    float p = fmodf(t, h->period > 0 ? h->period : 1.0f);
+    if (p < h->active_s) { if (t_to) *t_to = 0; return 1; }
+    if (t_to) *t_to = h->period - p;
+    return h->period - p <= within ? 2 : 0;
+  }
   float pt = 0;
-  int ph = hazard_phase(h, haz_clock, &pt);
+  int ph = hazard_phase(h, m->haz_clock, &pt);
   if (ph == 1) { if (t_to) *t_to = 0; return 1; }
   if (h->period > 0) {
     float t = h->period - pt;
@@ -267,15 +295,18 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     if (land_time(e) < 0.3f) exposed = 1;                                                 /* landing within 0.3 s */
     if (exposed) sc += 0.3f;
     if (weapon_ready(me)) { sc += 0.2f; ready_bonus = 1; }
-    if (bot_is_spinner(e) && e->spin > 0.7f && !my_spinner) sc -= 0.4f;
+    if (bot_is_spinner(e) && e->spin > 0.7f && !my_spinner && !e->inverted) sc -= 0.4f;   /* an inverted spinner is a target, not a threat */
     s->score[GOAL_ATTACK] = sc;
-    /* the weakest zone: behind a spinner, the flank of a front weapon, straight at anything else */
-    float tx = e->x, tz = e->z;
+    /* the weakest zone: behind a spinner, the flank of a front weapon, straight at anything else; the
+     * point leads the enemy by its velocity so a turning bot closes instead of chasing where it was */
+    float lead = skill_of(a)->lead;
+    float tx = e->x + e->vx * lead + a->aim_x, tz = e->z + e->vz * lead + a->aim_z;
     float efx, efz, erx, erz; fwd_of(e->h, &efx, &efz); right_of(e->h, &erx, &erz);
     if (!e->inverted && !e->airborne) {
       if (weapon_spinner(e->weapon) && e->spin > 0.3f && dist > 1.6f) { tx -= efx * 0.9f; tz -= efz * 0.9f; }
-      else if ((front_weapon(e->weapon) || bot_is_wedge(me)) && dist > 1.4f) {
-        /* swing to the flank only from inside its front cone; behind or beside it is already the weak side */
+      else if ((front_weapon(e->weapon) || view_is_wedge(e) || bot_is_wedge(me)) && dist > 1.4f) {
+        /* swing to the flank only from inside its front cone (a wedge's plate is the hardest zone there,
+         * 4.7); behind or beside it is already the weak side */
         float lx, lz; to_local(e->h, e->x, e->z, mx, mz, &lx, &lz);
         float side = lx >= 0 ? 1.0f : -1.0f;
         if (lz > absf(lx) * 0.577f) { tx += erx * side * 0.9f; tz += erz * side * 0.9f; }
@@ -290,13 +321,18 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     s->tx[GOAL_ATTACK] = tx; s->tz[GOAL_ATTACK] = tz;
   }
 
-  /* EVADE (never for EASY) */
-  if (e && a->difficulty != AI_EASY) {
+  /* EVADE (never for EASY, which only backs off after landing a hit). The budget: after 120 frames
+   * of evading one target the row is blocked for 90, so a flipper that cannot outrun a spinner goes
+   * for its rear instead of orbiting it for the whole fight; an inverted enemy is never evaded */
+  if (e) {
     float sc = 0;
     int wedge_or_treads = bot_is_wedge(me) || me->build.drive == DR_TREAD;
-    if (bot_is_spinner(e) && e->spin > 0.7f && dist < 3.0f && !wedge_or_treads) sc = 0.9f;
-    if (e->weapon == WP_HAMMER && e->windup > 0 && dist < 1.5f && sc < 0.6f) sc = 0.6f;
-    if (me->hp < 25 && e->hp > 60 && sc < 0.5f) sc = 0.5f;
+    if (a->difficulty != AI_EASY && a->evade_block_t == 0 && !e->inverted) {
+      if (bot_is_spinner(e) && e->spin > 0.7f && dist < 3.0f && !wedge_or_treads) sc = 0.9f;
+      if (e->weapon == WP_HAMMER && e->windup > 0 && dist < 1.5f && sc < 0.6f) sc = 0.6f;
+      if (me->hp < 25 && e->hp > 60 && sc < 0.5f) sc = 0.5f;
+    }
+    if (a->backoff_t > 0) sc = 1.2f;                                       /* EASY: a breath after a landed hit */
     s->score[GOAL_EVADE] = sc;
     /* back off to 3.5 u and circle at 60 degrees */
     float dx = mx - e->x, dz = mz - e->z; norm2(&dx, &dz);
@@ -312,7 +348,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
       for (int i = 0; i < ar->nhaz && i < MAX_HAZ; i++) {
         const hazard_def_t *h = &ar->haz[i];
         if (e->drive == DR_HOVER && hover_ignores(h->type)) continue;
-        if (!haz_danger(h, m->haz_clock, 1.5f, 0)) continue;
+        if (!haz_danger(a, m, i, 1.5f, 0)) continue;
         float d = haz_dist(h, e->x, e->z);
         if (d < 3.0f && d < bd) { bd = d; best = i; }
       }
@@ -320,11 +356,14 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
         const hazard_def_t *h = &ar->haz[best];
         s->score[GOAL_HAZARD_PUSH] = 0.8f;
         s->haz[GOAL_HAZARD_PUSH] = best;
-        /* the line from me through them to the hazard: get behind them first, then drive at the square */
+        /* the line from me through them to the hazard: get behind them first, then drive at the square. The
+         * drive stops at the near rim of a square that would hurt me too (a pit, a saw), a bot length short of
+         * it, so the shove sends them over and not me after them; a HOVER crosses what it ignores */
         float lx = h->x - e->x, lz = h->z - e->z; norm2(&lx, &lz);
         float bx = e->x - lx * (me->b.hl + eb->b.hl + 0.1f), bz = e->z - lz * (me->b.hl + eb->b.hl + 0.1f);
         float behind = dotp(mx - e->x, mz - e->z, -lx, -lz);
-        if (behind > 0.3f && len2(mx - bx, mz - bz) < 1.2f) { s->tx[GOAL_HAZARD_PUSH] = h->x; s->tz[GOAL_HAZARD_PUSH] = h->z; }
+        float rim = (me->build.drive == DR_HOVER && hover_ignores(h->type)) || h->type == HZ_PULVERIZER ? 0 : (h->w > 0 ? h->w * 0.5f : 0.6f) + me->b.hl + 0.3f;
+        if (behind > 0.3f && len2(mx - bx, mz - bz) < 1.2f) { s->tx[GOAL_HAZARD_PUSH] = h->x - lx * rim; s->tz[GOAL_HAZARD_PUSH] = h->z - lz * rim; }
         else { s->tx[GOAL_HAZARD_PUSH] = bx; s->tz[GOAL_HAZARD_PUSH] = bz; }
       }
     }
@@ -332,7 +371,8 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
 
   /* RECOVER */
   if (me->inverted && can_selfright(me)) { s->score[GOAL_RECOVER] = 1.0f; s->tx[GOAL_RECOVER] = mx; s->tz[GOAL_RECOVER] = mz; }
-  else if (e && my_spinner && my_spin < 0.3f && dist < 2.0f) {
+  else if (e && my_spinner && my_spin < 0.6f && dist < 2.0f) {
+    /* a spent disc (a hit costs SPIN_BLEED) backs off to spin up: one approach is one hit */
     s->score[GOAL_RECOVER] = 0.7f;
     float dx = mx - e->x, dz = mz - e->z; norm2(&dx, &dz);
     s->tx[GOAL_RECOVER] = e->x + dx * 4.0f; s->tz[GOAL_RECOVER] = e->z + dz * 4.0f;
@@ -348,7 +388,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
         const hazard_def_t *h = &ar->haz[i];
         if (me->build.drive != DR_HOVER || !hover_ignores(h->type)) { if (h->type == HZ_PULVERIZER || h->type == HZ_SCREW || h->type == HZ_BUMPER) continue; }
         float t_to = 0;
-        if (haz_danger(h, m->haz_clock, 2.0f, &t_to) != 2) continue;        /* activating, not already live */
+        if (haz_danger(a, m, i, 2.0f, &t_to) != 2) continue;                /* activating, not already live */
         float d = haz_dist(h, mx, mz);
         if (d < 4.0f && d < bd) { bd = d; best = i; }
       }
@@ -387,7 +427,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
   /* The table's ATTACK floor (0.5, 0.7 with a ready weapon) would shadow EVADE's 0.6 and 0.5
    * and BAIT's 0.6 forever. While either has a live reason, ATTACK loses the ready bonus and
    * 0.15 more, so those rows pick what the table says and an exposed enemy still wins. */
-  if (s->score[GOAL_ATTACK] > 0 && (s->score[GOAL_EVADE] > 0 || s->score[GOAL_BAIT] > 0))
+  if (s->score[GOAL_ATTACK] > 0 && (s->score[GOAL_EVADE] > 0 || s->score[GOAL_BAIT] > 0) && !(e && e->inverted))
     s->score[GOAL_ATTACK] -= (ready_bonus ? 0.2f : 0.0f) + 0.15f;
 
   /* WIGGLE: never be counted out while parked */
@@ -505,13 +545,20 @@ static void avoid_hazards(const ai_t *a, const match_t *m, const bot_t *me, floa
     const hazard_def_t *h = &ar->haz[i];
     if (i == a->haz_idx) continue;                                 /* the square I mean to cross or push into */
     if (me->build.drive == DR_HOVER && hover_ignores(h->type)) continue;
-    float t_to = 0; int dg = haz_danger(h, m->haz_clock, 1.0f, &t_to);
+    float t_to = 0; int dg = haz_danger(a, m, i, 1.0f, &t_to);
     if (!dg) continue;
     if (h->type != HZ_PIT && dg == 2) continue;                     /* only a pit is worth a detour before it opens */
     float hw = (h->w > 0 ? h->w * 0.5f : 0.6f) + me->b.hl + 0.3f, hd = (h->d > 0 ? h->d * 0.5f : 0.6f) + me->b.hl + 0.3f;
     float r = hw > hd ? hw : hd;
-    /* closest approach of the ray me -> target to the square centre */
     float cx = h->x - mx, cz = h->z - mz;
+    /* on or beside the square, whatever the ray says: step straight away from its centre (a hard turn with
+     * the open pit at my side used to sweep me in while the ray test looked the other way) */
+    if (len2(cx, cz) < r + 0.1f) {
+      float ax = -cx, az = -cz; if (len2(ax, az) < 0.05f) { ax = -uz; az = ux; } norm2(&ax, &az);
+      *tx = mx + ax * 2.0f; *tz = mz + az * 2.0f;
+      return;
+    }
+    /* closest approach of the ray me -> target to the square centre */
     float along = dotp(cx, cz, ux, uz);
     if (along < -0.2f || along > L + r) continue;
     float side = dotp(cx, cz, -uz, ux);                              /* lateral offset, positive to the left */
@@ -519,16 +566,16 @@ static void avoid_hazards(const ai_t *a, const match_t *m, const bot_t *me, floa
     /* step the target sideways past the square, away from the centre */
     float s = side >= 0 ? -1.0f : 1.0f;
     float px = -uz * s, pz = ux * s;
-    float gx = h->x + px * (r + 0.2f), gz = h->z + pz * (r + 0.2f);
-    if (len2(h->x - mx, h->z - mz) < r + 0.1f) { gx = mx + px * 2.0f; gz = mz + pz * 2.0f; }   /* I am on it: step straight off */
-    *tx = gx; *tz = gz;
+    *tx = h->x + px * (r + 0.2f); *tz = h->z + pz * (r + 0.2f);
     return;
   }
 }
 
+/* turn is the wanted heading change: positive grows h, which is a turn to the left on screen (sim.c
+ * right_of), so it goes out as stick LEFT; the sim reads stick right as a heading decrease */
 static void write_stick(pad_state_t *out, float turn, float throttle) {
   turn = rtr_clamp(turn, -1, 1); throttle = rtr_clamp(throttle, -1, 1);
-  out->lx = (int16_t)(turn * STICK);
+  out->lx = (int16_t)(-turn * STICK);
   out->ly = (int16_t)(-throttle * STICK);
 }
 
@@ -551,25 +598,36 @@ static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float
     a->corner_t = 60; dx = a->corner_dx; dz = a->corner_dz; dist = 3.0f;
   }
 
-  /* the stuck detector: under 0.3 u of progress in 120 frames while trying to move */
+  /* the stuck detector: under 0.3 u of progress in 120 frames while trying to move. The escape backs
+   * off for 60 frames and swings the approach 50 degrees; with a wall within 1.2 u it drives off the
+   * wall instead, diagonally toward the arena centre, never straight back into the lexan (that was
+   * the [stuck] nudge in a wedge against wedge shove at a wall) */
   a->stuck_t++;
   if (a->stuck_t >= 120) {
     float moved = len2(mx - a->progress_x, mz - a->progress_z);
     if (moved < 0.3f && dist > 0.6f && bot_can_drive(me) && !me->inverted) {
       a->reverse_t = 60;
       a->approach_add = rtr_wrap_pi(a->approach_add + DEG(50));
+      float nx, nz, wd; a->esc_wall = 0;
+      if (arena_nearest_wall(ar, mx, mz, &nx, &nz, &wd) && wd < 1.2f) {
+        float tx_ = nz, tz_ = -nx;
+        if (dotp(tx_, tz_, -mx, -mz) < 0) { tx_ = -tx_; tz_ = -tz_; }
+        a->esc_dx = nx + tx_; a->esc_dz = nz + tz_; norm2(&a->esc_dx, &a->esc_dz); a->esc_wall = 1;
+      }
     } else if (moved > 2.0f) a->approach_add = 0;
     a->progress_x = mx; a->progress_z = mz; a->stuck_t = 0;
   }
+  if (a->reverse_t > 0 && a->esc_wall) { dx = a->esc_dx; dz = a->esc_dz; dist = 3.0f; a->corner_t = 0; }
 
   if (d->strafe) {
-    /* HOVER and MELTY: the stick is the world direction (cam_yaw 0) */
+    /* HOVER and MELTY: the stick is the world direction against cam_yaw 0: stick up is +z and
+     * stick right is -x (screen right of a camera looking along +z, see sim.c drive_step) */
     out->cam_yaw = 0;
     if (dist < 0.15f) { write_stick(out, 0, 0); return; }
     float ux = dx / dist, uz = dz / dist;
-    if (a->reverse_t > 0) { a->reverse_t--; ux = -ux; uz = -uz; }
-    float mag = dist < 1.0f ? 0.5f + 0.5f * dist : 1.0f;
-    out->lx = (int16_t)(ux * mag * STICK); out->ly = (int16_t)(-uz * mag * STICK);
+    if (a->reverse_t > 0) { a->reverse_t--; if (!a->esc_wall) { ux = -ux; uz = -uz; } }
+    float mag = (dist < 1.0f ? 0.5f + 0.5f * dist : 1.0f) * skill_of(a)->throttle;
+    out->lx = (int16_t)(-ux * mag * STICK); out->ly = (int16_t)(-uz * mag * STICK);
     return;
   }
 
@@ -581,9 +639,11 @@ static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float
   else if (allow_reverse && dist < 1.5f && absf(err) > DEG(90)) { err = rtr_wrap_pi(err + PI_F); reversing = 1; }
   float derr = err - a->last_err; a->last_err = err;
   float turn = rtr_clamp(2.2f * err + 0.3f * derr, -1, 1);
-  float throttle = absf(err) < DEG(60) ? 1.0f : 0.3f;
+  /* full ahead inside 60 degrees, else at least half throttle (the spec's 0.3 made a turning spinner
+   * orbit an evader at 1.5 u/s for the whole fight); the skill cap sits on top */
+  float throttle = (absf(err) < DEG(60) ? 1.0f : rtr_clamp(rtr_cos(err), 0.5f, 1.0f)) * skill_of(a)->throttle;
   if (reversing) { throttle = -throttle; turn = -turn; }
-  if (a->reverse_t > 0) { a->reverse_t--; throttle = -1.0f; turn = -turn; }
+  if (a->reverse_t > 0) { a->reverse_t--; if (!a->esc_wall) { throttle = -1.0f; turn = -turn; } }
   if (me->inverted && me->build.weapon == WP_HORIZ) { throttle = 0; turn = 0; }       /* cannot steer inverted */
   write_stick(out, turn, throttle);
 }
@@ -619,6 +679,8 @@ static void weapons(ai_t *a, const match_t *m, const ai_frame_t *f, pad_state_t 
     return;
   }
 
+  /* a hesitating think misses this window for the tap weapons: EASY misses half of them */
+  int tap_ok = !a->hesitate;
   if (melty) { btn |= IN_A; }                                                          /* the body is the weapon */
   else switch (w) {
     case WP_HORIZ: case WP_DRUM: btn |= IN_A; break;                                   /* hold unless RECOVER, which also holds */
@@ -628,16 +690,16 @@ static void weapons(ai_t *a, const match_t *m, const ai_frame_t *f, pad_state_t 
       break;
     }
     case WP_FLIPPER:
-      if (e && me->cooldown == 0 && enemy_in_box(me, e, ehl, 0.6f, 0.4f, 0.9f, 0) && !prev_a) btn |= IN_A;
+      if (e && tap_ok && me->cooldown == 0 && enemy_in_box(me, e, ehl, 0.6f, 0.4f, 0.9f, 0) && !prev_a) btn |= IN_A;
       break;
     case WP_HAMMER:
-      if (e && me->cooldown == 0 && me->windup == 0 && dist < 1.2f + ehl && enemy_in_box(me, e, ehl, 0.4f, 0.5f, 1.0f, 15) && !prev_a) btn |= IN_A;
+      if (e && tap_ok && me->cooldown == 0 && me->windup == 0 && dist < 1.2f + ehl && enemy_in_box(me, e, ehl, 0.4f, 0.5f, 1.0f, 15) && !prev_a) btn |= IN_A;
       break;
     case WP_SPIKE:
-      if (e && me->cooldown == 0 && in_front && dist < 1.0f + ehl + me->b.hl && !prev_a) btn |= IN_A;
+      if (e && tap_ok && me->cooldown == 0 && in_front && dist < 1.0f + ehl + me->b.hl && !prev_a) btn |= IN_A;
       break;
     case WP_CRUSHER:
-      if (e && me->cooldown == 0 && me->clamp == 0 && dist < me->b.hl + ehl + 0.25f && in_front && !prev_a) btn |= IN_A;
+      if (e && tap_ok && me->cooldown == 0 && me->clamp == 0 && dist < me->b.hl + ehl + 0.25f && in_front && !prev_a) btn |= IN_A;
       break;
     case WP_FLAME:
       if (a->burst_t > 0) { a->burst_t--; btn |= IN_A; if (a->burst_t == 0) a->burst_t = -30; }
@@ -667,7 +729,7 @@ static int lifter_carry_target(const ai_t *a, const match_t *m, const bot_t *me,
   int best = -1; float bd = 1e9f;
   for (int i = 0; i < ar->nhaz && i < MAX_HAZ; i++) {
     const hazard_def_t *h = &ar->haz[i];
-    if (!haz_danger(h, m->haz_clock, 3.0f, 0)) continue;
+    if (!haz_danger(a, m, i, 3.0f, 0)) continue;
     float d = haz_dist(h, me->b.x, me->b.z);
     if (d < bd) { bd = d; best = i; }
   }
@@ -680,6 +742,7 @@ static int lifter_carry_target(const ai_t *a, const match_t *m, const bot_t *me,
 /* boost (8.3): a straight line over 4 u on ATTACK, or EVADE needing it; never on TREADS or LEG TRACKS */
 static void maybe_boost(ai_t *a, const match_t *m, const ai_frame_t *f, pad_state_t *out) {
   const bot_t *me = &m->bots[a->slot];
+  if (!skill_of(a)->boost) return;                                                     /* EASY never boosts */
   if (!DRIVES[me->build.drive].boost || me->boost > 0 || me->boost_cd > 0 || me->inverted || !bot_can_drive(me)) return;
   if (a->prev_buttons & IN_L) return;
   const ai_view_t *e = a->target >= 0 ? &f->bots[a->target] : 0;
@@ -691,6 +754,7 @@ static void maybe_boost(ai_t *a, const match_t *m, const ai_frame_t *f, pad_stat
     float line = len2(a->tx - me->b.x, a->tz - me->b.z);
     if (line > 4.0f && absf(err) < DEG(12)) want = 1;
     if (bot_is_wedge(me) && line > 2.5f && absf(err) < DEG(12)) want = 1;              /* a wedge rams with boost when the line is clear */
+    if (weapon_spinner(me->build.weapon) && me->spin > 0.9f && line > 2.5f && absf(err) < DEG(12)) want = 1;   /* a spun up disc closes the gap an evader opened */
   }
   if (a->goal == GOAL_EVADE && bot_is_spinner(e) && e->spin > 0.7f && dist < 2.0f) want = 1;
   /* only on a straight line the steering already took: full throttle, small turn (not while stepping off a square) */
@@ -704,12 +768,25 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
   memset(out, 0, sizeof *out);
   if (a->slot >= m->nbots || a->slot >= MAX_BOTS) { a->prev_buttons = 0; return; }
   const bot_t *me = &m->bots[a->slot];
+  /* the match seed and the slot go into the rng once, so two matches on different seeds do not replay the
+   * same hesitations and aim errors (the balance robin samples real variety) */
+  if (!a->seeded) { a->rng ^= m->seed * 0x9e3779b9u + (uint32_t)a->slot * 0x7f4a7c15u; if (!a->rng) a->rng = 0x51ed270bu; a->seeded = 1; }
   ring_push(a, m);
   pins_update(a, m);
   if (!me->is_ops) observe(a, m);
   if (!me->alive) { a->prev_buttons = 0; return; }
   const ai_frame_t *f = ring_read(a, a->reaction);
 
+  /* skill bookkeeping: EASY backs off after it lands a hit; the EVADE budget */
+  if (!me->is_ops) {
+    const skill_t *sk = skill_of(a);
+    if (me->dealt > a->last_dealt + 0.5f && sk->backoff > 0) a->backoff_t = sk->backoff;
+    a->last_dealt = me->dealt;
+    if (a->backoff_t > 0) a->backoff_t--;
+    if (a->evade_block_t > 0) a->evade_block_t--;
+    if (a->goal == GOAL_EVADE && a->backoff_t == 0) { if (++a->evade_t >= 120) { a->evade_t = 0; a->evade_block_t = 90; } }
+    else a->evade_t = 0;
+  }
   /* think every sixth frame, staggered per seat */
   if (++a->think_t >= AI_THINK_EVERY || a->goal == GOAL_NONE) {
     a->think_t = 0;
@@ -717,6 +794,10 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
     if (me->is_ops) ops_goals(a, m, &s);
     else { a->target = pick_target(a, m, f); score_goals(a, m, f, &s); }
     choose(a, &s);
+    a->hesitate = (uint8_t)(rtr_rand_f(&a->rng) < skill_of(a)->hesitate);
+    /* the aim error: a fresh offset on the attack point every think, EASY's wide enough to miss a hammer swing */
+    float aim = skill_of(a)->aim;
+    a->aim_x = (rtr_rand_f(&a->rng) * 2 - 1) * aim; a->aim_z = (rtr_rand_f(&a->rng) * 2 - 1) * aim;
   }
 
   a->retreat = 0;
@@ -845,6 +926,32 @@ void ai_pick_build(build_t *b, int difficulty, const build_t *human_last, const 
   }
   b->paint = 1; b->decal = DC_NONE;
   if (!build_legal(b, 2)) build_preset(b, PRE_LAUNCH);             /* 2: legal in a 1v1 too, so never CRUSHER */
+}
+
+static int same_name(const build_t *a, const build_t *b) {
+  int ma = a->drive == DR_MELTY, mb = b->drive == DR_MELTY;
+  return a->chassis == b->chassis && (ma || mb ? ma == mb : a->weapon == b->weapon);
+}
+
+void ai_pick_build_nth(build_t *b, int difficulty, const build_t *human_last, const uint8_t habits[8], uint32_t *rng, const build_t *others, int nothers) {
+  ai_pick_build(b, difficulty, human_last, habits, rng);
+  int clash = 0;
+  for (int i = 0; i < nothers; i++) if (same_name(b, &others[i])) clash = 1;
+  if (!clash) return;
+  /* the next seats take the other presets in turn, starting from a random one, skipping any pick that
+   * would share a name; EASY stays on its three gentle presets */
+  int start = rtr_rand_n(rng, PRE_RANDOM);
+  for (int k = 0; k < PRE_RANDOM; k++) {
+    int p = (start + k) % PRE_RANDOM;
+    if (difficulty == AI_EASY && p != PRE_ROLL_OUT && p != PRE_LAUNCH && p != PRE_STOMP) continue;
+    build_t t; build_preset(&t, p); t.paint = 1; t.decal = DC_NONE;
+    int ok = build_legal(&t, 2);
+    for (int i = 0; i < nothers && ok; i++) if (same_name(&t, &others[i])) ok = 0;
+    if (ok) { *b = t; return; }
+  }
+  /* seven seats would be needed to run out of presets; a RANDOM BOT then fills the slot */
+  build_random(b, rng, 2); b->paint = 1;
+  if (!build_legal(b, 2)) build_preset(b, PRE_LAUNCH);
 }
 
 /* -- habits (8.4): fold a finished match into save.habits ---------- */

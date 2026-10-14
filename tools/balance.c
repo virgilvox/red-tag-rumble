@@ -10,12 +10,14 @@
  *   build/balance --trace arena presetA presetB [frames] [hazards=off]
  *   build/balance --hashcheck
  *   build/balance --make-drive bay|laser|pile|dock|shop|roof tools/scripts/drive-<arena>.json
+ *   build/balance --make-fight tools/scripts/2p-fight.json --setup "<the cart's [sim] setup line>" [driver=ai|builtin]
  *   build/balance --modes [N]          every mode, arena and seat count must end with no [stuck]
  *
  * The driver: --robin plays each match with two MEDIUM AIs through ai_think
- * when driver=ai; the default builtin driver is this file's own steer-and-fire
- * routine, which stays in use until ai.c lands (the AI agent's item 12), and
- * which the replay never uses. Both are deterministic. */
+ * (driver=ai, the default: it is the opponent a player meets); driver=builtin
+ * is this file's own steer-and-fire stand-in, which --make-fight records as the
+ * human seats of the rig's fight scripts and --hashcheck still uses. The replay
+ * never drives: it feeds the script's pads. Both drivers are deterministic. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,8 +29,9 @@
 #include "ai.h"
 
 static int usage(void) {
-  fprintf(stderr, "usage: balance --parts | --robin N [arenas=...] [hazards=on|off|both] [driver=builtin|ai] [mode=M] | --check-arenas |\n"
-                  "               --replay script.json --setup \"line\" [frames=N] | --trace arena a b [frames] | --hashcheck\n");
+  fprintf(stderr, "usage: balance --parts | --robin N [arenas=...] [hazards=on|off|both] [driver=ai|builtin] [mode=M] | --check-arenas |\n"
+                  "               --replay script.json --setup \"line\" [frames=N] [verbose=1|2] | --make-fight script.json --setup \"line\" |\n"
+                  "               --trace arena a b [frames] [driver=ai|builtin] | --hashcheck | --make-drive arena out.json | --modes [N]\n");
   return 2;
 }
 
@@ -39,7 +42,7 @@ static const char *KO_NAME[9] = { "HP ZERO", "KO BY FLIP", "PITTED", "OFF THE RO
 /* camper: a human stand-in who gives up at low HP and parks in a far corner (or on THE DOCK's deck),
  * which is what exercises the COUNTED OUT and DECK COUNT rules in the robin; aim: a per match approach
  * offset so seeds matter */
-typedef struct { uint32_t rng; float px, pz, dealt, aim; int stuck_t, reverse_t, wiggle_t, boost_t, saw_t, side, camper, init; } drv_t;
+typedef struct { uint32_t rng; float px, pz, dealt, aim; int stuck_t, reverse_t, wiggle_t, boost_t, saw_t, side, camper, init, no_camp; } drv_t;
 
 static float wrap_pi(float a) { return rtr_wrap_pi(a); }
 
@@ -60,7 +63,7 @@ static void drive_builtin(const match_t *m, int slot, drv_t *d, pad_state_t *out
   const bot_t *me = &m->bots[slot];
   memset(out, 0, sizeof *out);
   if (!me->alive) return;
-  if (!d->init) { d->init = 1; d->camper = rtr_rand_n(&d->rng, 6) == 0; d->side = 1; }
+  if (!d->init) { d->init = 1; d->camper = !d->no_camp && rtr_rand_n(&d->rng, 6) == 0; d->side = 1; }
   if (m->frame % 90 == 0) d->aim = (rtr_rand_f(&d->rng) - 0.5f) * 0.6f;
   int e = nearest_enemy(m, slot);
   const arena_def_t *ar = sim_arena(m);
@@ -119,7 +122,7 @@ static void drive_builtin(const match_t *m, int slot, drv_t *d, pad_state_t *out
       ux = px + (near_wall ? nx : 0); uz = pz + (near_wall ? nz : 0);
     }
     else if (near_wall) { ux += nx * 0.6f; uz += nz * 0.6f; }     /* never press into a wall */
-    out->lx = (int16_t)(32767.0f * rtr_clamp(k * ux, -1, 1)); out->ly = (int16_t)(-32767.0f * rtr_clamp(k * uz, -1, 1));
+    out->lx = (int16_t)(-32767.0f * rtr_clamp(k * ux, -1, 1)); out->ly = (int16_t)(-32767.0f * rtr_clamp(k * uz, -1, 1));   /* stick right is -x against cam_yaw 0 */
     out->cam_yaw = 0;
   } else {
     float turn = err * 2.2f; if (turn > 1) turn = 1; if (turn < -1) turn = -1;
@@ -133,7 +136,7 @@ static void drive_builtin(const match_t *m, int slot, drv_t *d, pad_state_t *out
     if (near_wall && (fx * -nx + fz * -nz) > 0.7f && ahead < 0.8f) { turn = (fx * nz - fz * nx) > 0 ? 1.0f : -1.0f; thr = 0.5f; }
     /* a wedge or a lifter aims at the side; a flipper comes straight; everyone slows into contact a little */
     if (dist < 1.2f && (w == WP_HAMMER || w == WP_SPIKE || w == WP_CRUSHER)) thr = 0.4f;
-    out->lx = (int16_t)(32767.0f * turn); out->ly = (int16_t)(-32767.0f * thr);
+    out->lx = (int16_t)(-32767.0f * turn); out->ly = (int16_t)(-32767.0f * thr);   /* a positive heading error is a left turn: stick left */
   }
   /* wiggle so a parked bot is never counted out */
   if (me->countout > 300) { d->wiggle_t++; out->ly = (int16_t)(((d->wiggle_t / 20) & 1) ? 32767 : -32767); }
@@ -198,11 +201,17 @@ static void run_match(match_setup_t *s, result_t *r, int trace) {
 }
 
 /* -- --robin ------------------------------------------------------- */
+/* fight length tallies in frames: per preset (every match it played) and per pair (both sides) */
+typedef struct { long sum; int n, lo, hi; } len_t;
+static void len_add(len_t *l, int frames) { l->sum += frames; l->n++; if (!l->lo || frames < l->lo) l->lo = frames; if (frames > l->hi) l->hi = frames; }
+
 static int robin(int n, int arena_mask, int haz_mode, int mode) {
-  int wins[6][6][6]; int plays[6][6][6]; int ko_cause[9] = { 0 }; int stuck = 0; long frames = 0; int matches = 0, stalls = 0;
+  int wins[6][6][6]; int wins2[6][6][6]; int plays[6][6][6]; int ko_cause[9] = { 0 }; int stuck = 0; long frames = 0; int matches = 0, stalls = 0;
   int wins_all[6] = { 0 }, plays_all[6] = { 0 };
+  len_t len_pre[6], len_pair[6][6], len_arena[6], len_all; memset(len_pre, 0, sizeof len_pre); memset(len_pair, 0, sizeof len_pair); memset(len_arena, 0, sizeof len_arena); memset(&len_all, 0, sizeof len_all);
+  int judges = 0;
   int wedge_v_horiz_w = 0, wedge_v_horiz_n = 0, hover_v_tread_bay_w = 0, hover_v_tread_bay_n = 0, hover_v_tread_laser_w = 0, hover_v_tread_laser_n = 0;
-  memset(wins, 0, sizeof wins); memset(plays, 0, sizeof plays);
+  memset(wins, 0, sizeof wins); memset(wins2, 0, sizeof wins2); memset(plays, 0, sizeof plays);
   clock_t t0 = clock();
   for (int ar = 0; ar < 6; ar++) {
     if (!(arena_mask & (1 << ar))) continue;
@@ -219,9 +228,12 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
         matches++; frames += r.frames; stuck += r.stuck;
         for (int c = 0; c < 9; c++) ko_cause[c] += r.ko_cause[c];
         if (r.how == WIN_NONE) stalls++;
+        if (r.how == WIN_JUDGES) judges++;
+        len_add(&len_pre[a], r.frames); if (a != b) len_add(&len_pre[b], r.frames);
+        len_add(&len_pair[a < b ? a : b][a < b ? b : a], r.frames); len_add(&len_arena[ar], r.frames); len_add(&len_all, r.frames);
         plays[ar][a][b]++; plays_all[a]++; plays_all[b]++;
         if (r.winner == 0) { wins[ar][a][b]++; wins_all[a]++; }
-        else if (r.winner == 1) { wins_all[b]++; }
+        else if (r.winner == 1) { wins2[ar][a][b]++; wins_all[b]++; }
         else { /* a draw counts half to each */ }
         if (a == PRE_ROLL_OUT && b == PRE_CHOP) { wedge_v_horiz_n++; if (r.winner == 0) wedge_v_horiz_w++; }
         if (a == PRE_CHOP && b == PRE_ROLL_OUT) { wedge_v_horiz_n++; if (r.winner == 1) wedge_v_horiz_w++; }
@@ -240,6 +252,25 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
     printf("\n");
     for (int a = 0; a < 6; a++) { printf("%-10s", PRESETS[a].name); for (int b = 0; b < 6; b++) printf(" %7.0f%%", plays[ar][a][b] ? 100.0 * wins[ar][a][b] / plays[ar][a][b] : 0); printf("\n"); }
   }
+  /* the fight length table (4.7 retune: a two bot fight should average 35 to 60 s) */
+  printf("\nfight length, seconds (mean, min, max):\n");
+  for (int a = 0; a < 6; a++) if (len_pre[a].n) printf("  %-10s %5.1f  %5.1f  %5.1f   over %d\n", PRESETS[a].name, len_pre[a].sum / 60.0 / len_pre[a].n, len_pre[a].lo / 60.0, len_pre[a].hi / 60.0, len_pre[a].n);
+  for (int ar = 0; ar < 6; ar++) if (len_arena[ar].n) printf("  %-15s %5.1f  %5.1f  %5.1f\n", ARENAS[ar].name, len_arena[ar].sum / 60.0 / len_arena[ar].n, len_arena[ar].lo / 60.0, len_arena[ar].hi / 60.0);
+  printf("  %-15s %5.1f  %5.1f  %5.1f   %d of %d went to the judges\n", "ALL", len_all.n ? len_all.sum / 60.0 / len_all.n : 0, len_all.lo / 60.0, len_all.hi / 60.0, judges, matches);
+  printf("  mean seconds per pair:\n          "); for (int b = 0; b < 6; b++) printf(" %8s", PRESETS[b].name); printf("\n");
+  for (int a = 0; a < 6; a++) { printf("  %-8s", PRESETS[a].name); for (int b = 0; b < 6; b++) { const len_t *l = &len_pair[a < b ? a : b][a < b ? b : a]; if (b < a) printf("         "); else printf(" %8.1f", l->n ? l->sum / 60.0 / l->n : 0); } printf("\n"); }
+  /* the pair matrix over both sides and every arena: row preset's win percent against the column preset */
+  printf("\nwin percent of the row preset against the column preset (both sides, every arena; a draw is nobody's):\n          ");
+  for (int b = 0; b < 6; b++) printf(" %8s", PRESETS[b].name); printf("\n");
+  for (int a = 0; a < 6; a++) {
+    printf("%-10s", PRESETS[a].name);
+    for (int b = 0; b < 6; b++) {
+      int w = 0, p = 0;
+      for (int ar = 0; ar < 6; ar++) { w += wins[ar][a][b] + wins2[ar][b][a]; p += plays[ar][a][b] + plays[ar][b][a]; }
+      printf(" %7.0f%%", p ? 100.0 * w / p : 0);
+    }
+    printf("\n");
+  }
   printf("\noverall (both sides, every arena):\n");
   /* the 8.6 guardrails measure the AI as much as the parts, so they fail the run only with driver=ai;
    * with the builtin stand-in driver they are printed as advice (GUARD) */
@@ -251,6 +282,8 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
     printf("  %-10s %5.1f%% of %d%s%s\n", PRESETS[a].name, pct, plays_all[a], bad ? "   " : "", bad ? G : "");
     if (bad) guard = 1;
   }
+  double mean_s = matches ? (double)frames / matches / 60.0 : 0;
+  if (mean_s < 35.0 || mean_s > 60.0) { printf("  mean fight %.1f s is outside 35 to 60   %s\n", mean_s, G); guard = 1; }
   double wvh = wedge_v_horiz_n ? 100.0 * wedge_v_horiz_w / wedge_v_horiz_n : 0;
   printf("  WEDGE (ROLL OUT) vs HORIZONTAL (CHOP): %.0f%% of %d%s%s\n", wvh, wedge_v_horiz_n, wedge_v_horiz_n && wvh < 40 ? "   over 40 " : "", wedge_v_horiz_n && wvh < 40 ? G : "");
   if (wedge_v_horiz_n && wvh < 40) guard = 1;
@@ -259,9 +292,14 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
   if (guard && g_use_ai) fail = 1;
   printf("\nKO causes:");
   for (int c = 0; c < 9; c++) if (ko_cause[c]) printf(" %s %d;", KO_NAME[c], ko_cause[c]);
-  /* every KO cause must happen somewhere in a full robin with hazards on */
+  /* every KO cause must happen somewhere in a full robin with hazards on. The AI never parks, so
+   * COUNTED OUT and DECK COUNT are the builtin driver's (its camper) to show; the AI run needs the
+   * four a fighting bot can meet: HP ZERO, KO BY FLIP, PITTED, OFF THE ROOF */
   if (arena_mask == 63 && haz_mode != 2 && mode == MODE_DEATHMATCH) {
-    for (int c = KO_HP; c <= KO_DECK; c++) if (!ko_cause[c]) { printf("\nFAIL: no %s in the robin", KO_NAME[c]); fail = 1; }
+    for (int c = KO_HP; c <= KO_DECK; c++) {
+      if (g_use_ai && (c == KO_COUNT || c == KO_DECK)) continue;
+      if (!ko_cause[c]) { printf("\nFAIL: no %s in the robin", KO_NAME[c]); fail = 1; }
+    }
   }
   printf("\nmatches %d, mean %.1f s, stalls (no result) %d, stuck frames %d, %.1f s wall, %.0fk steps/s\n", matches, matches ? (double)frames / matches / 60.0 : 0, stalls, stuck, secs, secs > 0 ? frames / secs / 1000.0 : 0);
   if (stalls) { printf("FAIL: %d matches did not end\n", stalls); fail = 1; }
@@ -437,7 +475,8 @@ static int check_arenas(void) {
 
 /* -- --replay: the setup line and the script (15.7) ---------------- */
 typedef struct { int from, to, pad; uint16_t buttons; int lx, ly, rx, ry, lt, rt; uint8_t has_lx, has_ly, has_rx, has_ry, has_lt, has_rt; } seg_t;
-static seg_t SEGS[4096]; static int NSEGS;
+static seg_t SEGS[16384]; static int NSEGS;
+static uint8_t g_pad_tank[4];          /* pads_at: the scheme of the seat each pad drives (TANK gets both sides from the d-pad) */
 
 static const struct { const char *n; int bit; } BTN[] = { { "A", IN_A }, { "B", IN_B }, { "X", IN_X }, { "Y", IN_Y }, { "L", IN_L }, { "R", IN_R }, { "START", IN_START }, { "SELECT", IN_SELECT },
   { "UP", IN_UP }, { "DOWN", IN_DOWN }, { "LEFT", IN_LEFT }, { "RIGHT", IN_RIGHT }, { "L3", IN_L3 }, { "R3", IN_R3 } };
@@ -447,7 +486,7 @@ static int read_script(const char *path) {
   FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "replay: cannot open %s\n", path); return 0; }
   static char buf[1 << 20]; size_t n = fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; fclose(f);
   const char *p = buf; NSEGS = 0;
-  while ((p = strchr(p, 0x7b)) && NSEGS < 4096) {
+  while ((p = strchr(p, 0x7b)) && NSEGS < 16384) {
     const char *end = strchr(p, '}'); if (!end) break;
     seg_t s; memset(&s, 0, sizeof s);
     const char *q = p;
@@ -492,6 +531,37 @@ static void pads_at(int frame, pad_state_t out[4]) {
     if (s->has_rx) p->rx = (int16_t)s->rx; if (s->has_ry) p->ry = (int16_t)s->ry;
     if (s->has_lt) p->lt = (uint8_t)(s->lt > 0 ? s->lt >> 7 : 0); if (s->has_rt) p->rt = (uint8_t)(s->rt > 0 ? s->rt >> 7 : 0);
   }
+  /* the d-pad drives the same axes as the left stick (12), as main.c read_pads does: full deflections when
+   * the stick rests in the 0.18 dead zone; a TANK seat gets both sides so the hash lines keep agreeing */
+  for (int i = 0; i < 4; i++) {
+    pad_state_t *p = &out[i];
+    int lx = p->lx, ly = p->ly, dz = (int)(0.18f * 32767.0f);
+    int dpad = p->buttons & (IN_UP | IN_DOWN | IN_LEFT | IN_RIGHT);
+    if (!dpad || lx * lx + ly * ly >= dz * dz) continue;
+    int fwd = (p->buttons & IN_UP ? 1 : 0) - (p->buttons & IN_DOWN ? 1 : 0);
+    int steer = (p->buttons & IN_RIGHT ? 1 : 0) - (p->buttons & IN_LEFT ? 1 : 0);
+    if (g_pad_tank[i] && p->rx * p->rx + p->ry * p->ry < dz * dz) {
+      int l = fwd + steer, r = fwd - steer;
+      l = l < -1 ? -1 : l > 1 ? 1 : l; r = r < -1 ? -1 : r > 1 ? 1 : r;
+      p->ly = (int16_t)(-32767 * l); p->ry = (int16_t)(-32767 * r);
+    } else { p->lx = (int16_t)(32767 * steer); p->ly = (int16_t)(-32767 * fwd); }
+  }
+}
+
+/* main.c's frame clock: acc += dt * timescale, one sim step per DT (at most four), a stall drops time; the
+ * mini-KO runs the sim at 0.4 for 36 render frames (J_MINIKO_*), so a 4 player script's frames and the
+ * sim's frames drift apart there exactly as they do in the cart */
+typedef struct { float acc, timescale; int miniko; } rig_clock_t;
+static int rig_frame_begin(rig_clock_t *c) {
+  if (c->miniko > 0) { c->miniko--; c->timescale = c->miniko > 0 ? 0.4f : 1.0f; }
+  c->acc += DT * c->timescale;
+  int steps = 0;
+  while (c->acc >= DT - 1e-5f && steps < 4) { c->acc -= DT; if (c->acc < 0) c->acc = 0; steps++; }
+  if (steps == 4) c->acc = 0;
+  return steps;
+}
+static void rig_clock_events(rig_clock_t *c, const match_t *m) {
+  for (int e = 0; e < m->nev; e++) if (m->ev[e].type == EV_MINI_KO) { c->miniko = 36; c->timescale = 0.4f; }
 }
 
 static int kv_ints(const char *line, const char *key, int *out, int n) {
@@ -535,24 +605,33 @@ static int replay(const char *script, const char *setup, int frames) {
   static match_t m; static ai_t ais[MAX_BOTS];
   sim_init(&m, &s);
   for (int i = 0; i < m.nbots; i++) { ai_init(&ais[i], s.ai_level[i], i); ai_bind(&ais[i], i); }
+  memset(g_pad_tank, 0, sizeof g_pad_tank);
+  for (int i = 0; i < 4; i++) if (s.pad[i] && s.pad[i] <= 4) g_pad_tank[s.pad[i] - 1] = s.scheme[i];
   char line[512]; sim_setup_line(&s, start, line, sizeof line);
   printf("%s\n", line);
   int last_logged = -1, stuck = 0;
+  rig_clock_t clk = { 0, 1.0f, 0 };
+  /* verbose=2 prints the heading every 30 frames: the steering proof (stick right must lower h, see sim.c right_of) */
   for (int f = start; f < start + frames && !sim_over(&m); f++) {
     pad_state_t pads[4]; pads_at(f, pads);
-    for (int i = 0; i < m.nbots && i < 4; i++) {
-      bot_t *b = &m.bots[i];
-      if (b->hp_max == 0) continue;
-      if (s.pad[i]) b->in = pads[s.pad[i] - 1];
-      else if (s.is_ai[i] && s.park) memset(&b->in, 0, sizeof b->in);   /* PRACTICE=off: the AI sits still, as in the cart */
-      else if (s.is_ai[i]) ai_think(&ais[i], &m, &b->in);
-    }
-    sim_step(&m);
-    for (int e = 0; e < m.nev; e++) if (m.ev[e].type == EV_STUCK) { printf("[stuck] f=%d bot %d at (%.2f, %.2f)\n", m.frame, m.ev[e].a, m.ev[e].x, m.ev[e].z); stuck++; }
-    m.nev = 0;
-    if (m.frame % 60 == 0 && m.frame != last_logged) {
-      printf("[sim] f=%d h=%08x\n", m.frame, sim_hash(&m)); last_logged = m.frame;
-      if (g_verbose) { printf("   "); for (int i = 0; i < m.nbots; i++) if (m.bots[i].hp_max > 0) printf(" %d:(%.1f,%.1f,%.2f) hp %.0f co %d%s", i, m.bots[i].b.x, m.bots[i].b.z, m.bots[i].b.y, m.bots[i].hp, m.bots[i].countout, m.bots[i].alive ? "" : " OUT"); printf(" ops %d\n", m.ops_state); }
+    int steps = rig_frame_begin(&clk);
+    for (int st = 0; st < steps && !sim_over(&m); st++) {
+      for (int i = 0; i < m.nbots && i < 4; i++) {
+        bot_t *b = &m.bots[i];
+        if (b->hp_max == 0) continue;
+        if (s.pad[i]) b->in = pads[s.pad[i] - 1];
+        else if (s.is_ai[i] && s.park) memset(&b->in, 0, sizeof b->in);   /* PRACTICE=off: the AI sits still, as in the cart */
+        else if (s.is_ai[i]) ai_think(&ais[i], &m, &b->in);
+      }
+      sim_step(&m);
+      rig_clock_events(&clk, &m);
+      for (int e = 0; e < m.nev; e++) if (m.ev[e].type == EV_STUCK) { printf("[stuck] f=%d bot %d at (%.2f, %.2f)\n", m.frame, m.ev[e].a, m.ev[e].x, m.ev[e].z); stuck++; }
+      m.nev = 0;
+      if (m.frame % 60 == 0 && m.frame != last_logged) {
+        printf("[sim] f=%d h=%08x\n", m.frame, sim_hash(&m)); last_logged = m.frame;
+        if (g_verbose) { printf("   "); for (int i = 0; i < m.nbots; i++) if (m.bots[i].hp_max > 0) printf(" %d:(%.1f,%.1f,%.2f) h %.2f hp %.0f co %d%s", i, m.bots[i].b.x, m.bots[i].b.z, m.bots[i].b.y, m.bots[i].b.h, m.bots[i].hp, m.bots[i].countout, m.bots[i].alive ? "" : " OUT"); printf(" ops %d\n", m.ops_state); }
+      }
+      if (g_verbose >= 2 && m.frame % 30 == 0 && m.frame % 60 != 0) { printf("[pos] f=%d render=%d", m.frame, f); for (int i = 0; i < m.nbots; i++) if (m.bots[i].hp_max > 0 && !m.bots[i].is_ops) printf(" %d:(%.2f,%.2f) h %.2f w %.2f in lx %d ly %d", i, m.bots[i].b.x, m.bots[i].b.z, m.bots[i].b.h, m.bots[i].b.w, m.bots[i].in.lx, m.bots[i].in.ly); printf("\n"); }
     }
   }
   printf("[sim] end f=%d over=%d winner=%d how=%s stuck=%d", m.frame, m.over, m.winner == 255 ? -1 : m.winner, KO_NAME[m.over ? m.win_how : WIN_NONE], stuck);
@@ -615,7 +694,7 @@ static int make_drive(int ar, const char *path) {
       float err = rtr_wrap_pi(rtr_atan2(dx, dz) - b->b.h);
       float turn = rtr_clamp(err * 2.2f, -1, 1), thr = fabsf(err) < 0.6f ? 1.0f : fabsf(err) < 1.4f ? 0.45f : 0.0f;
       if (back > 0) { turn = 1.0f; thr = -0.75f; }
-      lx = (int16_t)(rtr_clamp(floorf(turn * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);
+      lx = (int16_t)(-rtr_clamp(floorf(turn * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);   /* a positive heading error is a left turn: stick left */
       ly = (int16_t)(-rtr_clamp(floorf(thr * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);
     }
     if (back > 0) back--;
@@ -638,6 +717,7 @@ static int make_drive(int ar, const char *path) {
   fprintf(f, "  { \"from\": 90,  \"to\": 92,  \"pad\": 0, \"buttons\": [\"A\"] },\n");
   fprintf(f, "  { \"from\": 110, \"to\": 112, \"pad\": 0, \"buttons\": [\"START\"] },\n");
   fprintf(f, "  { \"from\": 230, \"to\": 300, \"pad\": 0, \"buttons\": [\"A\"] },\n");
+  fprintf(f, "  { \"from\": 308, \"to\": 310, \"pad\": 0, \"buttons\": [\"A\"] },\n");
   for (int i = 0; i < ar; i++) fprintf(f, "  { \"from\": %d, \"to\": %d, \"pad\": 0, \"buttons\": [\"RIGHT\"] },\n", 330 + i * 12, 332 + i * 12);
   int nseg = 0;
   for (int k = 0; k < frames; ) {
@@ -652,6 +732,86 @@ static int make_drive(int ar, const char *path) {
   int missed = 0;
   for (int h = 0; h < ARENAS[ar].nhaz; h++) if (!(visited & (1u << h))) { printf("  hazard %d (type %d) at (%.1f, %.1f) never crossed\n", h, ARENAS[ar].haz[h].type, ARENAS[ar].haz[h].x, ARENAS[ar].haz[h].z); missed++; }
   return nudges || !m.bots[0].alive || frames < 5400 || missed;
+}
+
+/* -- --make-fight: the rig's fight fixtures (2p-fight.json, 4p-fight.json) -----------------
+ * The cart's setup line names the match (seed, builds, arena, pads); the existing script keeps every
+ * segment before the first fight step (the lobby, garage and vote presses); the human seats are then
+ * driven by the builtin stand-in, sampled every 3 frames and quantised to 1/8 like the drive laps, and
+ * recorded as segments, so the cart replays a real fight: hits, a KO, no [stuck]. The AI seats think
+ * live in the cart and here alike, and the frame clock is main.c's (mini-KO slow-mo included). */
+static int make_fight(const char *path, const char *setup, int use_ai) {
+  match_setup_t s; int start = 0;
+  if (!parse_setup(setup, &s, &start)) { fprintf(stderr, "make-fight: bad setup line\n"); return 2; }
+  if (!read_script(path)) return 2;
+  seg_t head[256]; int nhead = 0;
+  for (int i = 0; i < NSEGS && nhead < 256; i++) if (SEGS[i].to < start) head[nhead++] = SEGS[i];
+  static match_t m; static ai_t ais[MAX_BOTS]; drv_t drv[MAX_BOTS];
+  sim_init(&m, &s);
+  memset(drv, 0, sizeof drv);
+  for (int i = 0; i < m.nbots; i++) { ai_init(&ais[i], s.ai_level[i] ? s.ai_level[i] : AI_MEDIUM, i); ai_bind(&ais[i], i); drv[i].rng = s.seed ^ (uint32_t)(i * 977); drv[i].no_camp = 1; drv[i].px = m.bots[i].b.x; drv[i].pz = m.bots[i].b.z; }
+  static int16_t LX[4][7200], LY[4][7200]; static uint16_t BT[4][7200];
+  pad_state_t pads[4]; memset(pads, 0, sizeof pads);
+  rig_clock_t clk = { 0, 1.0f, 0 };
+  int frames = 0, hits = 0, stuck = 0;
+  for (int k = 0; k < 7200 && !sim_over(&m); k++) {
+    for (int i = 0; i < m.nbots && i < 4; i++) {
+      if (!s.pad[i]) continue;
+      pad_state_t o;
+      if (use_ai) ai_think(&ais[i], &m, &o); else drive_builtin(&m, i, &drv[i], &o);   /* the human stand-in: the MEDIUM AI by default */
+      pad_state_t *p = &pads[s.pad[i] - 1];
+      if (k % 3 == 0) {
+        p->lx = (int16_t)(rtr_clamp(floorf(o.lx / 32767.0f * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);
+        p->ly = (int16_t)(rtr_clamp(floorf(o.ly / 32767.0f * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);
+      }
+      p->buttons = o.buttons;
+      LX[s.pad[i] - 1][k] = p->lx; LY[s.pad[i] - 1][k] = p->ly; BT[s.pad[i] - 1][k] = p->buttons;
+    }
+    int steps = rig_frame_begin(&clk);
+    for (int st = 0; st < steps && !sim_over(&m); st++) {
+      for (int i = 0; i < m.nbots && i < 4; i++) {
+        bot_t *b = &m.bots[i];
+        if (b->hp_max == 0) continue;
+        if (s.pad[i]) b->in = pads[s.pad[i] - 1];
+        else if (s.is_ai[i]) ai_think(&ais[i], &m, &b->in);
+      }
+      sim_step(&m);
+      rig_clock_events(&clk, &m);
+      for (int e = 0; e < m.nev; e++) { if (m.ev[e].type == EV_STUCK) stuck++; if (m.ev[e].type == EV_HIT || m.ev[e].type == EV_RAM) hits++; }
+      m.nev = 0;
+    }
+    frames = k + 1;
+  }
+  FILE *f = fopen(path, "wb"); if (!f) { fprintf(stderr, "make-fight: cannot write %s\n", path); return 2; }
+  fprintf(f, "[\n");
+  for (int i = 0; i < nhead; i++) {
+    const seg_t *h = &head[i];
+    fprintf(f, "  { \"from\": %d, \"to\": %d, \"pad\": %d", h->from, h->to, h->pad);
+    if (h->buttons) { fprintf(f, ", \"buttons\": ["); int first = 1; for (size_t b = 0; b < sizeof BTN / sizeof BTN[0]; b++) if (h->buttons & BTN[b].bit) { fprintf(f, "%s\"%s\"", first ? "" : ", ", BTN[b].n); first = 0; } fprintf(f, "]"); }
+    if (h->has_lx) fprintf(f, ", \"lx\": %d", h->lx); if (h->has_ly) fprintf(f, ", \"ly\": %d", h->ly);
+    if (h->has_rx) fprintf(f, ", \"rx\": %d", h->rx); if (h->has_ry) fprintf(f, ", \"ry\": %d", h->ry);
+    if (h->has_lt) fprintf(f, ", \"lt\": %d", h->lt); if (h->has_rt) fprintf(f, ", \"rt\": %d", h->rt);
+    fprintf(f, " },\n");
+  }
+  int nseg = 0;
+  for (int pad = 0; pad < 4; pad++) {
+    int used = 0; for (int i = 0; i < 4; i++) if (s.pad[i] == pad + 1) used = 1;
+    if (!used) continue;
+    for (int k = 0; k < frames; ) {
+      int j = k; while (j + 1 < frames && LX[pad][j + 1] == LX[pad][k] && LY[pad][j + 1] == LY[pad][k] && BT[pad][j + 1] == BT[pad][k]) j++;
+      if (LX[pad][k] || LY[pad][k] || BT[pad][k]) {
+        fprintf(f, "%s  { \"from\": %d, \"to\": %d, \"pad\": %d, \"lx\": %d, \"ly\": %d", nseg ? ",\n" : "", start + k, start + j, pad, LX[pad][k], LY[pad][k]);
+        if (BT[pad][k]) { fprintf(f, ", \"buttons\": ["); int first = 1; for (size_t b = 0; b < sizeof BTN / sizeof BTN[0]; b++) if (BT[pad][k] & BTN[b].bit) { fprintf(f, "%s\"%s\"", first ? "" : ", ", BTN[b].n); first = 0; } fprintf(f, "]"); }
+        fprintf(f, " }"); nseg++;
+      }
+      k = j + 1;
+    }
+  }
+  fprintf(f, "\n]\n");
+  fclose(f);
+  printf("%s: %d header segments kept, %d fight segments, %d render frames, winner %d by %s at sim frame %d, %d hits, [stuck] %d\n", path, nhead, nseg, frames, m.winner == 255 ? -1 : m.winner, KO_NAME[m.over ? m.win_how : WIN_NONE], m.frame, hits, stuck);
+  for (int i = 0; i < m.nbots && i < 4; i++) if (m.bots[i].hp_max > 0) printf("  b%d %s hp %.0f dealt %.0f\n", i, m.bots[i].name, m.bots[i].hp, m.bots[i].dealt);
+  return stuck ? 1 : 0;
 }
 
 /* -- --map: a top down picture of an arena's data and its drive lap (a PPM), to check the
@@ -774,7 +934,7 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "--robin")) {
     int n = argc > 2 && argv[2][0] != '-' && !strchr(argv[2], '=') ? atoi(argv[2]) : 20;
     if (n <= 0) n = 20;
-    const char *ar = arg_str(argc, argv, "arenas", "all"), *hz = arg_str(argc, argv, "hazards", "both"), *dr = arg_str(argc, argv, "driver", "builtin");
+    const char *ar = arg_str(argc, argv, "arenas", "all"), *hz = arg_str(argc, argv, "hazards", "both"), *dr = arg_str(argc, argv, "driver", "ai");
     int mask = 0;
     if (!strcmp(ar, "all")) mask = 63; else for (int i = 0; i < 6; i++) if (strstr(ar, ARENA_KEY[i])) mask |= 1 << i;
     if (!mask) { fprintf(stderr, "robin: unknown arena %s\n", ar); return 2; }
@@ -799,6 +959,10 @@ int main(int argc, char **argv) {
     if (argc < 5 || strcmp(argv[3], "--setup")) return usage();
     return replay(argv[2], argv[4], arg_int(argc, argv, "frames", 0));
   }
+  if (!strcmp(argv[1], "--make-fight")) {
+    if (argc < 5 || strcmp(argv[3], "--setup")) return usage();
+    return make_fight(argv[2], argv[4], !strcmp(arg_str(argc, argv, "driver", "ai"), "ai"));
+  }
   if (!strcmp(argv[1], "--trace")) {
     if (argc < 5) return usage();
     int ar = -1; for (int i = 0; i < 6; i++) if (!strcmp(argv[2], ARENA_KEY[i])) ar = i;
@@ -811,7 +975,7 @@ int main(int argc, char **argv) {
     s.hazards_off = (uint8_t)(!strcmp(arg_str(argc, argv, "hazards", "on"), "off"));
     s.comeback = (uint8_t)arg_int(argc, argv, "comeback", 0);
     build_preset(&s.builds[0], pa); build_preset(&s.builds[1], pb); s.is_ai[0] = s.is_ai[1] = 1;
-    g_use_ai = !strcmp(arg_str(argc, argv, "driver", "builtin"), "ai");
+    g_use_ai = !strcmp(arg_str(argc, argv, "driver", "ai"), "ai");
     char line[512]; sim_setup_line(&s, 0, line, sizeof line); printf("%s\n", line);
     result_t r; run_match(&s, &r, 1);
     printf("winner %d by %s in %d frames (%.1f s), stuck frames %d\n", r.winner, KO_NAME[r.how], r.frames, r.frames / 60.0, r.stuck);

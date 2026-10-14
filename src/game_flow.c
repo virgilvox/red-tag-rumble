@@ -355,19 +355,6 @@ static const build_t *human_last_build(void) {
   return &SAVE.fav_build[0];
 }
 
-/* the k-th AI seat's pick: the first counter-picks the human (8.4); the others take a different preset
- * each, so a FILL WITH BOT table is never one build mirrored three times under one name */
-static void ai_choose(int s, int k, int first_preset) {
-  ai_pick_build(&ai_pick[s], G.seats[s].ai_level, human_last_build(), SAVE.habits, &grng);
-  int p = build_preset_of(&ai_pick[s]);
-  if (k > 0) {
-    int base = first_preset >= 0 && first_preset < PRE_RANDOM ? first_preset : p < PRE_RANDOM ? p : PRE_ROLL_OUT;
-    build_preset(&ai_pick[s], (base + 2 * k) % PRE_RANDOM);
-  }
-  if (!build_legal(&ai_pick[s], G.players)) build_preset(&ai_pick[s], PRE_LAUNCH);
-  ai_pick[s].paint = (uint8_t)s;
-}
-
 static void go_garage(int rebuild) {
   game_attract_stop();
   if (!rebuild) {
@@ -396,7 +383,7 @@ static void go_garage(int rebuild) {
   match_card_row = 0;
   for (int p = 0; p < 4; p++) y_mod[p] = 0;
   world_attach_garage();
-  int ai_k = 0, ai_first = -1;
+  build_t picked[4]; int npicked = 0;         /* the AI seats never share a build or a name (FILL WITH BOT) */
   for (int s = 0; s < 4; s++) {
     seat_t *st = &G.seats[s];
     if (st->kind == SEAT_EMPTY) { world_bot_visible(s, 0); continue; }
@@ -404,8 +391,10 @@ static void go_garage(int rebuild) {
     seat_reset_garage(st);
     st->join_slide = 0;
     if (st->kind == SEAT_AI) {
-      ai_choose(s, ai_k++, ai_first);
-      if (ai_first < 0) ai_first = build_preset_of(&ai_pick[s]);
+      ai_pick_build_nth(&ai_pick[s], st->ai_level, human_last_build(), SAVE.habits, &grng, picked, npicked);
+      if (!build_legal(&ai_pick[s], G.players)) build_preset(&ai_pick[s], PRE_LAUNCH);
+      picked[npicked++] = ai_pick[s];
+      ai_pick[s].paint = (uint8_t)s;
       ai_frame[s] = 0;
       if (G.rig_park) { build_preset(&ai_pick[s], PRE_LAUNCH); ai_pick[s].paint = (uint8_t)s; st->build = ai_pick[s]; st->locked = 1; }   /* the drive scripts' parked practice bot (balance drive_setup) */
       bot_name(st->name, &st->build);

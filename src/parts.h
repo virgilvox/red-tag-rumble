@@ -102,35 +102,41 @@ static const weapon_def_t WEAPONS[WP_COUNT] __attribute__((unused)) = {
   /* name         short      flavour                                       tags base bar  spinup windup act cd   stun knock lvy  self  mass  hbw   hbd  z0    z1    r     input      invdrv invop sr       sec */
   { "NONE",       "NONE",    "LEAVE THE SLOT EMPTY. SAVE TAGS",            0,  0,  0,   0.0f,  0,  0,   0,   0,  0.0f, 0,  0.0f, 0.00f, 0,    0,   0,    0,    0,    WI_PASSIVE, 1, 1, SR_NONE, 0 },
   { "WEDGE",      "WEDGE",   "NO WEAPON. THAT IS THE WEAPON",              1, 10, 10,   0.0f,  0,  0,   0,  15,  4.0f, 0,  0.0f, 0.05f, 0.8f, 0,   0.5f, 0.6f, 0,    WI_PASSIVE, 1, 1, SR_NONE, 1 },
-  { "SPIKE",      "SPIKE",   "A PUNCH IN A STRAIGHT LINE",                 3, 22, 22,   0.0f,  0,  9,  60,  18,  2.5f, 0,  0.0f, 0.10f, 0.25f, 0,  0.55f, 1.05f, 0,   WI_TAP,     1, 1, SR_NONE, 0 },
+  { "SPIKE",      "SPIKE",   "A PUNCH IN A STRAIGHT LINE",                 3, 15, 15,   0.0f,  0,  9,  60,  18,  2.5f, 0,  0.0f, 0.10f, 0.25f, 0,  0.55f, 1.05f, 0,   WI_TAP,     1, 1, SR_NONE, 0 },
   { "LIFTER",     "LIFTER",  "GETS UNDER, LIFTS, CARRIES",                 3,  4,  4,   0.0f,  0,  0,   0,  18,  1.2f, 0,  0.0f, 0.10f, 0.6f, 0,   0.5f, 0.8f, 0,    WI_HOLD,    0, 0, SR_NONE, 1 },
-  { "SAW",        "SAW",     "NEEDS A MOMENT WITH YOU",                    3,  5, 12,   0.8f,  0,  0,   0,   6,  0.4f, 0,  2.0f, 0.10f, 0,    0,   0.7f, 0,    0.3f, WI_TOGGLE,  1, 1, SR_NONE, 0 },
-  { "FLAME",      "FLAME",   "SCARY. MILD. GREAT ON CAMERA",               4,  3, 10,   0.0f,  0,  0,   0,   0,  0.0f, 0,  0.0f, 0.10f, 0,    0,   0,    2.0f, 0,    WI_HOLD,    0, 0, SR_NONE, 0 },
-  { "HAMMER",     "HAMMER",  "TELEGRAPHS. THEN DENTS",                     5, 28, 28,   0.0f, 15,  4,  72,  30,  1.2f, 0,  4.0f, 0.20f, 0.4f, 0,   0.5f, 1.0f, 0,    WI_TAP,     0, 0, SR_B,    0 },
+  { "SAW",        "SAW",     "NEEDS A MOMENT WITH YOU",                    3,  4, 12,   0.8f,  0,  0,   0,   6,  0.4f, 0,  2.0f, 0.10f, 0,    0,   0.7f, 0,    0.3f, WI_TOGGLE,  1, 1, SR_NONE, 0 },
+  { "FLAME",      "FLAME",   "SCARY. MILD. GREAT ON CAMERA",               4,  2, 10,   0.0f,  0,  0,   0,   0,  0.0f, 0,  0.0f, 0.10f, 0,    0,   0,    1.5f, 0,    WI_HOLD,    0, 0, SR_NONE, 0 },
+  { "HAMMER",     "HAMMER",  "TELEGRAPHS. THEN DENTS",                     5, 20, 20,   0.0f, 15,  4,  72,  30,  1.2f, 0,  4.0f, 0.20f, 0.4f, 0,   0.5f, 1.0f, 0,    WI_TAP,     0, 0, SR_B,    0 },
   { "FLIPPER",    "FLIPPER", "GRAVITY, BUT FOR THEM",                      6,  6,  6,   0.0f,  0,  4, 108,  36,  3.0f, 7,  0.0f, 0.20f, 0.6f, 0,   0.4f, 0.9f, 0,    WI_TAP,     0, 0, SR_B,    0 },
-  { "DRUM",       "DRUM",    "POPS THEM UP. HITS THE FLOOR TO SELF RIGHT", 6, 24, 24,   1.5f,  0,  0,   0,  24,  4.0f, 3,  5.0f, 0.30f, 0,    0,   0.55f, 0,   0.3f, WI_HOLD,    1, 1, SR_DRUM, 0 },
-  { "HORIZONTAL", "HORIZ",   "CHAINSAW YOU CANNOT STEER",                  7, 30, 30,   2.0f,  0,  0,   0,  21,  6.0f, 0,  8.0f, 0.30f, 0,    0,   0.15f, 0,   0.55f, WI_HOLD,   0, 1, SR_NONE, 0 },
-  { "CRUSHER",    "CRUSHER", "HOLDS ON. TWO SECONDS. AWKWARD",             7, 18, 18,   0.0f, 24,  0, 120, 120,  0.0f, 0,  0.0f, 0.30f, 0.5f, 0,   0.5f, 0.9f, 0,    WI_TAP,     0, 0, SR_NONE, 0 },
+  { "DRUM",       "DRUM",    "POPS THEM UP. HITS THE FLOOR TO SELF RIGHT", 6, 17, 17,   1.5f,  0,  0,   0,  24,  4.0f, 3,  3.0f, 0.30f, 0,    0,   0.55f, 0,   0.3f, WI_HOLD,    1, 1, SR_DRUM, 0 },
+  { "HORIZONTAL", "HORIZ",   "CHAINSAW YOU CANNOT STEER",                  7, 22, 22,   2.0f,  0,  0,   0,  21,  6.0f, 0,  4.0f, 0.30f, 0,    0,   0.15f, 0,   0.55f, WI_HOLD,   0, 1, SR_NONE, 0 },
+  { "CRUSHER",    "CRUSHER", "HOLDS ON. TWO SECONDS. AWKWARD",             7, 15, 15,   0.0f, 24,  0, 120, 120,  0.0f, 0,  0.0f, 0.30f, 0.5f, 0,   0.5f, 0.9f, 0,    WI_TAP,     0, 0, SR_NONE, 0 },
 };
 /* weapon extras that do not fit the table: SAW ticks every 10 frames of contact;
- * FLAME ticks every 20 frames, fuel 240 frames, refill 180, burn 2/s for 3 s;
- * HORIZONTAL loses 15 HP and all spin on a wall over 0.5 spin; MELTY edges hit
- * for 18 at spin over 0.5 with spin_up 1.5 and no weapon row. */
+ * FLAME ticks every 30 frames, fuel 240 frames, refill 180, burn 1/s for 3 s and
+ * a burning bot is not lit again until the burn ends; HORIZONTAL loses 15 HP and
+ * all spin on a wall over 0.5 spin; MELTY edges hit for 12 at spin over 0.5 with
+ * spin_up 1.5, 3 self damage per hit and no weapon row. The base damages sit one notch under the spec
+ * tables (the sim-feel retune of 4.7): no hit over HIT_CAP of the bar, one approach
+ * is one hit and then a spin up, and a two bot fight runs 35 to 60 s. */
 #define WP_SAW_TICK_FRAMES    10
-#define WP_FLAME_TICK_FRAMES  20
+#define WP_FLAME_TICK_FRAMES  30
 #define WP_FLAME_FUEL         240
 #define WP_FLAME_REFILL       180
 #define WP_FLAME_BURN_T       180
-#define WP_FLAME_BURN_DPS     2.0f
+#define WP_FLAME_BURN_DPS     1.0f
 #define WP_HORIZ_WALL_DMG     15.0f
 #ifndef WP_MELTY_DMG
-#define WP_MELTY_DMG          18.0f
+#define WP_MELTY_DMG          12.0f
 #endif
 #ifndef WP_MELTY_SPIN_UP
 #define WP_MELTY_SPIN_UP      1.5f
 #endif
 #ifndef WP_MELTY_WALL_DMG
 #define WP_MELTY_WALL_DMG     10.0f
+#endif
+#ifndef WP_MELTY_SELF
+#define WP_MELTY_SELF         3.0f    /* the frame takes the knock of every edge hit it lands */
 #endif
 #define WP_CRUSHER_HOLD_DPS   6.0f
 #define WP_LIFTER_FRAMES      36
@@ -307,11 +313,15 @@ static inline float build_mass(const build_t *b) {
   if (b->weapon2 != WP_NONE) m += WEAPONS[b->weapon2].mass;
   return m;
 }
-/* push = traction * mass_total * accel; HOVER push is 0 */
+/* push = traction squared times the total mass times a stall torque of 8 u/s2; HOVER push is 0.
+ * The spec's traction * mass * accel let a TWO WHEEL box (0.6 x 12) out-push TREADS (1.0 x 5), the
+ * drive the table calls UNMOVABLE: grip and weight decide a shoving match, the motor only up to the
+ * grip limit, so the torque term is one constant for every drive */
+#define PUSH_TORQUE 8.0f
 static inline float build_push(const build_t *b) {
   const drive_def_t *d = &DRIVES[b->drive];
   if (b->drive == DR_HOVER) return 0;
-  return d->traction * build_mass(b) * d->accel;
+  return d->traction * d->traction * build_mass(b) * PUSH_TORQUE;
 }
 static inline float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 

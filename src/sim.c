@@ -19,19 +19,77 @@
 
 #define PI_F 3.14159265f
 #define GRAVITY 20.0f
-/* spin spent per landed hit (not in the spec tables; tuned with balance --robin so a full spin
- * hit is an event and not an 18 frame machine gun) */
+/* spin spent per landed hit (not in the spec tables; tuned with balance --robin so one approach
+ * is one hit and then a visible spin up, not an 18 frame machine gun). A HORIZONTAL and a MELTY
+ * spend everything: the disc stops dead on the victim and needs its full spin up (2 s and 1.5 s),
+ * which is the spun down window of 4.7; a HORIZONTAL keeps 0.3 (0.4 s to a half strength hit, 1.4 s
+ * to full), a DRUM 0.4 */
 #ifndef SPIN_BLEED_HORIZ
-#define SPIN_BLEED_HORIZ 0.4f
+#define SPIN_BLEED_HORIZ 0.7f
 #endif
 #ifndef SPIN_BLEED_DRUM
-#define SPIN_BLEED_DRUM  0.35f
-#endif
-#ifndef MELTY_TIP
-#define MELTY_TIP 9.0f
+#define SPIN_BLEED_DRUM  0.6f
 #endif
 #ifndef SPIN_BLEED_MELTY
-#define SPIN_BLEED_MELTY 0.3f
+#define SPIN_BLEED_MELTY 1.0f
+#endif
+/* a ram is an event, not a drumbeat: one per victim per RAM_CD frames (the spec's 30 let a wedge
+ * bounce a bot ten times in ten seconds); RAM_BASE plus RAM_BASE by closing speed (the spec's 10 + 10) */
+#ifndef RAM_CD
+#define RAM_CD 90
+#endif
+#ifndef RAM_BASE
+#define RAM_BASE 9.0f
+#endif
+/* landing damage after a flipper launch (the spec's 6; a notch down with the rest of the table) */
+#ifndef FLIP_LAND_DMG
+#define FLIP_LAND_DMG 5.0f
+#endif
+/* a MELTY edge hit re-arms after MELTY_HIT_CD frames on top of its spin up; a clash costs each disc
+ * CLASH_FRAC of the hit it would have dealt and the pair cannot clash again for CLASH_CD frames */
+#ifndef MELTY_HIT_CD
+#define MELTY_HIT_CD 90
+#endif
+/* the ram's closing speed floor (the spec's 2.0 let a TREADS wedge at 3.8 u/s push a backing bot all day
+ * without a single ram) */
+#ifndef RAM_MIN_CLOSING
+#define RAM_MIN_CLOSING 1.5f
+#endif
+#ifndef CLASH_FRAC
+#define CLASH_FRAC 0.4f
+#endif
+#ifndef CLASH_CD
+#define CLASH_CD 90
+#endif
+/* weapon tip speeds for the closing term of 4.7 (units per second at full spin or mid swing). A
+ * full spin hit on a standing target closes at about 0.9, a charge reaches the CLOSING_MAX clamp,
+ * and a tap weapon swings at 1.0 instead of the 0.4 floor it used to get with no tip at all */
+#ifndef TIP_HORIZ
+#define TIP_HORIZ   3.6f
+#endif
+#ifndef TIP_DRUM
+#define TIP_DRUM    3.0f
+#endif
+#ifndef MELTY_TIP
+#define MELTY_TIP   3.0f
+#endif
+#define TIP_SWING   4.0f
+#define CLOSING_MIN 0.4f
+#define CLOSING_MAX 1.3f
+#define SPINNER_HIT_CD 30
+/* frames a HOVER's skirt stays pinched after a bot pressed on it (drive_step, bots_collide) */
+#define SKIRT_FRAMES 24
+/* a HOVER has thrust but no brakes: the part of its drive that fights the current velocity (slowing,
+ * reversing, turning across it) gets this share of the accel, so it drifts through turns and a slower
+ * bot that reads the drift can meet it. MELTY keeps its skids */
+#ifndef HOVER_BRAKE
+#define HOVER_BRAKE 0.3f
+#endif
+/* a HORIZONTAL or DRUM hits only at this much spin (the spec's 0.3 let a spent disc keep tapping
+ * for 1 to 4 damage every half second; a hit spends SPIN_BLEED, so one approach is one hit and the
+ * next needs a visible spin up). The spun down zone of 4.7 still opens under 0.3 */
+#ifndef SPINNER_HIT_MIN
+#define SPINNER_HIT_MIN 0.5f
 #endif
 
 /* -- the trig table (4.2) ----------------------------------------- */
@@ -97,7 +155,11 @@ static inline float fmin_f(float a, float b) { return a < b ? a : b; }
 static inline float fmax_f(float a, float b) { return a > b ? a : b; }
 static inline float len2(float x, float z) { return sqrtf(x * x + z * z); }
 static inline float dotp(float ax, float az, float bx, float bz) { return ax * bx + az * bz; }
-/* heading 0 is plus z: forward (sin h, cos h), right (cos h, minus sin h) */
+/* heading 0 is plus z: forward (sin h, cos h). right_of is the body's local +x axis (cos h, minus
+ * sin h), the axis three.c's rotation.y = h maps local x onto. In the y up right handed world that
+ * axis lies on the bot's LEFT as seen from above and on screen, so a right turn is a heading
+ * DECREASE: drive_step applies the stick with that sign and the AI, OPS and the balance driver
+ * write their sticks against it. The collision code only needs an axis and does not care. */
 static inline void fwd_of(float h, float *fx, float *fz) { *fx = rtr_sin(h); *fz = rtr_cos(h); }
 static inline void right_of(float h, float *rx, float *rz) { *rx = rtr_cos(h); *rz = -rtr_sin(h); }
 static inline float rnd01(match_t *m) { return rtr_rand_f(&m->rng); }
@@ -364,6 +426,10 @@ static float apply_damage(match_t *m, int att, int vic, float raw, int weapon, i
     if (!a->is_ops && !v->is_ops && m->mode == MODE_2V2 && a->team == v->team) dmg *= 0.5f;
   }
   if (dmg <= 0) return 0;
+  /* no single weapon hit takes more than HIT_CAP of the victim's bar (4.7): the exposed and spun
+   * down zones still make the biggest number on screen, a flip KO is the only bigger moment.
+   * OPS's punish shove and the hazards are outside the rule */
+  if (a && !a->is_ops && !v->is_ops && v->hp_max > 0 && dmg > v->hp_max * HIT_CAP) dmg = v->hp_max * HIT_CAP;
   v->hp -= dmg;
   if (v->is_ops && v->hp < 1) v->hp = 1;          /* OPS floors at 1 and is never KO'd (7) */
   if (a) {
@@ -391,17 +457,18 @@ static float apply_damage(match_t *m, int att, int vic, float raw, int weapon, i
   if (ev_type >= 0) ev_hit(m, ev_type, att < 0 ? 255 : att, vic, zone, cx, cz, v->b.y + 0.2f, dmg, nx, nz);
   /* hit stop (5.1) from the band; the sim applies it so a replay stays aligned */
   if (!m->hitstop_off && (ev_type == EV_HIT || ev_type == EV_RAM)) {
-    int stop = dmg < 8 ? STOP_TAP : dmg < 15 ? STOP_HIT : dmg < 30 ? STOP_HEAVY : STOP_HUGE;
+    int stop = dmg < BAND_HIT_MIN ? STOP_TAP : dmg < BAND_HEAVY_MIN ? STOP_HIT : dmg < BAND_HUGE_MIN ? STOP_HEAVY : STOP_HUGE;
     if (stop > m->hitstop) m->hitstop = (int16_t)stop;
   }
   hp_thresholds(m, vic);
   return dmg;
 }
 
-/* knockback impulse along a normal (4.7) */
+/* knockback impulse along a normal (4.7); a HOVER has no grip to take it on, so it flies 1.5x */
 static void knock(bot_t *v, float jx, float jz) {
   if (!v->alive || v->is_ops || v->lifted_by || v->clamped_by) return;
   float mult = DRIVES[v->build.drive].knock_mult * (ARMOURS[v->build.armour].knock_half ? 0.5f : 1.0f);
+  if (v->build.drive == DR_HOVER) mult *= 1.5f;
   v->b.vx += jx * v->b.inv_mass * mult;
   v->b.vz += jz * v->b.inv_mass * mult;
 }
@@ -441,7 +508,7 @@ static int weapon_shape(const bot_t *b, int which, shape_t *s) {
   float lift = b->lift;
   int on;
   switch (wid) {
-    case WP_HORIZ: case WP_DRUM: on = spin > 0.3f; break;
+    case WP_HORIZ: case WP_DRUM: on = spin > SPINNER_HIT_MIN; break;
     case WP_SAW: on = spin > 0.5f; break;
     case WP_FLIPPER: case WP_HAMMER: case WP_SPIKE: on = active > 0; break;
     case WP_LIFTER: on = lift > 0.3f; break;
@@ -495,32 +562,56 @@ static void drive_step(match_t *m, int slot) {
     if (b->taunts <= 4) b->aggro += 60;             /* capped at 4 taunts (2.5) */
     ev_simple(m, EV_TAUNT, slot, slot, 0, b->b.x, b->b.z, b->b.y);
   }
-  if (!bot_can_drive(b)) return;
+  if (!bot_can_drive(b)) {
+    /* no drive, no steering torque: the yaw rate decays on the floor (an inverted or stunned bot used to keep
+     * whatever spin it had, forever); a tumbling airborne bot keeps its spin until it lands */
+    if (!b->airborne) b->b.w *= 0.85f;
+    return;
+  }
   float sx, sy; stick_vec(in, &sx, &sy);
   float top = bot_top_speed(b);
   if (b->lift > 0.3f && b->carry_t > 0) top *= 0.6f;          /* carrying a victim */
   float accel = d->accel * (b->build.drive == DR_TREAD ? 1.0f : ar->traction_mult);
   if (arena_on_slope(ar, b->b.x, b->b.z) && b->build.drive != DR_LEGTRACK && b->build.drive != DR_SIX) accel *= 0.6f, top *= 0.6f;
   if (d->strafe) {
-    /* HOVER and MELTY: the stick is a world direction relative to the seat's camera forward */
-    float cy = in->cam_yaw, cfx, cfz, crx, crz; fwd_of(cy, &cfx, &cfz); right_of(cy, &crx, &crz);
-    float dx = cfx * sy + crx * sx, dz = cfz * sy + crz * sx;
+    /* HOVER and MELTY: the stick is a world direction relative to the seat's camera forward. The
+     * yaw it is read against is latched when the stick leaves the dead zone and held until it
+     * returns: the camera follows the travel direction, so reading the live yaw every frame made
+     * stick right mean "90 degrees from wherever the camera got to", a pirouette that never settled */
+    float mag_in = len2(sx, sy);
+    if (mag_in > 0.1f) { if (!b->strafe_held) { b->strafe_held = 1; b->drive_yaw = in->cam_yaw; } }
+    else b->strafe_held = 0;
+    float cy = b->strafe_held ? b->drive_yaw : in->cam_yaw, cfx, cfz, crx, crz; fwd_of(cy, &cfx, &cfz); right_of(cy, &crx, &crz);
+    float dx = cfx * sy - crx * sx, dz = cfz * sy - crz * sx;   /* screen right is minus the local x axis */
     float mag = len2(dx, dz);
     b->drive_t = mag;
+    /* a pinched skirt (a bot pressing on the hover within SKIRT_FRAMES) cuts the thrust to a quarter: a
+     * HOVER cannot push off whatever is leaning on it, which is what lets a wedge shove it anywhere */
+    if (b->build.drive == DR_HOVER && b->skirt_t > 0) accel *= 0.25f;
     float k = accel / (top > 0 ? top : 1.0f) * DT;
-    b->b.vx += (dx * top - b->b.vx) * k;
-    b->b.vz += (dz * top - b->b.vz) * k;
-    /* the heading follows the direction of travel (the camera wants a forward; MELTY spins in render) */
-    if (mag > 0.1f) { float want = rtr_atan2(dx, dz); float err = rtr_wrap_pi(want - b->b.h); b->b.w = rtr_clamp(err * 8.0f, -6.0f, 6.0f); }
+    float dvx = (dx * top - b->b.vx) * k, dvz = (dz * top - b->b.vz) * k;
+    if (b->build.drive == DR_HOVER) {
+      float sp = len2(b->b.vx, b->b.vz);
+      if (sp > 0.2f) {
+        float ux = b->b.vx / sp, uz = b->b.vz / sp, along = dotp(dvx, dvz, ux, uz);
+        if (along < 0) { dvx += ux * along * (HOVER_BRAKE - 1.0f); dvz += uz * along * (HOVER_BRAKE - 1.0f); }   /* braking thrust is weak */
+        float lat_x = dvx - ux * dotp(dvx, dvz, ux, uz), lat_z = dvz - uz * dotp(dvx, dvz, ux, uz);
+        dvx -= lat_x * (1.0f - HOVER_BRAKE); dvz -= lat_z * (1.0f - HOVER_BRAKE);                                 /* so is thrust across the slide */
+      }
+    }
+    b->b.vx += dvx; b->b.vz += dvz;
+    /* the heading follows the direction of travel at up to 3 rad/s (the camera wants a forward; MELTY spins in render) */
+    if (mag > 0.1f) { float want = rtr_atan2(dx, dz); float err = rtr_wrap_pi(want - b->b.h); b->b.w = rtr_clamp(err * 6.0f, -3.0f, 3.0f); }
     else b->b.w *= 0.8f;
     return;
   }
   float t, s;
-  if (b->scheme == SCHEME_TANK) {
+  if (b->scheme == SCHEME_TANK && in->ry != 0) {
+    /* TANK: left Y and right Y are the two sides; the left side faster is a right turn */
     float ly = -(float)in->ly / 32767.0f, ry = -(float)in->ry / 32767.0f;
     if (fabs_f(ly) < 0.18f) ly = 0; if (fabs_f(ry) < 0.18f) ry = 0;
     t = (ly + ry) * 0.5f; s = (ly - ry) * 0.5f;
-  } else { t = sy; s = sx; }
+  } else { t = sy; s = sx; }   /* arcade, and a TANK seat whose right stick rests: a d-pad or one stick still steers */
   if (t < 0) t *= 0.8f;                                        /* reverse at 80 percent */
   if (b->inverted) { if (b->build.weapon == WP_HORIZ) { t = 0; s = 0; } }   /* HORIZONTAL inverted spins but cannot steer */
   b->drive_t = t; b->drive_s = s;
@@ -534,7 +625,8 @@ static void drive_step(match_t *m, int slot) {
   float nvf = vf + dv, nvl = vl * (1.0f - (4.0f + 8.0f * d->traction) * DT);
   b->b.vx = fx * nvf + rx * nvl; b->b.vz = fz * nvf + rz * nvl;
   float turn = d->turn_deg * (PI_F / 180.0f);
-  float wt = s * turn * (1.0f - 0.4f * fmin_f(speed / (top > 0 ? top : 1.0f), 1.0f)) * (b->build.weapon == WP_HORIZ && b->spin > 0.6f ? 0.7f : 1.0f);
+  /* stick right (s > 0) is a right turn, which is a heading decrease in this world (see right_of) */
+  float wt = -s * turn * (1.0f - 0.4f * fmin_f(speed / (top > 0 ? top : 1.0f), 1.0f)) * (b->build.weapon == WP_HORIZ && b->spin > 0.6f ? 0.7f : 1.0f);
   if (b->inverted) wt *= 0.7f;
   b->b.w += rtr_clamp(wt - b->b.w, -20.0f * DT, 20.0f * DT);
 }
@@ -614,7 +706,7 @@ static void weapon_machine(match_t *m, int slot, int which) {
 /* -- hits (4.7) ---------------------------------------------------- */
 static float closing_of(const bot_t *a, const bot_t *v, float nx, float nz, float tip) {
   float rel = dotp(a->b.vx - v->b.vx, a->b.vz - v->b.vz, nx, nz);
-  return rtr_clamp((fabs_f(rel) + tip) / 4.0f, 0.4f, 1.6f);
+  return rtr_clamp((fabs_f(rel) + tip) / 4.0f, CLOSING_MIN, CLOSING_MAX);
 }
 
 /* a weapon hitbox overlapping a victim body: one hit */
@@ -627,22 +719,22 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
   float spin = which ? a->spin2 : a->spin;
   float nx = v->b.x - a->b.x, nz = v->b.z - a->b.z, nl = len2(nx, nz);
   if (nl < 1e-4f) { nx = 0; nz = 1; } else { nx /= nl; nz /= nl; }
-  float base, tip = 0, spin_or_1 = 1; int stun; float knockv = 0, self = 0;
-  if (melty) { base = WP_MELTY_DMG; stun = 18; knockv = 4.0f; tip = spin * MELTY_TIP; *cd = 18; wid = -2; }
+  float base, tip = 0, spin_or_1 = 1; int stun; float knockv = 0, self = 0, fixed_closing = 0;
+  if (melty) { base = WP_MELTY_DMG; stun = 18; knockv = 4.0f; tip = spin * MELTY_TIP; *cd = MELTY_HIT_CD; wid = -2; self = WP_MELTY_SELF; }
   else {
     const weapon_def_t *w = &WEAPONS[wid];
     base = w->base; stun = w->stun; knockv = w->knock; self = w->self_dmg;
     switch (wid) {
-      case WP_HORIZ: spin_or_1 = spin; tip = spin * 12.0f; *cd = 18; break;
-      case WP_DRUM: spin_or_1 = spin; tip = spin * 9.0f; *cd = 18; break;
-      case WP_SAW: spin_or_1 = 1; *cd = WP_SAW_TICK_FRAMES; self = 2.0f / 6.0f; stun = 6; break;
-      case WP_FLIPPER: case WP_HAMMER: case WP_SPIKE: *cd = (int16_t)((which ? a->active2 : a->active) + 2); a->saw_tick = 1; break;
-      case WP_LIFTER: *cd = 600; break;
-      case WP_CRUSHER: *cd = 200; break;
+      case WP_HORIZ: spin_or_1 = spin; tip = spin * TIP_HORIZ; *cd = SPINNER_HIT_CD; break;
+      case WP_DRUM: spin_or_1 = spin; tip = spin * TIP_DRUM; *cd = SPINNER_HIT_CD; break;
+      case WP_SAW: spin_or_1 = 1; *cd = WP_SAW_TICK_FRAMES; self = 2.0f / 6.0f; stun = 6; fixed_closing = 0.5f; break;   /* a grind, not a swing */
+      case WP_FLIPPER: case WP_HAMMER: case WP_SPIKE: *cd = (int16_t)((which ? a->active2 : a->active) + 2); a->saw_tick = 1; tip = TIP_SWING; break;
+      case WP_LIFTER: *cd = 600; fixed_closing = 1.0f; break;
+      case WP_CRUSHER: *cd = 200; fixed_closing = 1.0f; break;
       default: *cd = 30;
     }
   }
-  float closing = closing_of(a, v, nx, nz, tip);
+  float closing = fixed_closing > 0 ? fixed_closing : closing_of(a, v, nx, nz, tip);
   float zone = hit_zone(v, wid, c->cx, c->cz);
   float raw = base * spin_or_1 * closing * zone;
   /* TREADS: saws do 2x on the tread zones, the sides (3.4) */
@@ -660,10 +752,11 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
   if (wid == WP_HORIZ) a->spin = fmax_f(0, a->spin - SPIN_BLEED_HORIZ);
   else if (wid == WP_DRUM) a->spin = fmax_f(0, a->spin - SPIN_BLEED_DRUM);
   else if (wid == -2) a->spin = fmax_f(0, a->spin - SPIN_BLEED_MELTY);
-  /* self damage per table */
-  if (self > 0 && wid != WP_HAMMER) { a->hp -= self; if (a->is_ops && a->hp < 1) a->hp = 1; hp_thresholds(m, att); }
-  /* TWO WHEEL: a side or rear third hit cuts top speed 40 percent for 240 frames (3.4) */
-  if (v->build.drive == DR_TWO && zone >= 1.0f && dmg >= 8) v->wheel_hit = 240;
+  /* self damage per table; grinding on the referee costs nothing, it is OPS who answers that (7) */
+  if (self > 0 && wid != WP_HAMMER && !v->is_ops) { a->hp -= self; if (a->is_ops && a->hp < 1) a->hp = 1; hp_thresholds(m, att); }
+  /* TWO WHEEL: a side or rear third hit cuts top speed 40 percent for 240 frames (3.4); from the hit band
+   * up (6), so a wedge's ram and a hammer's dent both find the scooter wheel */
+  if (v->build.drive == DR_TWO && zone >= 1.0f && dmg >= BAND_HIT_MIN) v->wheel_hit = 240;
   switch (wid) {
     case WP_FLIPPER:
       if (!v->lifted_by && !v->is_ops) {
@@ -701,20 +794,22 @@ static void clash_check(match_t *m) {
       if (!b->alive || !(b->build.weapon == WP_HORIZ || b->build.weapon == WP_DRUM) || b->spin <= 0.5f) continue;
       shape_t sb; if (!weapon_shape(b, 0, &sb)) continue;
       contact_t c; if (!collide(&sa, &sb, &c)) continue;
-      float da = WEAPONS[a->build.weapon].base * a->spin * 0.6f, db = WEAPONS[b->build.weapon].base * b->spin * 0.6f;
+      if (a->hit_cd[j] > 0 || b->hit_cd[i] > 0) continue;       /* one clash per CLASH_CD: an event, not a metronome */
+      float da = WEAPONS[a->build.weapon].base * a->spin * CLASH_FRAC, db = WEAPONS[b->build.weapon].base * b->spin * CLASH_FRAC;
       float mx = (sa.x + sb.x) * 0.5f, mz = (sa.z + sb.z) * 0.5f;
       apply_damage(m, i, j, da, a->build.weapon, 30, mx, mz, c.nx, c.nz, -1, 1.0f);
       apply_damage(m, j, i, db, b->build.weapon, 30, mx, mz, -c.nx, -c.nz, -1, 1.0f);
       a->spin = 0; b->spin = 0; a->stun = 30; b->stun = 30; a->clashes++; b->clashes++;
-      a->hit_cd[j] = 18; b->hit_cd[i] = 18;
-      knock(a, -c.nx * 4.0f, -c.nz * 4.0f); knock(b, c.nx * 4.0f, c.nz * 4.0f);
+      a->hit_cd[j] = CLASH_CD; b->hit_cd[i] = CLASH_CD;
+      knock(a, -c.nx * 6.0f, -c.nz * 6.0f); knock(b, c.nx * 6.0f, c.nz * 6.0f);
       ev_hit(m, EV_CLASH, i, j, 1.0f, mx, mz, 0.3f, da + db, c.nx, c.nz);
       if (!m->hitstop_off && m->hitstop < STOP_CLASH) m->hitstop = STOP_CLASH;
     }
   }
 }
 
-/* the FLAME cone: length 2.0, half angle 30 degrees from the nozzle (4.6) */
+/* the FLAME cone: length hb_z1 (1.5 u; the spec's 2.0 out-reached every other weapon by a bot length,
+ * so a HOVER could toast a wedge that never got to touch it), half angle 30 degrees from the nozzle (4.6) */
 static void flame_step(match_t *m, int att, int which) {
   bot_t *a = &m->bots[att];
   int wid = which ? a->build.weapon2 : a->build.weapon;
@@ -730,13 +825,14 @@ static void flame_step(match_t *m, int att, int which) {
     if (!v->alive) continue;
     int16_t *cd = which ? &a->hit_cd2[j] : &a->hit_cd[j];
     float dx = v->b.x - nx0, dz = v->b.z - nz0, d = len2(dx, dz), rad = fmax_f(v->b.hl, v->b.hw);
-    if (d - rad > 2.0f) continue;
+    if (d - rad > WEAPONS[WP_FLAME].hb_z1) continue;
     if (d > 0.05f && dotp(dx, dz, fx, fz) / d < 0.866f && d > rad) continue;
     if (*cd > 0) continue;
     *cd = WP_FLAME_TICK_FRAMES;
     float cx = v->b.x - (d > 0.05f ? dx / d : 0) * rad * 0.8f, cz = v->b.z - (d > 0.05f ? dz / d : 0) * rad * 0.8f;
     float dmg = apply_damage(m, att, j, WEAPONS[WP_FLAME].base, WP_FLAME, 0, cx, cz, fx, fz, EV_HIT, 1.0f);
-    if (dmg > 0 && !ARMOURS[v->build.armour].burn_immune && !v->is_ops) { v->burn_t = WP_FLAME_BURN_T; v->burn_dps = WP_FLAME_BURN_DPS; }
+    /* a burning bot is not lit again until the burn ends: a held cone is 3 per tick plus one burn per approach */
+    if (dmg > 0 && !ARMOURS[v->build.armour].burn_immune && !v->is_ops && v->burn_t <= 0) { v->burn_t = WP_FLAME_BURN_T; v->burn_dps = WP_FLAME_BURN_DPS; }
   }
 }
 
@@ -746,6 +842,7 @@ static void hit_test(match_t *m) {
   for (int i = 0; i < m->nbots; i++) {
     bot_t *a = &m->bots[i];
     if (!a->alive) continue;
+    if (a->lifted_by) continue;          /* a carried bot's weapon is inert while it hangs off the forks (4.6) */
     for (int which = 0; which < 2; which++) {
       if (which && a->build.weapon2 == WP_NONE) continue;
       if (which == 0 && a->build.drive != DR_MELTY && (a->build.weapon == WP_NONE || a->build.weapon == WP_WEDGE)) continue;
@@ -854,12 +951,13 @@ static void ram_check(match_t *m, int i, int j, const contact_t *c) {
   float fx, fz; fwd_of(a->b.h, &fx, &fz);
   if (dotp(fx, fz, c->nx, c->nz) < 0.866f) return;
   float closing = dotp(a->b.vx - v->b.vx, a->b.vz - v->b.vz, c->nx, c->nz);
-  if (closing <= 2.0f) return;
-  float raw = 10.0f + 10.0f * rtr_clamp((closing - 2.0f) / 4.0f, 0, 1);
+  if (closing <= RAM_MIN_CLOSING) return;
+  float raw = RAM_BASE + RAM_BASE * rtr_clamp((closing - 2.0f) / 4.0f, 0, 1);
   float zone = hit_zone(v, WP_WEDGE, c->cx, c->cz);
   float dmg = apply_damage(m, i, j, raw, WP_WEDGE, 15, c->cx, c->cz, c->nx, c->nz, EV_RAM, zone);
-  a->hit_cd[j] = 30;
+  a->hit_cd[j] = RAM_CD;
   if (dmg <= 0) return;
+  if (v->build.drive == DR_TWO && zone >= 1.0f && dmg >= BAND_HIT_MIN) v->wheel_hit = 240;   /* the ram finds the scooter wheel too (3.4) */
   float J = 4.0f * (0.5f + dmg / 30.0f);
   knock(v, fx * J, fz * J);
   /* the wedge hop: a hit on the victim's front or side lifts it 1.5 and disables its drive briefly */
@@ -888,7 +986,7 @@ static void integrate(match_t *m) {
     /* drag: a bot that is not driving this step (coasting, stunned, braking, dead) loses 10 percent of its
      * plane velocity per frame, HOVER 1.5 percent (4.4 step 7); a driving bot's forward is controlled in
      * drive_step and its lateral bleeds by traction there */
-    if (fabs_f(b->drive_t) < 0.05f || !b->alive) { float k = b->build.drive == DR_HOVER && b->alive ? 0.985f : 0.90f; bd->vx *= k; bd->vz *= k; }
+    if (fabs_f(b->drive_t) < 0.05f || !b->alive) { float k = b->build.drive == DR_HOVER && b->alive && b->skirt_t <= 0 ? 0.985f : 0.90f; bd->vx *= k; bd->vz *= k; }
     if (!b->alive) bd->w *= 0.9f;
     /* the taunt wiggle: yaw plus and minus 15 degrees at 6 Hz */
     bd->x += bd->vx * DT; bd->z += bd->vz * DT;
@@ -1039,12 +1137,15 @@ static void bots_collide(match_t *m) {
         if (a->is_ops) ima = 0; if (b->is_ops) imb = 0;
         float ims = ima + imb;
         if (ims <= 0) continue;
+        /* the ram test reads the closing speed as the bots met, before the hover rule below bleeds it
+         * off (a wedge that drives into a HOVER rams it like anything else) */
+        if (it == 0) ram_check(m, i, j, &c), ram_check(m, j, i, &(contact_t){ -c.nx, -c.nz, c.pen, c.cx, c.cz });
         /* HOVER has push 0 (3.4): its cushion cannot press into a bot. Its velocity into the contact is
          * dropped before the impulse and it takes the whole separation, so a driven bot moves it freely */
         int both = a->alive && b->alive && !a->is_ops && !b->is_ops;   /* a dead chassis or OPS: plain mass split */
         int ha = both && a->build.drive == DR_HOVER, hb = both && b->build.drive == DR_HOVER;
-        if (ha) { float v = dotp(a->b.vx, a->b.vz, c.nx, c.nz); if (v > 0) { a->b.vx -= c.nx * v; a->b.vz -= c.nz * v; } }
-        if (hb) { float v = dotp(b->b.vx, b->b.vz, -c.nx, -c.nz); if (v > 0) { b->b.vx += c.nx * v; b->b.vz += c.nz * v; } }
+        if (ha) { float v = dotp(a->b.vx, a->b.vz, c.nx, c.nz); if (v > 0) { a->b.vx -= c.nx * v; a->b.vz -= c.nz * v; } a->skirt_t = SKIRT_FRAMES; }
+        if (hb) { float v = dotp(b->b.vx, b->b.vz, -c.nx, -c.nz); if (v > 0) { b->b.vx += c.nx * v; b->b.vz += c.nz * v; } b->skirt_t = SKIRT_FRAMES; }
         if (ha != hb && ima > 0 && imb > 0) {
           /* the hover is carried along by the driven bot's normal velocity; the driven bot keeps its own */
           float van = dotp(a->b.vx, a->b.vz, c.nx, c.nz), vbn = dotp(b->b.vx, b->b.vz, c.nx, c.nz);
@@ -1063,7 +1164,6 @@ static void bots_collide(match_t *m) {
         }
         float rvx = b->b.vx - a->b.vx, rvz = b->b.vz - a->b.vz;
         float vn = dotp(rvx, rvz, c.nx, c.nz);
-        if (it == 0) ram_check(m, i, j, &c), ram_check(m, j, i, &(contact_t){ -c.nx, -c.nz, c.pen, c.cx, c.cz });
         if (vn < 0) {
           float e = 0.2f, jn = -(1.0f + e) * vn / ims;
           float tx = -c.nz, tz = c.nx, vt = dotp(rvx, rvz, tx, tz);
@@ -1079,8 +1179,11 @@ static void bots_collide(match_t *m) {
         if (it == 0 && a->alive && b->alive) {
           float afx, afz, bfx, bfz; fwd_of(a->b.h, &afx, &afz); fwd_of(b->b.h, &bfx, &bfz);
           float da = a->drive_t * dotp(afx, afz, c.nx, c.nz), db = b->drive_t * dotp(bfx, bfz, -c.nx, -c.nz);
-          if (a->build.drive == DR_HOVER || a->build.drive == DR_MELTY) da = a->drive_t * 0.5f;
-          if (b->build.drive == DR_HOVER || b->build.drive == DR_MELTY) db = b->drive_t * 0.5f;
+          /* MELTY leans on its skids at half weight; a HOVER cannot hold ground at all (push 0, 3.4) */
+          if (a->build.drive == DR_MELTY) da = a->drive_t * 0.5f;
+          if (b->build.drive == DR_MELTY) db = b->drive_t * 0.5f;
+          if (a->build.drive == DR_HOVER) da = 0;
+          if (b->build.drive == DR_HOVER) db = 0;
           if (da > 0.2f && db > 0.2f) {
             float pa = a->is_ops ? 2.0f * 6.0f : build_push(&a->build), pb = b->is_ops ? 2.0f * 6.0f : build_push(&b->build);
             float net = (pa - pb) * 0.5f;             /* an extra force along the normal to both */
@@ -1111,7 +1214,7 @@ static void landing(match_t *m, int slot) {
   float vy = bd->vy;
   int from_flip = b->flip_pending;
   float dmg = 0;
-  if (from_flip) dmg = 6;
+  if (from_flip) dmg = FLIP_LAND_DMG;
   else if (b->peak_y - b->floor_y > 1.2f || b->peak_y >= 0.99f) dmg = 8;
   /* landing on another bot deals 8 to it and pops the lander back 2 u/s */
   for (int j = 0; j < m->nbots; j++) {
@@ -1273,7 +1376,7 @@ static void hazards_on_bots(match_t *m) {
             if (hs->active && b->haz_t[i] == 0) {
               b->haz_t[i] = WP_FLAME_TICK_FRAMES;
               float dmg = apply_damage(m, -1, j, h->dmg, WP_FLAME, 0, b->b.x, b->b.z, 0, 1, EV_HAZ_HIT, 1.0f);
-              if (!ARMOURS[b->build.armour].burn_immune) { b->burn_t = WP_FLAME_BURN_T; b->burn_dps = WP_FLAME_BURN_DPS; }
+              if (!ARMOURS[b->build.armour].burn_immune && b->burn_t <= 0) { b->burn_t = WP_FLAME_BURN_T; b->burn_dps = WP_FLAME_BURN_DPS; }
               b->hazard_taken += dmg; b->hazard_hits++;
             }
           }
@@ -1411,9 +1514,10 @@ static void checks_step(match_t *m) {
         if (w->selfright == SR_B && btn_edge(&b->in, &b->prev_in, IN_B)) b->selfright = 90;
         if (w->selfright == SR_DRUM && b->spin > 0.5f && btn_edge(&b->in, &b->prev_in, IN_A)) { b->selfright = 45; b->spin = 0; }
       }
-      /* burn */
+      /* burn: the armour takes its share like any other damage (a bare 2 dps on a STEEL bot was the
+       * flame's whole case against it) */
       if (b->burn_t > 0) {
-        b->burn_t -= 1.0f; float d = b->burn_dps * DT; b->hp -= d;
+        b->burn_t -= 1.0f; float d = b->burn_dps * DT * (1.0f - ARMOURS[b->build.armour].reduction); b->hp -= d;
         if (b->last_hit_by && b->last_hit_by - 1 < m->nbots) { bot_t *a = &m->bots[b->last_hit_by - 1]; a->burn_dealt += d; a->dealt += d; }
         hp_thresholds(m, i);
       }
@@ -1477,11 +1581,11 @@ static void ops_steer(bot_t *o, float tx, float tz, float throttle) {
   float want = rtr_atan2(tx - o->b.x, tz - o->b.z);
   float err = rtr_wrap_pi(want - o->b.h);
   o->in.ly = (int16_t)(-32767.0f * throttle * (fabs_f(err) < 1.2f ? 1.0f : 0.4f));
-  o->in.lx = (int16_t)(32767.0f * rtr_clamp(err * 2.0f, -1.0f, 1.0f));
+  o->in.lx = (int16_t)(-32767.0f * rtr_clamp(err * 2.0f, -1.0f, 1.0f));   /* a positive error is a left turn: stick left */
 }
 
 static int hp_leader(const match_t *m, int exclude) {
-  int best = -1; float hp = -1;
+  int best = -1; float hp = -1e9f;        /* a double KO still names the bot that kept more of its bar */
   for (int i = 0; i < m->nbots; i++) {
     const bot_t *b = &m->bots[i];
     if (!b->alive || b->is_ops || i == exclude) continue;
@@ -1641,8 +1745,13 @@ static void eliminate(match_t *m, int slot, int cause, int by) {
   for (int i = 0; i < m->nbots; i++) { if (m->bots[i].lifted_by == slot + 1) { m->bots[i].lifted_by = 0; m->bots[i].airborne = 1; } if (m->bots[i].clamped_by == slot + 1) m->bots[i].clamped_by = 0; }
   b->carry_t = 0; b->lock = 0; b->saw_on = 0; b->spin = 0;
   m->ko_count++;
-  /* who gets the credit: the last bot to hit it */
+  /* who gets the credit: the last bot to hit it; the referee never takes a KO, so a bot that died in
+   * OPS's forks credits the player who hit it before that, else nobody */
   int attacker = by >= 0 ? by : (b->last_hit_by ? b->last_hit_by - 1 : 255);
+  if (attacker < m->nbots && attacker != 255 && m->bots[attacker].is_ops) {
+    attacker = 255;
+    for (int i = 0; i < m->nbots; i++) if (i != slot && !m->bots[i].is_ops && m->bots[i].hp_max > 0 && m->bots[i].dealt > 0 && (attacker == 255 || m->bots[i].dealt > m->bots[attacker].dealt)) attacker = i;
+  }
   /* alive bots left, not OPS */
   int alive = 0, humans = 0, humans_ever = 0;
   for (int i = 0; i < m->nbots; i++) if (!m->bots[i].is_ops && m->bots[i].hp_max > 0) {
@@ -1762,6 +1871,7 @@ static void timers_step(match_t *m) {
     if (b->lock > 0) b->lock--;
     if (b->last_hit_t > 0) b->last_hit_t--;
     if (b->prop_cd > 0) b->prop_cd--;
+    if (b->skirt_t > 0) b->skirt_t--;
     if (b->pin_t > 0 && len2(b->b.vx, b->b.vz) >= 0.3f) b->pin_t = 0;
     for (int j = 0; j < MAX_BOTS; j++) { if (b->hit_cd[j] > 0) b->hit_cd[j]--; if (b->hit_cd2[j] > 0) b->hit_cd2[j]--; }
   }
