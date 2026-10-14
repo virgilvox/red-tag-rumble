@@ -172,12 +172,14 @@ static void stinger_draw(int viewport, const rect_t *vp, int compact, float dt) 
   int a = (int)(255 * (in < out ? in : out));
   int dx = (int)(-20 * (1 - hud_ease_out(in)));
   int h = compact ? 48 : 72;
-  int y = vp->y + (compact ? 150 : 400);
+  /* the bar crosses the viewport at 35 percent of its height (10.5): above the bot the chase camera parks
+   * at about 55 percent, so a FIGHT or BIG HIT never hides what it announces; the char reads through a little */
+  int y = vp->y + (int)(vp->h * 0.35f) - h / 2;
   if (y + h > vp->y + vp->h - (compact ? 56 : 72) - 8) y = vp->y + vp->h / 2 - h / 2;
   int font = compact ? F_STINGER_Q : fit_font(F_STINGER, st->s, vp->w - 48);
   hud_set_alpha(a);
   hud_rect(vp->x + dx + 6, y + 6, vp->w, h, st->c, 255);
-  hud_rect(vp->x + dx, y, vp->w, h, C_CHAR, 255);
+  hud_rect(vp->x + dx, y, vp->w, h, C_CHAR, 225);
   char s[24];
   fit_text(s, sizeof s, font, st->s, vp->w - 32);
   hud_text(font, vp->x + dx + vp->w / 2, cy_text(font, y, h), s, C_BONE, 255, AL_CENTER);
@@ -367,7 +369,8 @@ static void strip_chip(int x, int y, int w, int h, const bot_t *b, int font) {
     hud_text(font, x + w / 2, cy_text(font, y, h), n, C_BONE, 255, AL_CENTER);
   } else hud_seat_chip(x, y, w, h, seat_idx, font, b->is_ai);
   if (b->red_tag_t > 0) hud_frame(x - 2, y - 2, w + 4, h + 4, 2, C_RUST, 255);
-  if (b->countout > 0 && b->alive) {
+  /* the count badge: only while the fight is on (the sim leaves a survivor's count where it was at the KO) */
+  if (b->countout > 0 && b->alive && !M.over && G.phase != PH_KO) {
     char n[4]; snprintf(n, sizeof n, "%d", count_number(b));
     int bw = 18, bh = 16;
     hud_rect(x + w - bw + 4, y - 4, bw, bh, C_RUST, 255);
@@ -531,8 +534,8 @@ void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
     /* the hill score as a small chip at the content's right end */
     if (M.mode == MODE_HILL) {
       hud_glyph(x + cw - 40, y + 8, GL_CROWN, 1, C_LIVE, 255);
-      char sc[8]; snprintf(sc, sizeof sc, "%d", M.score[b->seat & 3]);
-      hud_text(F_MONO_L, x + cw - 4, y + 22, sc, C_BONE, 255, AL_RIGHT);
+      char score_s[8]; snprintf(score_s, sizeof score_s, "%d", M.score[b->seat & 3]);
+      hud_text(F_MONO_L, x + cw - 4, y + 22, score_s, C_BONE, 255, AL_RIGHT);
     }
   }
   hud_dirty(vp->x, y, vp->w, h);
@@ -665,7 +668,7 @@ static void map_contents(const mapxf_t *m, const arena_def_t *a, const match_t *
       char n[4]; snprintf(n, sizeof n, "%d", (b->seat & 3) + 1);
       hud_text(F_MONO_S, sx + w + 4, sy - 8, n, c, 255, AL_LEFT);
     }
-    if (b->countout > 0) {
+    if (b->countout > 0 && !mt->over) {
       char n[4]; snprintf(n, sizeof n, "%d", count_number(b));
       hud_text(F_MONO_S, sx - w - 4, sy - 8, n, C_RUST, 255, AL_RIGHT);
     }
@@ -1023,7 +1026,8 @@ void results_screen(float t) {
     hud_seat_chip(rx + 52, ry + 8, 28, 28, b->seat & 3, F_H3, b->is_ai);
     char nm[24]; fit_text(nm, sizeof nm, F_H3, b->name, 400);
     hud_text(F_H3, rx + 92, ry + 6, nm, C_BONE, 255, AL_LEFT);
-    hud_text(F_MONO_S, rx + rw - 16, ry + 12, place_word(b), C_ASH, 255, AL_RIGHT);
+    /* the placement word is anchored to the panel, not the sliding row, so it never clips at the edge */
+    hud_text(F_MONO_S, px + pw - 28, ry + 12, place_word(b), C_ASH, 255, AL_RIGHT);
     /* the four stats, two spaces apart, from their content.h formats */
     char st[96], s1[16], s2[16], s3[16], s4[16]; int air = (int)(b->airtime * 10 + 0.5f);
     snprintf(s1, sizeof s1, S_DEALT, (int)b->dealt); snprintf(s2, sizeof s2, S_BIGGEST, (int)b->biggest);
@@ -1055,16 +1059,21 @@ void results_screen(float t) {
       if (line) hud_text(F_MONO_S, jx + cw + 12, cy_text(F_MONO_S, jy + 44, 22), line, C_ASH, 255, AL_LEFT);
     } else if (line) hud_text(F_MONO_S, jx, jy + 48, line, C_HAZARD, 255, AL_LEFT);
   }
-  /* the key hints and the wins tally */
+  /* the key hints name what the buttons do now: A skips the results hold, then A votes and B takes a vote back */
   int kx = 520;
-  kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
-  kx += hud_text_sh(F_MONO_S, kx, 664, S_KEY_VOTE, C_BONE, 255, AL_LEFT) + 18;
-  kx += hud_keycap(kx, 660, "B", C_BONE, C_TAPE) + 6;
-  hud_text_sh(F_MONO_S, kx, 664, S_KEY_BACK, C_BONE, 255, AL_LEFT);
+  if (G.phase == PH_REMATCH) {
+    kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
+    kx += hud_text_sh(F_MONO_S, kx, 664, S_KEY_VOTE, C_BONE, 255, AL_LEFT) + 18;
+    kx += hud_keycap(kx, 660, "B", C_BONE, C_TAPE) + 6;
+    hud_text_sh(F_MONO_S, kx, 664, S_KEY_UNDO, C_BONE, 255, AL_LEFT);
+  } else if (G.phase_frames >= RESULTS_MIN) {
+    kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
+    hud_text_sh(F_MONO_S, kx, 664, S_KEY_SKIP, C_BONE, 255, AL_LEFT);
+  }
   char wins[48];
   snprintf(wins, sizeof wins, S_WINS_TALLY, evening_wins(0), evening_wins(1), evening_wins(2), evening_wins(3));
   hud_text_sh(F_MONO_S, 1216, 664, wins, C_BONE, 255, AL_RIGHT);
-  if (t < 1.5f) hud_dirty(0, 0, 1280, 720);
+  if (t < 1.5f || G.phase_frames == RESULTS_MIN) hud_dirty(0, 0, 1280, 720);
 }
 
 void rematch_menu(float t) {
@@ -1075,17 +1084,20 @@ void rematch_menu(float t) {
   float target = (float)(y + 8 + focus * 40);
   if (rematch_focus_y <= 0) rematch_focus_y = target;
   hud_tween(&rematch_focus_y, target, 18, 1.f / 60);
-  int auto_left = REMATCH_AUTO / 60 - (int)t;
-  if (auto_left < 0) auto_left = 0;
+  (void)t;
+  /* the countdown sits on the row the menu will pick by itself: REBUILD at 20 s, or LOBBY when the table
+   * has said nothing since the fight (an abandoned cabinet goes home, 10.1) */
+  int to_lobby = 0;
+  int auto_left = game_rematch_auto(&to_lobby);
   /* the panel is uploaded only when something on it changed */
   uint32_t hsh = 2166136261u;
-  hsh = (hsh ^ (uint32_t)auto_left) * 16777619u; hsh = (hsh ^ (uint32_t)focus) * 16777619u; hsh = (hsh ^ (uint32_t)(int)rematch_focus_y) * 16777619u;
+  hsh = (hsh ^ (uint32_t)auto_left) * 16777619u; hsh = (hsh ^ (uint32_t)focus) * 16777619u; hsh = (hsh ^ (uint32_t)(int)rematch_focus_y) * 16777619u; hsh = (hsh ^ (uint32_t)to_lobby) * 16777619u;
   for (int s = 0; s < 4; s++) { hsh = (hsh ^ (uint32_t)(G.seats[s].rematch + 2)) * 16777619u; hsh = (hsh ^ (uint32_t)(G.rematch_votes[s] + 1)) * 16777619u; hsh = (hsh ^ (uint32_t)G.seats[s].kind) * 16777619u; }
   if (hsh != rematch_hash_prev) { rematch_hash_prev = hsh; hud_dirty(x, y, w + 6, h + 6); }
   for (int i = 0; i < 4; i++) {
     int ry = y + 8 + i * 40;
     char val[16] = "";
-    if (i == RM_REBUILD) snprintf(val, sizeof val, S_AUTO_N, auto_left);
+    if (to_lobby ? i == RM_LOBBY : i == RM_REBUILD) snprintf(val, sizeof val, to_lobby ? S_LOBBY_IN_N : S_AUTO_N, auto_left);
     int focused = i == focus;
     if (focused) {
       /* draw the hazard block at the tweened y, then the row text over it */
@@ -1323,7 +1335,30 @@ void draw_hud(float dt) {
       fight_frame(dt);
       if (G.paused) {
         pause_overlay();
-        if (G.controls_card_seat >= 0) { rect_t cr = { 320, 180, 640, 360 }; controls_card(&cr, 0, G.controls_card_seat); hud_dirty(cr.x, cr.y, cr.w + 8, cr.h + 8); }
+        if (G.controls_card_seat >= 0) {
+          rect_t cr = { 320, 180, 640, 360 }; controls_card(&cr, 0, G.controls_card_seat);
+          /* the way out, under the card (the card's own bottom line is the keyboard map) */
+          int kx = cr.x; kx += hud_keycap(kx, cr.y + cr.h + 16, "B", C_BONE, C_TAPE) + 8;
+          hud_text_sh(F_MONO_S, kx, cr.y + cr.h + 20, S_KEY_CLOSE, C_BONE, 255, AL_LEFT);
+          hud_dirty(cr.x, cr.y, cr.w + 8, cr.h + 48);
+        }
+      } else if (G.controls_card_seat >= 0) {
+        /* Y held: the card over that seat's own viewport (10.24), the compact one in a quadrant */
+        int v = cam_viewport_of(G.controls_card_seat);
+        if (v >= 0 && v < nviews && view_seat[v] < 0) {
+          /* the shared view belongs to everyone: the compact card sits on the holder's side, over nothing */
+          int left = (G.controls_card_seat & 1) == 0;
+          rect_t cr = { left ? 24 : 1280 - 24 - 320, 440, 320, 180 };
+          controls_card(&cr, 1, G.controls_card_seat);
+          hud_dirty(cr.x, cr.y, cr.w + 8, cr.h + 8);
+        } else if (v >= 0 && v < nviews) {
+          const rect_t *vp = &views[v];
+          int compact = vp->h <= 360;
+          rect_t cr = compact ? (rect_t){ vp->x + (vp->w - 320) / 2, vp->y + (vp->h - 180) / 2 - 20, 320, 180 }
+                              : (rect_t){ vp->x + (vp->w - 640) / 2, vp->y + (vp->h - 360) / 2 - 30, 640, 360 };
+          controls_card(&cr, compact, G.controls_card_seat);
+          hud_dirty(cr.x, cr.y, cr.w + 8, cr.h + 8);
+        }
       }
       break;
     case PH_KO:

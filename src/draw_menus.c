@@ -33,7 +33,6 @@ static uint32_t garage_last_deny[4];    /* seat_t.deny_frame last seen: a refuse
 static float vote_fx[4], vote_fy[4];
 static int   vote_init;
 static float settings_cursor_y = -1, pause_cursor_y = -1, match_cursor_y = -1;
-static int   match_card_row;            /* the 3 player match card's focused row (stepped by any seat) */
 static const arena_def_t *VOTE_ARENAS = ARENAS;   /* the vote screen's arena table (the fake state swaps it) */
 static float flash_wipe;                /* 0..1 wipe between rules cards */
 static int   flash_last_step = -1;
@@ -118,7 +117,7 @@ static void timer_tape(int frames_left, int total, float t) {
   int w = (int)(1280 * frac);
   hud_rect(0, 696, 1280, 24, C_CHAR, 255);
   if (w > 4) hud_tape(640 - w / 2, 696, w, 24, G.tape_phase);
-  int s = (frames_left + 59) / 60;
+  int s = frames_left > 0 ? (frames_left + 59) / 60 : 0;   /* never a negative clock, whatever the totals do */
   char buf[12];
   snprintf(buf, sizeof buf, "%d:%02d", s / 60, s % 60);
   uint32_t ink = C_BONE;
@@ -147,6 +146,7 @@ void boot_screen(float frac) {
   hud_tape(0, 0, 1280, 24, G.tape_phase);
   hud_tape(0, 696, 1280, 24, G.tape_phase);
   marquee();
+  /* the 12 segment tape bar fills with the real compile progress (one scene per frame, game_flow.c boot_update) */
   int n = (int)(clampf(frac, 0, 1) * 12 + 0.5f);
   int x0 = 640 - (12 * 64 - 4) / 2;
   for (int k = 0; k < 12; k++) {
@@ -154,6 +154,7 @@ void boot_screen(float frac) {
     else hud_frame(x0 + k * 64, 480, 60, 24, 2, C_STEEL, 255);
   }
   hud_text(F_MONO_S, 640, 520, S_BOOT, C_ASH, 255, AL_CENTER);
+  if (frac < 1) hud_text(F_MONO_S, 640, 544, game_boot_step_name(), C_SMOKE, 255, AL_CENTER);
   hud_dirty(0, 0, 1280, 720);
 }
 
@@ -171,8 +172,8 @@ void attract_overlay(void) {
   }
   int tip = (int)(G.phase_t / 8) % LEN(ATTRACT_TIPS);
   int tw = hud_text_w(F_MONO, ATTRACT_TIPS[tip]) + 32;
-  hud_rect(880 - tw / 2, 628, tw, 36, C_CHAR, 220);
-  hud_text(F_MONO, 880, 634, ATTRACT_TIPS[tip], C_BONE, 255, AL_CENTER);
+  hud_rect(880 - tw / 2, 596, tw, 36, C_CHAR, 220);     /* clear of the BEST EVENING line at 668 */
+  hud_text(F_MONO, 880, 602, ATTRACT_TIPS[tip], C_BONE, 255, AL_CENTER);
 }
 
 void title_screen(float dt) {
@@ -198,9 +199,10 @@ void title_screen(float dt) {
     hud_text(F_H2, 96, y + 2, TITLE_ROWS[i], on ? C_TAPE : C_BONE, 255, AL_LEFT);
     if (TITLE_HINTS[i][0]) hud_text(F_MONO_S, 452, y + 13, TITLE_HINTS[i], on ? C_TAPE : C_ASH, 255, AL_RIGHT);
   }
+  /* A or Start selects a row (title_update reads nothing else) */
   int kx = 80;
-  kx += key_hint(kx, 660, "A", S_KEY_SELECT, C_ASH) + 20;
-  key_hint(kx, 660, "B", S_KEY_BACK, C_ASH);
+  kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
+  key_hint(kx, 660, "START", S_KEY_SELECT, C_ASH);
   if (SAVE.best_evening_wins > 0) {
     char buf[48];
     snprintf(buf, sizeof buf, S_BEST_EVENING, (int)SAVE.best_evening_wins, SAVE.best_seat + 1);
@@ -266,11 +268,18 @@ static void lobby_seat_card(int i, float t, float dt) {
   if (ai) {
     hud_text(F_MONO_S, x + w - 16, y + 198, VAL_DIFFICULTY[clampi(s->ai_level, 0, 2)], C_ASH, 255, AL_RIGHT);
   } else {
-    stepper(x + w - 70, y + 194, F_MONO, s->scheme == SCHEME_TANK ? S_TANK : S_ARCADE, C_BONE, s->scheme == SCHEME_TANK, s->scheme != SCHEME_TANK, 0);
+    /* the control scheme is toggled by X, so the X cap carries the value; TANK says it wants two sticks */
+    int tank = s->scheme == SCHEME_TANK;
+    const char *sv = tank ? S_TANK : S_ARCADE;
+    int sw = hud_text_w(F_MONO_S, "X") + 14 + 8 + hud_text_w(F_MONO_S, sv);
+    key_hint(x + w - 16 - sw, y + 194, "X", sv, C_BONE);
+    if (tank) hud_text(F_MONO_S, x + w - 16, y + 182, S_TANK_NOTE, C_ASH, 255, AL_RIGHT);   /* beside the tags line, inside the card */
   }
   if (s->ready) {
-    hud_text(F_MONO_S, x + w / 2 - 20, y + 198, S_READY, C_LIVE, 255, AL_CENTER);
+    hud_text(F_MONO_S, x + 16, y + 198, S_READY, C_LIVE, 255, AL_LEFT);
     hud_rect(x, y + h - 4, w, 4, C_LIVE, 255);
+  } else if (!ai) {
+    key_hint(x + 16, y + 194, "A", S_READY, C_ASH);         /* A marks READY; Start goes */
   }
 }
 
@@ -302,8 +311,10 @@ void lobby_screen(float dt) {
   hud_text(F_MONO, 32, 150, MODE_BLURB[cur], C_ASH, 255, AL_LEFT);
   /* seat cards */
   for (int i = 0; i < 4; i++) lobby_seat_card(i, t, dt);
-  /* the leave hint */
-  key_hint(32, 452, "B", S_HOLD_B_LEAVE, C_ASH);
+  /* the leave hint and HOW IT WORKS */
+  int hx = 32;
+  hx += key_hint(hx, 452, "B", S_HOLD_B_LEAVE, C_ASH) + 24;
+  key_hint(hx, 452, "Y", S_LOBBY_RULES, C_ASH);
   /* the three steppers */
   {
     const char *lab[3] = { S_ONE_CAMERA, S_SPLIT, S_COMEBACK };
@@ -322,8 +333,9 @@ void lobby_screen(float dt) {
   if (any_ready) lobby_auto_t += dt; else lobby_auto_t = 0;
   int sw = hud_text_w(F_MONO_S, "START") + 14 + 8 + hud_text_w(F_MONO, S_GO_TO_GARAGE);
   int sx = 640 - sw / 2;
-  int kw = hud_keycap(sx, 584, "START", any_ready ? C_HAZARD : C_BONE, C_TAPE);
-  hud_text(F_MONO, sx + kw + 8, 586, S_GO_TO_GARAGE, any_ready ? C_BONE : C_SMOKE, 255, AL_LEFT);
+  /* Start from any seat readies it and goes, so the cap is live as soon as someone sits down */
+  int kw = hud_keycap(sx, 584, "START", seated > 0 ? C_HAZARD : C_BONE, C_TAPE);
+  hud_text(F_MONO, sx + kw + 8, 586, S_GO_TO_GARAGE, seated > 0 ? C_BONE : C_SMOKE, 255, AL_LEFT);
   if (any_ready) {
     char buf[24];
     int left = (int)(LOBBY_AUTO_S - lobby_auto_t + 0.99f);
@@ -340,6 +352,13 @@ void lobby_screen(float dt) {
     hud_rect(640 - w / 2, 696, w, 24, C_CHAR, 255);
     hud_text(F_MONO, 640, text_cy(F_MONO, 696, 24), buf, C_BONE, 255, AL_CENTER);
   } else lobby_empty_t = 0;
+  /* the controls card over a seat's card for 3 s after its pad's first join (10.24) */
+  if (G.controls_card_t > 0 && G.controls_card_seat >= 0 && G.controls_card_seat < 4 && G.seats[G.controls_card_seat].kind == SEAT_HUMAN) {
+    rect_t cr = { 20 + 310 * G.controls_card_seat - 10, 240, 320, 180 };
+    if (cr.x < 8) cr.x = 8;
+    if (cr.x + cr.w > 1272) cr.x = 1272 - cr.w;
+    controls_card(&cr, 1, G.controls_card_seat);
+  }
   hud_dirty(0, 0, 1280, 720);
 }
 
@@ -454,6 +473,13 @@ static const char *flavour_line(const seat_t *s, char *buf, int n, uint32_t *ink
   return option_flavour(row, build_get(b, row));
 }
 
+/* the value shown in a row: the PAINT row names its scheme and decal set (3.7), the others their part */
+static const char *row_value(const seat_t *s, int row, int opt, int short_form, char *buf, int n) {
+  if (row != ROW_PAINT) return option_name(&s->build, row, opt, short_form);
+  snprintf(buf, (size_t)n, S_PAINT_ROW, s->build.paint + 1, DECAL_NAME[clampi(s->build.decal, 0, DECAL_COUNT - 1)]);
+  return buf;
+}
+
 void garage_panel(const rect_t *r, int seat, int compact, float dt) {
   const seat_t *s = &G.seats[seat];
   if (s->kind == SEAT_EMPTY) return;
@@ -507,7 +533,8 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
       uint32_t vink = legal ? ink : C_SMOKE;
       if (on) hud_rect(x + 16, ry + 2, 4, 30, sc, 255);
       hud_text(F_H3, x + 32, ry + 4, ROW_NAME[k], ink, 255, AL_LEFT);
-      const char *val = option_name(&s->build, k, opt, 0);
+      char pv[24];
+      const char *val = row_value(s, k, opt, 0, pv, sizeof pv);
       int n = row_count(&s->build, k);
       hud_chevron(x + 250, ry + 17, -1, 0, 14, 3, on && n > 1 ? C_HAZARD : C_STEEL, 255);
       hud_text(F_MONO_L, x + 390, ry + 1, val, vink, 255, AL_CENTER);
@@ -524,12 +551,11 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
     hud_text(F_MONO, x + 32, fy, fl, fl_ink, 255, AL_LEFT);
     bars_block(x + 32, rows > 5 ? y + 588 : y + 580, 140, 26, s);
     int hy = y + 672;
+    if (ai) hud_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, C_ASH, 255, AL_LEFT);   /* how the table sets EASY MEDIUM HARD */
     if (s->locked) {
       if (!ai) key_hint(x + 16, hy, "B", S_RELEASE, C_ASH);
       hud_text(F_MONO_S, x + 624, hy + 4, S_LOCKED, C_LIVE, 255, AL_RIGHT);
-    } else if (ai) {
-      hud_text(F_MONO_S, x + 16, hy + 4, PRESETS[PRE_RANDOM].blurb, C_ASH, 0, AL_LEFT);
-    } else {
+    } else if (!ai) {
       int kx = x + 16;
       kx += key_hint(kx, hy, "A", S_LOCK_IN, C_ASH) + 16;
       kx += key_hint(kx, hy, "START", S_START_FIGHT, C_ASH) + 16;
@@ -560,7 +586,8 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
       uint32_t vink = legal ? ink : C_SMOKE;
       if (on) hud_rect(x + 322, ry + 4, 3, 22, sc, 255);
       hud_text(F_MONO_S, x + 330, ry + 8, k == ROW_WEAPON2 ? S_ROW_2ND_SHORT : ROW_NAME[k], ink, 255, AL_LEFT);
-      const char *val = option_name(&s->build, k, opt, 1);
+      char pv[24];
+      const char *val = row_value(s, k, opt, 1, pv, sizeof pv);
       int n = row_count(&s->build, k);
       hud_chevron(x + 408, ry + 15, -1, 0, 12, 3, on && n > 1 ? C_HAZARD : C_STEEL, 255);
       hud_text(F_MONO_L, x + 508, ry - 1, val, vink, 255, AL_CENTER);
@@ -582,6 +609,7 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
     if (s->hint[0] && G.phase_t < 5 && !ai) hud_text_wrap(F_MONO_S, x + 330, fy, 300, s->hint, C_BONE, 255, 17);
     else hud_text_wrap(F_MONO_S, x + 330, fy, 300, fl, fl_ink, 255, 17);
     int hy = y + 306;
+    if (ai) hud_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, C_ASH, 255, AL_LEFT);
     if (s->locked) {
       if (!ai) key_hint(x + 16, hy, "B", S_RELEASE, C_ASH);
       hud_text(F_MONO_S, x + 624, hy + 4, S_LOCKED, C_LIVE, 255, AL_RIGHT);
@@ -615,17 +643,22 @@ void garage_match_card_dt(const rect_t *r, float dt) {
     rect_t br = { x + 40, y + 96, 560, 160 };
     bracket_card(&br);
   } else {
-    const char *lab[3] = { S_FIGHT_LENGTH, S_ONE_CAMERA, S_COMEBACK };
-    const char *val[3] = { VAL_FIGHT_LEN[clampi(SAVE.fight_len, 0, 3)], VAL_ONE_CAMERA[clampi(SAVE.one_camera, 0, 2)], VAL_AUTO_ON_OFF[clampi(SAVE.comeback, 0, 2)] };
-    int idx[3] = { SAVE.fight_len, SAVE.one_camera, SAVE.comeback }, maxi[3] = { 3, 2, 2 };
-    int row = clampi(match_card_row, 0, 2);
-    float d = focus_block(&match_cursor_y, y + 96 + 36 * row, x + 40, 560, dt);
-    for (int k = 0; k < 3; k++) {
-      if (k == row) focus_row_text(x + 40, y + 96 + 36 * k, 560, lab[k], val[k], d < 8, 1, idx[k] > 0, idx[k] < maxi[k]);
-      else menu_row(x + 40, y + 96 + 36 * k, 560, lab[k], val[k], 0, 1, 1, idx[k] > 0, idx[k] < maxi[k]);
+    /* three steppers, plus PRACTICE BOT when an AI seat sits at the table; the focused row is game_flow.c's
+     * (any unseated pad's stick, or any seat's while holding Y) */
+    const char *lab[4] = { S_FIGHT_LENGTH, S_ONE_CAMERA, S_COMEBACK, S_PRACTICE_ROW };
+    int ai = -1; for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_AI) { ai = i; break; }
+    const char *val[4] = { VAL_FIGHT_LEN[clampi(SAVE.fight_len, 0, 3)], VAL_ONE_CAMERA[clampi(SAVE.one_camera, 0, 2)], VAL_AUTO_ON_OFF[clampi(SAVE.comeback, 0, 2)],
+                           VAL_DIFFICULTY[ai >= 0 ? clampi(G.seats[ai].ai_level, 0, 2) : 1] };
+    int idx[4] = { SAVE.fight_len, SAVE.one_camera, SAVE.comeback, ai >= 0 ? G.seats[ai].ai_level : 0 }, maxi[4] = { 3, 2, 2, 2 };
+    int rows = ai >= 0 ? 4 : 3, pitch = ai >= 0 ? 30 : 36;
+    int row = clampi(game_match_card_row(), 0, rows - 1);
+    float d = focus_block(&match_cursor_y, y + 96 + pitch * row, x + 40, 560, dt);
+    for (int k = 0; k < rows; k++) {
+      if (k == row) focus_row_text(x + 40, y + 96 + pitch * k, 560, lab[k], val[k], d < 8, 1, idx[k] > 0, idx[k] < maxi[k]);
+      else menu_row(x + 40, y + 96 + pitch * k, 560, lab[k], val[k], 0, 1, 1, idx[k] > 0, idx[k] < maxi[k]);
     }
     /* the evening tally with pips */
-    int tx = x + 40, ty = y + 216;
+    int tx = x + 40, ty = y + 222;
     hud_text(F_MONO_S, tx, ty, S_EVENING_LABEL, C_ASH, 255, AL_LEFT);
     tx += 80;
     for (int i = 0; i < 4; i++) {
@@ -662,7 +695,7 @@ void garage_screen(float dt, int frames_left, int total_frames) {
     hud_tape(0, 358, 1280, 4, G.tape_phase);
   }
   garage_timer_tape(frames_left, total_frames);
-  /* the controls card over a seat's own panel while Y is held */
+  /* the controls card over a seat's own panel while Y is held, or for 3 s after a first join */
   if (G.controls_card_seat >= 0 && G.controls_card_seat < 4 && G.seats[G.controls_card_seat].kind != SEAT_EMPTY) {
     int s = G.controls_card_seat;
     if (seated <= 2) {
@@ -827,8 +860,9 @@ void vote_screen(float dt) {
     }
     if (dim) hud_rect(x, y, w, h, C_CHAR, 140);
   }
-  /* each seat's 3 px frame tweens between cards */
-  if (!vote_init) { for (int s = 0; s < 4; s++) { vote_fx[s] = -1; } vote_init = 1; }
+  /* each seat's 3 px frame tweens between cards; a fresh vote starts its frames on the cards, not where the
+   * last vote left them */
+  if (!vote_init || G.phase_frames <= 1) { for (int s = 0; s < 4; s++) { vote_fx[s] = -1; } vote_init = 1; }
   for (int s = 0; s < 4; s++) {
     const seat_t *st = &G.seats[s];
     if (st->kind != SEAT_HUMAN || st->vote < 0 || st->vote >= ARENA_COUNT) { vote_fx[s] = -1; continue; }
@@ -1175,12 +1209,12 @@ static void flash_picture(int step, float lt, int cx, int cy) {
       hud_rect(bx, by, bw, 14, C_SMOKE, 255);              /* the front plate, dim */
       hud_glyph(cx - 16, cy - 16, GL_BOT, 2, C_ASH, 255);
       hud_text(F_MONO, cx, by - 30, "0.6", C_ASH, 255, AL_CENTER);
-      hud_text(F_MONO, bx - 60, cy - 12, "1.0", C_BONE, 255, AL_CENTER);
-      hud_text(F_MONO, bx + bw + 60, cy - 12, "1.0", C_BONE, 255, AL_CENTER);
+      hud_text(F_MONO, bx - 120, cy - 12, "1.0", C_BONE, 255, AL_CENTER);
+      hud_text(F_MONO, bx + bw + 120, cy - 12, "1.0", C_BONE, 255, AL_CENTER);
       hud_text(F_MONO, cx, by + bh + 8, "1.0", C_BONE, 255, AL_CENTER);
-      /* the side hit */
+      /* the side hit: the arrow starts inside the label's clear lane and lands on the plate */
       float f1 = clampf((lt - 0.6f) / 0.4f, 0, 1);
-      int ax = bx - 90 + (int)(f1 * 70);
+      int ax = bx - 80 + (int)(f1 * 56);
       hud_tri(ax, cy - 14, ax, cy + 14, ax + 24, cy, C_HAZARD, 255);
       if (lt > 1.0f) {
         float f = clampf((lt - 1.0f) / 0.8f, 0, 1);
@@ -1229,12 +1263,13 @@ static void flash_picture(int step, float lt, int cx, int cy) {
       hud_glyph(hx - (int)(60 * sw) - 16, hy + 40 + (int)(70 * (1 - sw * 0.3f)) - 16, GL_HAMMER, 2, C_BONE, 255);
       /* the bot dot driving round the pit */
       float ang = lt * 2.2f;
-      int dx = cx + (int)(cosf(ang) * 110), dy = cy + (int)(sinf(ang) * 90);
+      int dx = cx + (int)(cosf(ang) * 110), dy = cy + (int)(sinf(ang) * 70);
       hud_circle(dx, dy, 10, C_LIVE, 255);
       /* the hover floating over the pit */
       int hvy = cy - 16 + (int)(sinf(lt * 5) * 5);
       hud_glyph(cx - 16, hvy, GL_HOVER, 2, C_BONE, 255);
-      hud_text(F_MONO_S, cx, py + ph + 14, ARENA_BLURB[AR_BAY], C_ASH, 255, AL_CENTER);
+      /* the caption sits under the dot's orbit (cy + 80), never under the dot */
+      hud_text(F_MONO_S, cx, cy + 112, ARENA_BLURB[AR_BAY], C_ASH, 255, AL_CENTER);
       break;
     }
     case 5: { /* LAST BOT STANDING: four seat squares, three go grey one by one, the last gets the KO stinger */
@@ -1281,8 +1316,15 @@ void flash_card(int step, float t) {
     flash_wipe -= 1.0f / 18.0f;
   }
   int kx = 230;
-  kx += key_hint(kx, 512, "A", S_KEY_NEXT, C_ASH) + 24;
-  key_hint(kx, 512, "B", S_KEY_SKIP, C_ASH);
+  if (game_rules_auto()) {
+    /* the first evening's automatic flash: the cards run by themselves and any button skips */
+    hud_text(F_MONO_S, kx, 516, S_KEY_ANY, C_BONE, 255, AL_LEFT);
+    hud_text(F_MONO_S, kx + hud_text_w(F_MONO_S, S_KEY_ANY) + 8, 516, S_KEY_SKIP, C_ASH, 255, AL_LEFT);
+  } else {
+    kx += key_hint(kx, 512, "A", S_KEY_NEXT, C_ASH) + 24;
+    kx += hud_keycap(kx, 512, "B", C_BONE, C_TAPE) + 6;
+    key_hint(kx, 512, "START", S_KEY_SKIP, C_ASH);
+  }
   hud_dirty(0, 0, 1280, 720);
 }
 
@@ -1321,19 +1363,26 @@ static void toast_line(void) {
 int menus_draw(float dt) {
   int drew = 1;
   switch (G.phase) {
-    case PH_BOOT: boot_screen(clampf(G.phase_t / 1.0f, 0, 1)); break;
+    case PH_BOOT: boot_screen(game_boot_progress()); break;
     case PH_TITLE: title_screen(dt); break;
     case PH_SETTINGS: settings_screen(dt); break;
     case PH_HALL: hall_screen(dt); break;
     case PH_RULES: flash_card(G.flash_step, G.flash_t); break;
     case PH_LOBBY: lobby_screen(dt); break;
-    case PH_GARAGE: garage_screen(dt, (G.evening_started ? REBUILD_FRAMES : GARAGE_FRAMES) - G.phase_frames, G.evening_started ? REBUILD_FRAMES : GARAGE_FRAMES); break;
+    case PH_GARAGE: garage_screen(dt, game_garage_total() - G.phase_frames, game_garage_total()); break;   /* the live total: 60 s, 30 s on a rebuild */
     case PH_VOTE: vote_screen(dt); break;
     case PH_COUNTDOWN: countdown_screen(dt); break;
     default: drew = 0; break;
   }
   if (G.paused) pause_screen_dt(dt);
   if (drew) toast_line();
+  /* screen bursts fired on a menu (the lock confetti) play out in the garage rather than waiting, frozen, for
+   * the results screen; on the other menus they age unseen under an empty clip */
+  if (drew && G.phase != PH_BOOT) {
+    if (G.phase != PH_GARAGE && G.phase != PH_LOBBY) hud_clip(0, 0, 0, 0);
+    fx2_draw(dt);
+    hud_clip_clear();
+  }
   return drew;
 }
 
@@ -1465,7 +1514,6 @@ const char *fake_menus_setup(int scene) {
     fake_seat(1, SEAT_HUMAN, PRE_LAUNCH, ROW_WEAPON, 1, 0);
     fake_seat(2, SEAT_HUMAN, PRE_TOAST, ROW_ARMOUR, 0, 0);
     G.seats[0].wins = 2; G.seats[1].wins = 1;
-    match_card_row = 0;
   }
   else if (!strncmp(name, "vote", 4)) {
     G.phase = PH_VOTE; G.phase_t = 2.0f; G.phase_frames = 120; G.players = 4; G.mode = MODE_DEATHMATCH;
