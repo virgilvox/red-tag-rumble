@@ -30,9 +30,18 @@
 #define VOTE_ALL_WAIT   120         /* 2 s after every human has pressed A */
 #define VOTE_SHOW       60          /* the decided card lifts for 1 s */
 #define VOTE_TIE_FLICK  30          /* a tie flickers over the tied cards for 0.5 s */
-#define JUDGES_FRAMES   240         /* 1 s freeze plus the 3 s card */
+#define JUDGES_FRAMES   330         /* 1 s freeze, the 3 s card, then the winner chip holds 1.5 s */
+#define JUDGES_SKIP_AT  210         /* A skips to results once the winner chip is up (card t > 2.4 s) */
 #define RESULTS_FRAMES  360         /* 6 s, then the rematch menu */
+#define BOOT_STEPS      7           /* the six arenas and the garage, one scene compiled per boot frame (10.1) */
+#define FIRST_CARD_S    3.0f        /* the controls card over a pad's first seat of the evening (10.24) */
 #define RIG_COMBO       (IN_SELECT | IN_L3 | IN_R3)
+
+#ifdef RTR_WORLD_COMPILE_ONE
+/* world.c compiles one scene with a camera per call: 0..5 the arenas, 6 the garage (the boot calls it once a
+ * frame so the bar moves); without it the whole set compiles on the first boot frame */
+extern void world_compile_one(int step);
+#endif
 
 static const int MODE_MIN_PLAYERS[MODE_COUNT] = { 1, 2, 3, 2, 4, 3 };
 
@@ -47,6 +56,16 @@ static int   taunt_frame[MAX_BOTS]; static uint8_t taunted_hit[MAX_BOTS];
 static int   streak_seat = -1; static uint32_t streak_n;
 static int   last_count_s = -1;
 static float b_hold[4];                         /* hall of fame: seconds B has been held per pad */
+static int   boot_step;                         /* scenes compiled so far on the boot screen */
+static int   match_card_row;                    /* the 3 player match card's focused row (10.11) */
+static uint8_t y_mod[4];                        /* a Y hold was used as the stepper modifier: no card, no preset tap */
+static uint8_t pad_seen[4];                     /* the pad has taken a seat this evening (the first join shows the controls card) */
+static int   card_pad = -1;                     /* the pad whose first join card is up (seats repack when the garage opens) */
+static int   practice_seat = -1;                /* the AI seat a lone FIGHT player got; a joining human takes its place */
+static int   pause_armed, rematch_armed[4];     /* a stick still held from the drive must settle before it walks a menu */
+static int   rematch_touched;                   /* a human moved or voted on the rematch menu */
+static int   rematch_deadline;                  /* frame the rematch menu decides at (20 s, or 10 s after a late first touch) */
+static int   rules_auto;                        /* the rules flash offered itself (first evening): any button skips */
 
 /* -- TOURNAMENT (2.2) ---------------------------------------------
  * Seats stay seats; a tournament match is a 1v1 between two of them in match slots 0
@@ -246,8 +265,19 @@ static int join_seat(int pad) {
   st->ai_level = SAVE.ai_level;
   seat_reset_garage(st);
   PADS[pad].edge = 0;                         /* the joining edge does nothing else this frame */
+  /* a pad's first seat of the evening gets the controls card over it for 3 s (10.24) */
+  if (!pad_seen[pad]) { pad_seen[pad] = 1; G.controls_card_seat = s; G.controls_card_t = FIRST_CARD_S; card_pad = pad; }
   audio_play(SFX_MENU_OK);
   return s;
+}
+
+/* the automatic controls card counts down while the lobby or garage shows it; the seat follows its pad */
+static void first_card_tick(float dt) {
+  if (G.controls_card_t <= 0) { if (card_pad >= 0) { card_pad = -1; G.controls_card_seat = -1; } return; }
+  G.controls_card_t -= dt;
+  int s = card_pad >= 0 ? seat_of_pad(card_pad) : -1;
+  if (G.controls_card_t <= 0 || s < 0) { G.controls_card_t = 0; card_pad = -1; G.controls_card_seat = -1; return; }
+  G.controls_card_seat = s;
 }
 
 static int add_ai_seat(int level) {
@@ -325,26 +355,48 @@ static const build_t *human_last_build(void) {
   return &SAVE.fav_build[0];
 }
 
+/* the k-th AI seat's pick: the first counter-picks the human (8.4); the others take a different preset
+ * each, so a FILL WITH BOT table is never one build mirrored three times under one name */
+static void ai_choose(int s, int k, int first_preset) {
+  ai_pick_build(&ai_pick[s], G.seats[s].ai_level, human_last_build(), SAVE.habits, &grng);
+  int p = build_preset_of(&ai_pick[s]);
+  if (k > 0) {
+    int base = first_preset >= 0 && first_preset < PRE_RANDOM ? first_preset : p < PRE_RANDOM ? p : PRE_ROLL_OUT;
+    build_preset(&ai_pick[s], (base + 2 * k) % PRE_RANDOM);
+  }
+  if (!build_legal(&ai_pick[s], G.players)) build_preset(&ai_pick[s], PRE_LAUNCH);
+  ai_pick[s].paint = (uint8_t)s;
+}
+
 static void go_garage(int rebuild) {
   game_attract_stop();
   if (!rebuild) {
     pack_seats();
     int humans = human_count();
-    if (humans == 1 && game_seated() == 1) { add_ai_seat(SAVE.ai_level); G.solo = 1; }
+    practice_seat = -1;
+    /* a lone player fights the practice bot; from FIGHT it keeps the garage open to a friend who walks up
+     * (3.1), from SOLO the table is theirs (G.solo is set by the title row) */
+    if (humans == 1 && game_seated() == 1) { practice_seat = add_ai_seat(SAVE.ai_level); }
     if (G.fill_with_bot) while (game_seated() < 4 && add_ai_seat(SAVE.ai_level) >= 0) {}
     pack_seats();
+    if (practice_seat >= 0) { practice_seat = -1; for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_AI) practice_seat = i; }
     G.players = (uint8_t)game_seated();
     int mode = G.lobby_mode_cursor;
     if (G.players < MODE_MIN_PLAYERS[mode] || (mode == MODE_2V2 && G.players != 4)) mode = MODE_DEATHMATCH;
     G.mode = (uint8_t)mode;
     if (G.rig_park) for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_AI) G.seats[i].ai_level = AI_EASY;
   }
-  G.sim_on = 0; G.timescale = 1; G.paused = 0; G.controls_card_seat = -1;
+  G.sim_on = 0; G.timescale = 1; G.paused = 0;
+  /* the seats repacked: the first join card follows its pad; a Y hold card ends here */
+  if (G.controls_card_t > 0 && card_pad >= 0) G.controls_card_seat = seat_of_pad(card_pad); else G.controls_card_seat = -1;
   if (!rebuild || t_done || !tourney_on()) tourney_reset();
   game_set_phase(PH_GARAGE);
   garage_total = rebuild ? REBUILD_FRAMES : GARAGE_FRAMES;
   snap_left = -1;
+  match_card_row = 0;
+  for (int p = 0; p < 4; p++) y_mod[p] = 0;
   world_attach_garage();
+  int ai_k = 0, ai_first = -1;
   for (int s = 0; s < 4; s++) {
     seat_t *st = &G.seats[s];
     if (st->kind == SEAT_EMPTY) { world_bot_visible(s, 0); continue; }
@@ -352,9 +404,8 @@ static void go_garage(int rebuild) {
     seat_reset_garage(st);
     st->join_slide = 0;
     if (st->kind == SEAT_AI) {
-      ai_pick_build(&ai_pick[s], st->ai_level, human_last_build(), SAVE.habits, &grng);
-      if (!build_legal(&ai_pick[s], G.players)) build_preset(&ai_pick[s], PRE_LAUNCH);
-      ai_pick[s].paint = (uint8_t)s;
+      ai_choose(s, ai_k++, ai_first);
+      if (ai_first < 0) ai_first = build_preset_of(&ai_pick[s]);
       ai_frame[s] = 0;
       if (G.rig_park) { build_preset(&ai_pick[s], PRE_LAUNCH); ai_pick[s].paint = (uint8_t)s; st->build = ai_pick[s]; st->locked = 1; }   /* the drive scripts' parked practice bot (balance drive_setup) */
       bot_name(st->name, &st->build);
@@ -434,6 +485,7 @@ void game_start_match(void) {
 static void go_countdown(void) {
   game_start_match();
   game_set_phase(PH_COUNTDOWN);
+  G.controls_card_seat = -1; G.controls_card_t = 0; card_pad = -1;
   G.countdown_n = 3; G.sim_on = 0; G.timescale = 1;
   audio_play(SFX_COUNT);
   audio_music(MUSIC_OFF);
@@ -573,31 +625,62 @@ static void go_results(void) {
   } else cam_set_results(-1);
 }
 
+int game_rematch_auto(int *to_lobby);
 static void go_rematch(void) {
   game_set_phase(PH_REMATCH);
   for (int s = 0; s < 4; s++) { G.seats[s].rematch = G.seats[s].kind != SEAT_EMPTY ? RM_REBUILD : -1; G.rematch_votes[s] = G.seats[s].kind == SEAT_AI; }
-  G.rematch_choice = RM_REBUILD;
+  rematch_touched = 0; rematch_deadline = REMATCH_AUTO;
+  for (int p = 0; p < 4; p++) rematch_armed[p] = 0;   /* a stick still held from the fight settles before it walks the rows */
+  int to_lobby = 0; game_rematch_auto(&to_lobby);
+  G.rematch_choice = to_lobby ? RM_LOBBY : RM_REBUILD;   /* the focus opens on the row the menu will pick by itself */
 }
 
 /* -- the boot screen --------------------------------------------- */
 static void boot_update(void) {
-  /* the first frame shows the boot screen; the second compiles every program; then the title */
-  if (G.phase_frames == 2) world_compile_all();
-  if (G.phase_frames >= 8) go_title();
+  /* the first frame shows the boot screen; from the second, one scene compiles per frame and the bar
+   * fills a step at a time (10.1); a few frames after the last step, the title */
+  if (G.phase_frames >= 2 && boot_step < BOOT_STEPS) {
+#ifdef RTR_WORLD_COMPILE_ONE
+    world_compile_one(boot_step);
+#else
+    if (boot_step == 0) world_compile_all();
+#endif
+    boot_step++;
+    return;
+  }
+  if (boot_step >= BOOT_STEPS && G.phase_frames >= BOOT_STEPS + 6) go_title();
+}
+float game_boot_progress(void) { return (float)boot_step / BOOT_STEPS; }
+const char *game_boot_step_name(void) { return boot_step < ARENA_COUNT ? ARENA_NAME[boot_step] : S_BOOT_GARAGE; }
+
+/* -- rules flash (10.25) ----------------------------------------- */
+static void rules_open(int from, int auto_offer) {
+  G.flash_from = from; G.flash_step = 0; G.flash_t = 0; rules_auto = auto_offer;
+  game_set_phase(PH_RULES);
+}
+int game_rules_auto(void) { return rules_auto; }
+
+/* a fresh save's first evening: the rules flash plays itself once before the first lobby or garage (10.25);
+ * any button skips it, so a table that knows the game loses nothing */
+static void rules_offer(int from) {
+  if (SAVE.rules_seen || G.rig_park) return;
+  rules_open(from, 1);
 }
 
 /* -- title (10.7) ------------------------------------------------ */
 static void title_select(int p) {
   audio_play(SFX_MENU_OK);
   switch (G.title_row) {
-    case TR_FIGHT: go_lobby(); join_seat(p); break;   /* the pad that picked FIGHT is seated already, so its first Start goes */
+    case TR_FIGHT: go_lobby(); join_seat(p); rules_offer(PH_LOBBY); break;   /* the pad that picked FIGHT is seated already, so its first Start goes */
     case TR_SOLO: {
       go_lobby();
       join_seat(p);
       G.lobby_mode_cursor = MODE_DEATHMATCH;
+      G.solo = 1;
       go_garage(0);
+      rules_offer(PH_GARAGE);
       break; }
-    case TR_RULES: G.flash_from = PH_TITLE; G.flash_step = 0; G.flash_t = 0; game_set_phase(PH_RULES); break;
+    case TR_RULES: rules_open(PH_TITLE, 0); break;
     case TR_HALL: G.hall_wipe_hold = 0; game_set_phase(PH_HALL); break;
     case TR_SETTINGS: G.settings_row = 0; G.settings_from_pause = 0; G.settings_saved_t = 0; game_set_phase(PH_SETTINGS); break;
   }
@@ -627,6 +710,7 @@ static void attract_update(float dt) {
 /* -- lobby (10.8) ------------------------------------------------ */
 static void lobby_update(float dt) {
   int changed = 0;
+  first_card_tick(dt);
   /* joins: an unseated pad on any face button edge */
   for (int p = 0; p < 4; p++) if (PADS[p].seat < 0 && face_edge(p) && game_seated() < 4) { if (join_seat(p) >= 0) changed = 1; }
   int go = 0;
@@ -639,7 +723,12 @@ static void lobby_update(float dt) {
     }
     seat_t *st = &G.seats[s];
     int rs = rs_step(p);
-    if (held(p, IN_Y) && rs) { G.fill_with_bot = rs > 0; audio_play(SFX_MENU_MOVE); }
+    /* Y held with the right stick moves FILL WITH BOT; a plain Y tap plays HOW IT WORKS (12) */
+    if (held(p, IN_Y)) { st->y_hold += dt; if (rs) { G.fill_with_bot = rs > 0; y_mod[p] = 1; audio_play(SFX_MENU_MOVE); } }
+    else {
+      if ((PADS[p].release & IN_Y) && !y_mod[p] && st->y_hold > 0 && st->y_hold < Y_CARD_S) { st->y_hold = 0; rules_open(PH_LOBBY, 0); return; }
+      st->y_hold = 0; y_mod[p] = 0;
+    }
     if (PADS[p].nav_y) { G.lobby_row = clampi_(G.lobby_row + PADS[p].nav_y, 0, 3); audio_play(SFX_MENU_MOVE); }
     if (PADS[p].nav_x) {
       int dx = PADS[p].nav_x;
@@ -687,6 +776,15 @@ static void cycle_row(int s, int row, int dir) {
   seat_t *st = &G.seats[s];
   build_t *b = &st->build;
   if (row == ROW_WEAPON && b->drive == DR_MELTY) return;          /* MELTY has no weapon row */
+  if (row == ROW_PAINT) {
+    /* the PAINT row walks every scheme and decal set pair (3.7): 4 schemes x 4 decals */
+    int np = PAINT_COUNT * DECAL_COUNT, cur = b->paint + b->decal * PAINT_COUNT;
+    int o = wrap(cur + dir, np);
+    b->paint = (uint8_t)(o % PAINT_COUNT); b->decal = (uint8_t)(o / PAINT_COUNT);
+    build_changed(s);
+    audio_part(row, b->paint);
+    return;
+  }
   int n = row_count(b, row), cur = build_get(b, row);
   for (int k = 1; k < n; k++) {
     int o = wrap(cur + dir * k, n);
@@ -740,10 +838,16 @@ static void set_ai_level(int s, int level) {
 }
 
 static void garage_join(int p) {
+  /* the practice bot a lone FIGHT player got gives its seat to the human who walked up: a 1v1 (3.1) */
+  if (practice_seat >= 0 && G.seats[practice_seat].kind == SEAT_AI) {
+    world_bot_visible(practice_seat, 0);
+    game_seat_leave(practice_seat);
+    practice_seat = -1;
+  }
   if (game_seated() >= 4) return;
   int s = join_seat(p);
   if (s < 0) return;
-  /* a seat the practice bot held stays an AI; a new human takes the next free seat */
+  /* a FILL WITH BOT seat stays an AI; the new human takes the next free seat */
   G.seats[s].join_slide = 1;
   G.players = (uint8_t)game_seated();
   for (int i = 0; i < 4; i++) G.seats[i].slot = G.seats[i].kind != SEAT_EMPTY ? i : -1;
@@ -751,19 +855,60 @@ static void garage_join(int p) {
   cam_set_garage(G.players);
 }
 
+/* the table's shared steppers from the garage (10.11, 3.12): the 3 player match card's rows, FIGHT LENGTH,
+ * ONE CAMERA and COMEBACK, plus PRACTICE BOT whenever an AI seat sits at the table. Any unseated pad drives
+ * them with its stick, and any seat does while holding Y. Without a card on screen Left and Right set the
+ * practice bot. */
+static int match_card_shown(void) { return game_seated() == 3 && !tourney_on(); }
+int game_match_card_rows(void) { return (match_card_shown() ? 3 : 0) + (ai_seat() >= 0 ? 1 : 0); }
+int game_match_card_row(void) { return match_card_row; }
+
+static void table_nav(int dy, int dx) {
+  int card_rows = match_card_shown() ? 3 : 0, rows = game_match_card_rows();
+  if (rows <= 0) return;
+  if (match_card_row >= rows) match_card_row = rows - 1;
+  if (dy) { match_card_row = wrap(match_card_row + dy, rows); audio_play(SFX_MENU_MOVE); }
+  if (!dx) return;
+  int row = card_rows ? match_card_row : card_rows;
+  if (row >= card_rows) { if (ai_seat() >= 0) set_ai_level(ai_seat(), G.seats[ai_seat()].ai_level + dx); return; }
+  game_setting_step(row == 0 ? 2 : row == 1 ? 1 : 3, dx);
+  audio_play(SFX_MENU_MOVE);
+}
+
+/* the timer ran out on an illegal build: trim it rather than swap it. The costliest optional rows drop to
+ * their cheapest legal option first (the second weapon, armour, weapon), then the drive and the chassis, until
+ * the build locks as close to what the player made as the rules allow (3.1) */
+static void trim_build(build_t *b) {
+  static const int order[5] = { ROW_WEAPON2, ROW_ARMOUR, ROW_WEAPON, ROW_DRIVE, ROW_CHASSIS };
+  if (!build_mount_ok(b)) b->weapon2 = WP_NONE;
+  for (int k = 0; k < 5 && !build_legal(b, G.players); k++) {
+    int row = order[k];
+    if (row == ROW_WEAPON && b->drive == DR_MELTY) continue;
+    if (row == ROW_WEAPON2 && !build_mount_ok(b)) continue;
+    int n = row_count(b, row), best = -1, best_tags = 999;
+    for (int o = 0; o < n; o++) {
+      if (!option_legal(b, row, o, G.players, 0)) continue;
+      int t = option_tags(row, o);
+      if (t < best_tags) { best_tags = t; best = o; }
+    }
+    if (best >= 0) { build_set(b, row, best); if (!build_mount_ok(b)) b->weapon2 = WP_NONE; }
+  }
+}
+
 static void garage_update(float dt) {
-  G.controls_card_seat = -1;
+  /* the controls card: the first join's 3 s card, else whoever holds Y (set below) */
+  if (G.controls_card_t > 0) first_card_tick(dt); else G.controls_card_seat = -1;
   if (tourney_on()) {
     static int players_seen;
     if (G.phase_frames == 1) players_seen = G.players;
     if (G.players != players_seen && t_match == 0) { players_seen = G.players; tourney_reset(); }   /* a mid garage join reseeds the bracket */
     tourney_flip_tick();
   }
-  /* joining mid garage: an unseated pad on a face button gets a panel (3.1); a stick moves the practice bot toggle */
+  /* joining mid garage: an unseated pad on a face button gets a panel (3.1); its stick drives the table's steppers */
   for (int p = 0; p < 4; p++) {
     if (PADS[p].seat >= 0) continue;
     if (face_edge(p) && !G.solo) garage_join(p);
-    else if (PADS[p].nav_x && ai_seat() >= 0) set_ai_level(ai_seat(), G.seats[ai_seat()].ai_level + PADS[p].nav_x);
+    else if (PADS[p].nav_x || PADS[p].nav_y) table_nav(PADS[p].nav_y, PADS[p].nav_x);
   }
   for (int s = 0; s < 4; s++) {
     seat_t *st = &G.seats[s];
@@ -783,14 +928,23 @@ static void garage_update(float dt) {
     }
     int p = st->pad;
     if (p < 0) continue;
-    /* Y: a hold of 0.4 s shows the controls card over this panel; a tap (released before that) cycles the
-     * preset. Start is not the preset button: Start starts (below). */
-    int y_tap = 0;
-    if (held(p, IN_Y)) { st->y_hold += dt; if (st->y_hold >= Y_CARD_S) G.controls_card_seat = s; }
-    else { if ((PADS[p].release & IN_Y) && st->y_hold > 0 && st->y_hold < Y_CARD_S) y_tap = 1; st->y_hold = 0; }
+    /* Y: held with the stick it is the modifier for the table's steppers (the match card, the practice
+     * bot); held alone for 0.4 s it shows the controls card over this panel; a tap (released before that,
+     * nothing stepped) cycles the preset. Start is not the preset button: Start starts (below). */
+    int y_tap = 0, y_held = held(p, IN_Y);
+    if (y_held) {
+      st->y_hold += dt;
+      int rs = rs_step(p);
+      if (PADS[p].nav_x || PADS[p].nav_y || rs) { table_nav(PADS[p].nav_y, PADS[p].nav_x ? PADS[p].nav_x : rs); y_mod[p] = 1; }
+      if (st->y_hold >= Y_CARD_S && !y_mod[p] && G.controls_card_t <= 0) G.controls_card_seat = s;
+    } else {
+      if ((PADS[p].release & IN_Y) && !y_mod[p] && st->y_hold > 0 && st->y_hold < Y_CARD_S) y_tap = 1;
+      st->y_hold = 0; y_mod[p] = 0;
+    }
     /* the right stick scrubs the turntable; releasing resumes (3.1) */
-    if (PADS[p].cur.rx < -8000 || PADS[p].cur.rx > 8000) world_turntable(s, world_turntable_angle(s) + PADS[p].cur.rx / 32767.0f * 3.0f * dt);
-    if (PADS[p].cur.rt > TRIGGER_ON && PADS[p].prev.rt <= TRIGGER_ON) { world_weapon_test_fire(s); audio_part(ROW_WEAPON, st->build.drive == DR_MELTY ? WP_NONE : st->build.weapon); }
+    if (!y_held && (PADS[p].cur.rx < -8000 || PADS[p].cur.rx > 8000)) world_turntable(s, world_turntable_angle(s) + PADS[p].cur.rx / 32767.0f * 3.0f * dt);
+    /* RT test-fires the weapon on the turntable; R does too, for a pad (or keyboard) without triggers */
+    if ((PADS[p].cur.rt > TRIGGER_ON && PADS[p].prev.rt <= TRIGGER_ON) || edge(p, IN_R)) { world_weapon_test_fire(s); audio_part(ROW_WEAPON, st->build.drive == DR_MELTY ? WP_NONE : st->build.weapon); }
     if (st->locked) {
       if (edge(p, IN_B)) { st->locked = 0; world_turntable_lock(s, 0); audio_play(SFX_MENU_BACK); }
       continue;
@@ -798,11 +952,13 @@ static void garage_update(float dt) {
     if (st->slot_machine_t > 0) continue;
     int rows = build_mount_ok(&st->build) ? ROW_COUNT : ROW_COUNT - 1;
     if (st->row >= rows) st->row = rows - 1;
-    if (PADS[p].nav_y) { st->row = wrap(st->row + PADS[p].nav_y, rows); audio_play(SFX_MENU_MOVE); }
-    if (PADS[p].nav_x) cycle_row(s, st->row, PADS[p].nav_x);
-    /* the practice bot toggle: this human's right stick while the cursor is on PAINT (3.12) */
-    int rs = rs_step(p);
-    if (rs && st->row == ROW_PAINT && ai_seat() >= 0) set_ai_level(ai_seat(), G.seats[ai_seat()].ai_level + rs);
+    if (!y_held) {
+      if (PADS[p].nav_y) { st->row = wrap(st->row + PADS[p].nav_y, rows); audio_play(SFX_MENU_MOVE); }
+      if (PADS[p].nav_x) cycle_row(s, st->row, PADS[p].nav_x);
+      /* the practice bot toggle: this human's right stick while the cursor is on PAINT (3.12) */
+      int rs = rs_step(p);
+      if (rs && st->row == ROW_PAINT && ai_seat() >= 0) set_ai_level(ai_seat(), G.seats[ai_seat()].ai_level + rs);
+    }
     if (y_tap) {
       int next = wrap((st->preset < PRE_RANDOM ? st->preset : -1) + 1, PRE_RANDOM + 1);
       uint8_t paint = st->build.paint;
@@ -842,18 +998,24 @@ static void garage_update(float dt) {
     st->build = ai_pick[s]; build_changed(s); lock_seat(s);
   }
   /* the shared timer: at 0 every unlocked bot locks exactly as it stands; only an illegal one (over budget
-   * or unmounted) falls back to its seat's preset, and the screen says so for 2 s */
+   * or unmounted) is trimmed to the nearest legal build, and the screen says so for 2 s */
   int all = 1;
   for (int s = 0; s < 4; s++) if (G.seats[s].kind != SEAT_EMPTY && !G.seats[s].locked) all = 0;
   if (snap_left < 0 && G.phase_frames >= garage_total) {
+    /* a table nobody touched for the whole garage has walked away: back to the lobby, which empties to the title */
+    int touched = 0;
+    for (int s = 0; s < 4; s++) if (G.seats[s].kind == SEAT_HUMAN && G.seats[s].pad >= 0 && PADS[(int)G.seats[s].pad].idle < GARAGE_FRAMES / 60.0f) touched = 1;
+    if (!touched && humans > 0 && !G.rig_park) { go_lobby(); return; }
     for (int s = 0; s < 4; s++) {
       seat_t *st = &G.seats[s];
       if (st->kind == SEAT_EMPTY || st->locked) continue;
       if (!build_legal(&st->build, G.players)) {
         char rb[48], tb[64];
         const char *why = illegal_reason(&st->build, rb, sizeof rb);
-        uint8_t paint = st->build.paint; build_preset(&st->build, s % PRE_RANDOM); st->build.paint = paint; build_changed(s);
-        snprintf(tb, sizeof tb, S_TOAST_TIME_FALLBACK, s + 1, why, PRESETS[s % PRE_RANDOM].name);
+        trim_build(&st->build);
+        if (!build_legal(&st->build, G.players)) { uint8_t paint = st->build.paint; build_preset(&st->build, s % PRE_RANDOM); st->build.paint = paint; }
+        build_changed(s);
+        snprintf(tb, sizeof tb, S_TOAST_TIME_TRIMMED, s + 1, why);
         toast(tb);
       }
       lock_seat(s);
@@ -868,6 +1030,8 @@ static void garage_update(float dt) {
     if (snap_left-- <= 0) go_vote();
   }
 }
+
+int game_garage_total(void) { return garage_total > 0 ? garage_total : GARAGE_FRAMES; }
 
 /* -- vote (10.12) ------------------------------------------------ */
 static void vote_update(float dt) {
@@ -918,12 +1082,16 @@ static void vote_update(float dt) {
 /* -- fight, KO, judges (2.3, 2.10) ------------------------------- */
 static void pause_open(int seat) {
   G.paused = 1; G.pauser = seat; G.pause_row = 0; G.reset_hold = 0; G.timescale = 0;
+  pause_armed = 0;                              /* the stick that was driving must come back to centre first */
   audio_duck(0.3f);
   audio_play(SFX_MENU_OK);
 }
 static void pause_close(void) {
   G.paused = 0; G.controls_card_seat = -1; G.reset_hold = 0;
   G.timescale = G.miniko_frames > 0 ? J_MINIKO_TIMESCALE : 1;
+  /* the sim's edge memory catches up with the pads: the B or Start that closed the menu is not a brake or a
+   * self-right on the first step after the pause */
+  for (int i = 0; i < M.nbots && i < 4; i++) { int pad = game_slot_pad(i); if (pad >= 0) { M.bots[i].prev_in = PADS[pad].cur; M.bots[i].in = PADS[pad].cur; } }
   audio_duck(1);
   audio_play(SFX_MENU_BACK);
 }
@@ -937,9 +1105,10 @@ static void pause_update(float dt) {
   /* the pause menu belongs to the pad that paused: a stick another player is still
    * holding from the fight must not walk the cursor */
   int owner = G.pauser >= 0 && G.pauser < 4 ? G.seats[G.pauser].pad : -1;
+  if (!pause_armed && (owner < 0 || (PADS[owner].repeat_y == 0 && PADS[owner].repeat_x == 0))) pause_armed = 1;
   for (int p = 0; p < 4; p++) {
     if (owner >= 0 && p != owner) continue;
-    if (PADS[p].nav_y) { G.pause_row = wrap(G.pause_row + PADS[p].nav_y, 4); G.reset_hold = 0; audio_play(SFX_MENU_MOVE); }
+    if (PADS[p].nav_y && pause_armed) { G.pause_row = wrap(G.pause_row + PADS[p].nav_y, 4); G.reset_hold = 0; audio_play(SFX_MENU_MOVE); }
     if (edge(p, IN_START | IN_B)) { pause_close(); return; }
     if (G.pause_row == 3) { if (held(p, IN_A)) quit_held = 1; continue; }
     if (edge(p, IN_A)) {
@@ -981,6 +1150,13 @@ static void fight_update(float dt) {
     if (s >= 0 && G.seats[s].kind == SEAT_HUMAN && edge(p, IN_START)) { pause_open(s); return; }
     /* nothing joins mid fight: an unseated pad gets the NEXT MATCH chip (10.2) */
     if (s < 0 && PADS[p].edge) { G.next_match_chip_pad = p; G.next_match_chip_t = 2.0f; }
+    if (s < 0 || G.seats[s].kind != SEAT_HUMAN) continue;
+    /* Y held: the controls card over this seat's viewport (12, 10.24) */
+    if (held(p, IN_Y)) G.controls_card_seat = s; else if (G.controls_card_seat == s) G.controls_card_seat = -1;
+    /* the right stick nudges this seat's camera 30 degrees and springs back (12); the dead zone is the sim's */
+    float rx = PADS[p].cur.rx / 32767.0f;
+    if (rx > -0.18f && rx < 0.18f) rx = 0;
+    cam_nudge(s, rx, 0);
   }
   if (G.miniko_frames > 0) { G.miniko_frames--; G.timescale = G.miniko_frames > 0 ? J_MINIKO_TIMESCALE : 1; }
   /* hazard seats: the stick picks (a new seat starts on the first hazard), A fires (2.10) */
@@ -1031,15 +1207,40 @@ static void rematch_apply(int row) {
   }
 }
 
+/* the shortest idle time among the seated humans' pads: how long the table has been silent */
+static float table_silence(void) {
+  float s = 1e9f; int any = 0;
+  for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_HUMAN && G.seats[i].pad >= 0) { any = 1; if (PADS[(int)G.seats[i].pad].idle < s) s = PADS[(int)G.seats[i].pad].idle; }
+  return any ? s : 0;
+}
+
+/* the rematch menu decides by itself: at 20 s when someone at the table has moved or voted; a table that has
+ * said nothing since the fight goes to the lobby after 40 s of silence instead (10.1, 10.21), where the idle
+ * seats drop and the empty lobby returns to the title. An abandoned cabinet never loops rebuilds and fights. */
+int game_rematch_auto(int *to_lobby) {
+  if (G.phase != PH_REMATCH) { if (to_lobby) *to_lobby = 0; return REMATCH_AUTO / 60; }
+  if (rematch_touched || human_count() == 0 || G.rig_park) { if (to_lobby) *to_lobby = 0; int left = (rematch_deadline - G.phase_frames + 59) / 60; return left < 0 ? 0 : left; }
+  if (to_lobby) *to_lobby = 1;
+  int left = (int)ceilf(RESULTS_IDLE_S - table_silence());
+  return left < 0 ? 0 : left;
+}
+
+/* the first touch late in a silent menu gives the table 10 s before the menu decides */
+static void rematch_touch(void) {
+  if (!rematch_touched && G.phase_frames + 600 > rematch_deadline) rematch_deadline = G.phase_frames + 600;
+  rematch_touched = 1;
+}
+
 static void rematch_update(void) {
   int humans = 0, all = 1;
   for (int p = 0; p < 4; p++) {
     int s = seat_of_pad(p);
     if (s < 0 || G.seats[s].kind != SEAT_HUMAN) continue;
     seat_t *st = &G.seats[s];
-    if (PADS[p].nav_y && !G.rematch_votes[s]) { st->rematch = wrap(st->rematch + PADS[p].nav_y, 4); audio_play(SFX_MENU_MOVE); }
-    if (edge(p, IN_A | IN_START) && !G.rematch_votes[s]) { G.rematch_votes[s] = 1; audio_play(SFX_MENU_OK); }
-    if (edge(p, IN_B) && G.rematch_votes[s]) { G.rematch_votes[s] = 0; audio_play(SFX_MENU_BACK); }
+    if (!rematch_armed[p] && PADS[p].repeat_y == 0) rematch_armed[p] = 1;
+    if (PADS[p].nav_y && rematch_armed[p] && !G.rematch_votes[s]) { st->rematch = wrap(st->rematch + PADS[p].nav_y, 4); rematch_touch(); audio_play(SFX_MENU_MOVE); }
+    if (edge(p, IN_A | IN_START) && !G.rematch_votes[s]) { G.rematch_votes[s] = 1; rematch_touch(); audio_play(SFX_MENU_OK); }
+    if (edge(p, IN_B) && G.rematch_votes[s]) { G.rematch_votes[s] = 0; rematch_touch(); audio_play(SFX_MENU_BACK); }
   }
   int count[4] = { 0 };
   for (int s = 0; s < 4; s++) {
@@ -1049,8 +1250,12 @@ static void rematch_update(void) {
   }
   int best = RM_REBUILD;                           /* REBUILD wins ties */
   for (int r = 0; r < 4; r++) if (count[r] > count[best]) best = r;
-  G.rematch_choice = best;
-  if ((humans && all) || G.phase_frames >= REMATCH_AUTO) rematch_apply(best);
+  int to_lobby = 0;
+  int left = game_rematch_auto(&to_lobby);
+  G.rematch_choice = to_lobby ? RM_LOBBY : best;
+  if (humans && all) { rematch_apply(best); return; }
+  if (to_lobby) { if (left <= 0) { audio_play(SFX_MENU_BACK); go_lobby(); } return; }
+  if (G.phase_frames >= rematch_deadline) rematch_apply(best);
 }
 
 /* -- settings, hall, rules (10.22, 10.23, 10.25) ----------------- */
@@ -1081,7 +1286,7 @@ static void settings_update(float dt) {
       }
     }
     if (G.settings_row == 12 && held(p, IN_A)) reset_held = 1;
-    if (edge(p, IN_B)) { settings_back(); return; }
+    if (edge(p, IN_B | IN_START)) { settings_back(); return; }
   }
   if (reset_held) {
     G.reset_hold += dt;
@@ -1105,19 +1310,25 @@ static void hall_update(float dt) {
       memset(SAVE.wins_by_preset, 0, sizeof SAVE.wins_by_preset); memset(SAVE.ko_by_cause, 0, sizeof SAVE.ko_by_cause); SAVE.matches = 0;
       save_commit();
       audio_play(SFX_MENU_BACK);
-      G.hall_wipe_hold = 0; for (int p = 0; p < 4; p++) b_hold[p] = -100;   /* the release after a wipe is not a back */
+      G.hall_wipe_hold = 0; for (int p = 0; p < 4; p++) b_hold[p] = 100;    /* the release after a wipe is a long hold, not a back */
     }
   } else G.hall_wipe_hold = 0;
 }
 
 static void rules_update(float dt) {
   G.flash_t += dt;
+  /* A is the next card, B and Start skip the rest; the automatic first evening flash skips on any button */
   int next = G.flash_t >= FLASH_CARD_S, skip = 0;
-  for (int p = 0; p < 4; p++) { if (edge(p, IN_A | IN_START)) next = 1; if (edge(p, IN_B)) skip = 1; }
+  for (int p = 0; p < 4; p++) {
+    if (rules_auto) { if (edge(p, IN_A | IN_B | IN_X | IN_Y | IN_START)) skip = 1; continue; }
+    if (edge(p, IN_A)) next = 1;
+    if (edge(p, IN_B | IN_START)) skip = 1;
+  }
   if (next) { G.flash_step++; G.flash_t = 0; audio_play(SFX_MENU_MOVE); }
   if (skip || G.flash_step >= FLASH_STEPS) {
     SAVE.rules_seen = 1; save_commit();
-    G.flash_step = 0;
+    G.flash_step = 0; rules_auto = 0;
+    if (skip) audio_play(SFX_MENU_BACK);
     if (G.flash_from == PH_TITLE) { game_set_phase(PH_TITLE); title_idle = 0; } else game_set_phase(G.flash_from);
   }
 }
@@ -1188,7 +1399,12 @@ void game_update(float dt) {
       break; }
     case PH_FIGHT: fight_update(dt); break;
     case PH_KO: ko_update(); break;
-    case PH_JUDGES: if (G.phase_frames >= JUDGES_FRAMES) go_results(); break;
+    case PH_JUDGES: {
+      /* the card holds until the winner chip has been up 1.5 s; a seated pad's A or Start skips once it is up (10.20) */
+      int skip = 0;
+      if (G.phase_frames >= JUDGES_SKIP_AT) for (int p = 0; p < 4; p++) if (seat_of_pad(p) >= 0 && edge(p, IN_A | IN_START)) skip = 1;
+      if (skip || G.phase_frames >= JUDGES_FRAMES) go_results();
+      break; }
     case PH_RESULTS: results_update(); break;
     case PH_REMATCH: rematch_update(); break;
     default: break;
