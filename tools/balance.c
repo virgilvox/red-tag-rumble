@@ -1047,11 +1047,249 @@ static int sc_slide_drives(char *msg, int n) {
   SC_OK(tr < 0.8f && fw >= 1.0f && fw <= 1.6f && tw >= 1.6f && tw <= 2.4f && hv > 6.0f, "slid TREADS %.2f (< 0.8), FOUR WHEEL %.2f (1.0 to 1.6), TWO WHEEL %.2f (1.6 to 2.4), HOVER %.2f (> 6)", tr, fw, tw, hv);
 }
 
+/* the first frame (from the scenario start) an event of a type and zone arrives with victim b (-1 any) */
+typedef struct { int first[EV_TYPE_COUNT][16]; int count[EV_TYPE_COUNT]; int f0; } sc_log_t;
+static void sc_log_init(sc_log_t *L) { memset(L, 0xff, sizeof L->first); memset(L->count, 0, sizeof L->count); L->f0 = SM.frame; }
+static void sc_log(sc_log_t *L) {
+  for (int k = 0; k < SNEV; k++) { const event_t *e = &SEV[k]; L->count[e->type]++; int z = e->zone < 16 ? e->zone : 15; if (L->first[e->type][z] < 0) L->first[e->type][z] = SM.frame - L->f0; }
+}
+static int sc_first(const sc_log_t *L, int type, int zone) {
+  if (zone >= 0) return L->first[type][zone];
+  int best = -1; for (int z = 0; z < 16; z++) if (L->first[type][z] >= 0 && (best < 0 || L->first[type][z] < best)) best = L->first[type][z];
+  return best;
+}
+static const float HALF_PI = 1.5707963f;
+
+/* ROLL OUT flat out into a standing STOMP's front: under it, up the slope, over the top and onto its lid */
+static int sc_wedge_front_lunchbox(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_STOMP, 0);
+  sc_place(0, -3.5f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  sc_log_t L; sc_log_init(&L); float up = 0, peak = 0;
+  for (int f = 0; f < 240; f++) {
+    sc_pad(0, 1, 0, 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L);
+    if (g_verbose && f > 55 && f < 130) { bot_t *v = &SM.bots[1]; printf("  f %d v x %.2f y %.2f vy %.2f p %.2f wp %.2f air %d inv %d tip %d bnc %d ride %d up %.2f |", f, v->b.x, v->b.y, v->b.vy, v->b.pitch, v->b.wp, v->airborne, v->inverted, v->tipping, v->bounced, v->ride_by, v->ride_up); for (int k = 0; k < SNEV; k++) printf(" ev%d/%d", SEV[k].type, SEV[k].zone); printf("\n"); }
+    if (SM.bots[1].ride_up > up) up = SM.bots[1].ride_up;
+    if (SM.bots[1].ride_cl_peak > peak) peak = SM.bots[1].ride_cl_peak;
+  }
+  int und = sc_first(&L, EV_UNDERRIDE, PN_FRONT), tip = sc_first(&L, EV_RIDE_END, RIDE_TIPPED), la = sc_first(&L, EV_LAUNCH, LAUNCH_WEDGE), inv = sc_first(&L, EV_INVERT, INV_WEDGE);
+  if (tip >= 0) up = 1.0f;     /* a tip happens only at the top of the slope */
+  SC_OK(und >= 0 && und <= 90 && up >= 1.0f && peak >= 2.2f && tip >= 0 && la >= 0 && inv >= 0 && inv <= 240 && SM.bots[1].inverted,
+        "UNDERRIDE (front) at %d (<= 90), ride_up %.2f, ride_cl_peak %.2f (>= 2.2), TIPPED at %d, LAUNCH_WEDGE at %d, INVERT (wedge) at %d (<= 240), inverted at the end %d",
+        und, up, peak, tip, la, inv, SM.bots[1].inverted);
+}
+
+/* the STOMP side on: its legs are there, so no underride; one ram, it stays on the floor and is shoved */
+static int sc_wedge_side_lunchbox(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_STOMP, 0);
+  sc_place(0, -3.5f, 0, HALF_PI); sc_place(1, 0, 0, 0);
+  sc_log_t L; sc_log_init(&L); float x0 = SM.bots[1].b.x, ymax = 0; int t_contact = -1; float pushed = 0;
+  for (int f = 0; f < 400; f++) {
+    sc_pad(0, 1, 0, 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L);
+    if (SM.bots[1].b.y - SM.bots[1].floor_y > ymax) ymax = SM.bots[1].b.y - SM.bots[1].floor_y;
+    if (t_contact < 0 && SM.bots[1].b.x - x0 > 0.01f) t_contact = f;
+    if (t_contact >= 0 && f == t_contact + 120) pushed = SM.bots[1].b.x - x0;
+  }
+  SC_OK(L.count[EV_UNDERRIDE] == 0 && L.count[EV_RAM] == 1 && ymax < 0.01f && pushed > 1.5f, "%d underrides (0), %d rams (1), highest off the floor %.3f, pushed %.2f in 120 frames from contact (> 1.5)",
+        L.count[EV_UNDERRIDE], L.count[EV_RAM], ymax, pushed);
+}
+
+/* ROLL OUT at 0.6 throttle into a LAUNCH's front: under and up, too slow to tip, carried; the LAUNCH's own
+ * full reverse does not get it off the plate; the ride ends when the wedge stops */
+static int sc_wedge_front_box_slow(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_LAUNCH, 0);
+  sc_place(0, -6.5f, 0, HALF_PI); sc_place(1, -2.5f, 0, -HALF_PI);
+  sc_log_t L; sc_log_init(&L); float up = 0, x_full = 0, carried = 0, load_max = 0, gap0 = -1, gap_open = 0; int full_at = -1, stop_at = -1, end_zone = -1;
+  for (int f = 0; f < 400; f++) {
+    int stop = full_at >= 0 && f >= full_at + 80;
+    sc_pad(0, stop ? 0 : 0.6f, 0, 0);
+    sc_pad(1, full_at >= 0 && !stop ? -1.0f : 0, 0, 0);          /* the victim reverses hard once it is on the plate */
+    sc_step(); sc_log(&L);
+    bot_t *v = &SM.bots[1];
+    if (v->ride_up > up) up = v->ride_up;
+    if (full_at < 0 && v->ride_full) { full_at = f; x_full = v->b.x; gap0 = sc_dist(0, 1); }
+    if (full_at >= 0 && v->ride_by) { carried = v->b.x - x_full; if (v->load > load_max) load_max = v->load; if (f <= full_at + 60) gap_open = sc_dist(0, 1) - gap0; }
+    if (stop && stop_at < 0) stop_at = f;
+    for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_RIDE_END && end_zone < 0) end_zone = SEV[k].zone;
+  }
+  int und = sc_first(&L, EV_UNDERRIDE, PN_FRONT);
+  SC_OK(und >= 0 && up >= 1.0f && L.first[EV_RIDE_END][RIDE_TIPPED] < 0 && carried > 2.0f && load_max < 0.3f && gap_open < 0.3f && (end_zone == RIDE_SLIP || end_zone == RIDE_BACKED_OFF),
+        "UNDERRIDE at %d, ride_up %.2f, no tip %d, carried %.2f (> 2), load while carried %.2f (< 0.3), reversing opened the gap %.2f (< 0.3), the ride ended %d (SLIP 0 or BACKED OFF 1)",
+        und, up, L.first[EV_RIDE_END][RIDE_TIPPED] < 0, carried, load_max, gap_open, end_zone);
+}
+
+/* two ROLL OUTs head on: the lips bind; with one at 0.4 throttle the faster gets under */
+static int sc_wedge_vs_wedge(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_ROLL_OUT, 0);
+  sc_place(0, -3.0f, 0, HALF_PI); sc_place(1, 3.0f, 0, -HALF_PI);
+  sc_log_t L; sc_log_init(&L); int clash = -1, both_slow = -1;
+  for (int f = 0; f < 200; f++) {
+    sc_pad(0, 1, 0, 0); sc_pad(1, 1, 0, 0); sc_step(); sc_log(&L);
+    if (clash < 0 && L.count[EV_WEDGE_CLASH]) clash = f;
+    if (clash >= 0 && both_slow < 0 && f <= clash + 10 && sc_speed(0) < 0.5f && sc_speed(1) < 0.5f) both_slow = f - clash;
+  }
+  int und1 = L.count[EV_UNDERRIDE];
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_ROLL_OUT, 0);
+  sc_place(0, -3.0f, 0, HALF_PI); sc_place(1, 3.0f, 0, -HALF_PI);
+  int und_a = -1;
+  for (int f = 0; f < 200; f++) {
+    sc_pad(0, 1, 0, 0); sc_pad(1, 0.4f, 0, 0); sc_step();
+    for (int k = 0; k < SNEV; k++) if (SEV[k].type == EV_UNDERRIDE && und_a < 0) und_a = SEV[k].a;
+  }
+  SC_OK(clash >= 0 && und1 == 0 && both_slow >= 0 && und_a == 0, "WEDGE_CLASH at %d, %d underrides (0), both under 0.5 u/s %d frames after (<= 10); at 0.4 throttle the underride is by slot %d (0, the faster)",
+        clash, und1, both_slow, und_a);
+}
+
+/* ROLL OUT into a TOAST's side: the skirt is open at every edge; the hover is carried, never flipped */
+static int sc_wedge_under_hover(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_TOAST, 0);
+  sc_place(0, -6.0f, 0, HALF_PI); sc_place(1, -2.5f, 0, 0);
+  sc_log_t L; sc_log_init(&L); float x0 = -1e9f, carried = 0, load_max = 0;
+  for (int f = 0; f < 300; f++) {
+    sc_pad(0, 1, 0, 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L);
+    bot_t *v = &SM.bots[1];
+    if (v->ride_by) { if (x0 < -1e8f) x0 = v->b.x; carried = v->b.x - x0; if (v->load > load_max) load_max = v->load; }
+  }
+  SC_OK(L.count[EV_UNDERRIDE] >= 1 && load_max == 0 && carried > 3.0f && L.count[EV_INVERT] == 0, "%d underrides, load while ridden %.2f (0), carried %.2f (> 3), %d inversions (0)",
+        L.count[EV_UNDERRIDE], load_max, carried, L.count[EV_INVERT]);
+}
+
+/* ROLL OUT into a CHOP's front at 3.8: under the LOWBOY but never over it; a boosted TWO WHEEL wedge does tip it */
+static int sc_wedge_lowboy(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_CHOP, 0);
+  sc_place(0, -6.0f, 0, HALF_PI); sc_place(1, -2.0f, 0, -HALF_PI);
+  sc_log_t L; sc_log_init(&L); float x_ride = -1e9f, carried = 0;
+  for (int f = 0; f < 300; f++) {
+    sc_pad(0, 1, 0, 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L);
+    if (SM.bots[1].ride_by) { if (x_ride < -1e8f) x_ride = SM.bots[1].b.x; carried = SM.bots[1].b.x - x_ride; }
+  }
+  int und = L.count[EV_UNDERRIDE], tipped = L.first[EV_RIDE_END][RIDE_TIPPED] >= 0, slip = L.first[EV_RIDE_END][RIDE_SLIP] >= 0;
+  build_t tw = { CH_BOX, DR_TWO, WP_WEDGE, WP_NONE, AR_ALU, 0, 0 }, ch; build_preset(&ch, PRE_CHOP);
+  sc_init(AR_BAY, &tw, &ch, 0);
+  sc_place(0, -9.5f, 0, HALF_PI); sc_place(1, 1.0f, 0, -HALF_PI);
+  sc_log_t L2; sc_log_init(&L2); float vmax = 0;
+  for (int f = 0; f < 240; f++) {
+    sc_pad(0, 1, 0, f == 20 ? IN_L : 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L2);
+    if (!SM.bots[1].ride_by && sc_speed(0) > vmax) vmax = sc_speed(0);
+  }
+  int tipped2 = L2.first[EV_RIDE_END][RIDE_TIPPED] >= 0;
+  SC_OK(und >= 1 && !tipped && slip && carried > 1.0f && tipped2, "ROLL OUT: %d underrides, tipped %d (0), carried %.2f then slid off %d; the boosted TWO WHEEL wedge at %.1f u/s: tipped %d (1)",
+        und, tipped, carried, slip, vmax, tipped2);
+}
+
+/* a ROLL OUT pressing A against a LAUNCH's front from a standstill: DIG IN, then under it within 40 frames */
+static int sc_dig_in(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_LAUNCH, 0);
+  sc_place(0, -1.06f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  sc_log_t L; sc_log_init(&L);
+  for (int f = 0; f < 60; f++) { sc_pad(0, 1, 0, f < 3 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L); }
+  int tell = sc_first(&L, EV_WEAPON_TELL, TELL_DIG_IN), und = sc_first(&L, EV_UNDERRIDE, -1);
+  SC_OK(tell >= 0 && und >= 0 && und - tell <= 40, "TELL_DIG_IN at %d, UNDERRIDE at %d (within 40)", tell, und);
+}
+
+/* ROLL OUT and LAUNCH head on, both flat out: the treads win the shove; with the LAUNCH ridden, further */
+static int sc_push_treads(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_LAUNCH, 0);
+  sc_place(0, -4.0f, 0, HALF_PI); sc_place(1, -2.6f, 0, -HALF_PI);
+  SM.bots[0].ride_cd[1] = 400;      /* a plain shove first: no underride */
+  float x0 = (SM.bots[0].b.x + SM.bots[1].b.x) * 0.5f;
+  for (int f = 0; f < 240; f++) { sc_pad(0, 1, 0, 0); sc_pad(1, 1, 0, 0); sc_step(); }
+  float plain = (SM.bots[0].b.x + SM.bots[1].b.x) * 0.5f - x0;
+  /* from a standstill nose to nose, the ROLL OUT digs in under the LAUNCH and both drive flat out */
+  sc_init_presets(AR_BAY, PRE_ROLL_OUT, PRE_LAUNCH, 0);
+  sc_place(0, -4.0f, 0, HALF_PI); sc_place(1, -4.0f + 1.06f, 0, -HALF_PI);
+  x0 = (SM.bots[0].b.x + SM.bots[1].b.x) * 0.5f; int rode = 0;
+  for (int f = 0; f < 240; f++) {
+    sc_pad(0, 1, 0, f < 2 ? IN_A : 0); sc_pad(1, 1, 0, 0); sc_step(); if (SM.bots[1].ride_by) rode++;
+    if (g_verbose) { printf("  f %d a (%.2f %.2f v %.2f) b (%.2f y %.2f v %.2f p %.2f) ride %d up %.2f full %d load %.2f/%.2f", f, SM.bots[0].b.x, SM.bots[0].b.z, SM.bots[0].b.vx, SM.bots[1].b.x, SM.bots[1].b.y, SM.bots[1].b.vx, SM.bots[1].b.pitch, SM.bots[1].ride_by, SM.bots[1].ride_up, SM.bots[1].ride_full, SM.bots[0].load, SM.bots[1].load); for (int k = 0; k < SNEV; k++) printf(" ev%d/%d", SEV[k].type, SEV[k].zone); printf("\n"); }
+  }
+  float ridden = (SM.bots[0].b.x + SM.bots[1].b.x) * 0.5f - x0;
+  SC_OK(plain > 6.0f && ridden > 8.0f && rode > 0, "the pair moved %.2f toward the LAUNCH (> 6); with it ridden (%d frames of 240) %.2f (> 8)", plain, rode, ridden);
+}
+
+/* a LAUNCH flips a STOMP from its plate, 20 placements: every one lands on its lid */
+static int sc_flip_inverts_tall(char *msg, int n) {
+  int launches = 0, invs = 0, air_lo = 999, air_hi = 0; float dmg_lo = 99, dmg_hi = 0;
+  for (int k = 0; k < 20; k++) {
+    sc_init_presets(AR_BAY, PRE_LAUNCH, PRE_STOMP, 0);
+    SM.seed = 100u + (uint32_t)k; SM.rng = SM.seed;
+    float d = 1.0f + 0.0075f * (float)k;                  /* the STOMP's front from touching (k 0.8) to 0.14 out (k 0.5) */
+    sc_place(0, -d, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+    sc_log_t L; sc_log_init(&L); int t_launch = -1, t_land = -1;
+    for (int f = 0; f < 150; f++) {
+      sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L);
+      for (int e = 0; e < SNEV; e++) {
+        if (SEV[e].type == EV_LAUNCH && t_launch < 0) t_launch = f;
+        if (SEV[e].type == EV_LAND && SEV[e].b == 1 && SEV[e].zone != LAND_BOUNCE && t_land < 0) { t_land = f; if (SEV[e].dmg < dmg_lo) dmg_lo = SEV[e].dmg; if (SEV[e].dmg > dmg_hi) dmg_hi = SEV[e].dmg; }
+      }
+    }
+    if (t_launch >= 0) launches++;
+    if (L.first[EV_LAND][LAND_INVERTED] >= 0 && SM.bots[1].inverted) invs++;
+    if (t_launch >= 0 && t_land >= 0) { int at = t_land - t_launch; if (at < air_lo) air_lo = at; if (at > air_hi) air_hi = at; }
+  }
+  SC_OK(launches == 20 && invs == 20 && air_lo >= 38 && air_hi <= 44 && dmg_lo >= 2 && dmg_hi <= 5, "%d launches, %d inverted (20 of 20), airtime %d to %d frames (38 to 44), landing dmg %.1f to %.1f (2 to 5)",
+        launches, invs, air_lo, air_hi, dmg_lo, dmg_hi);
+}
+
+/* a standing CHOP lands back on its wheels; the same CHOP driving into the plate at 5 u/s goes over */
+static int flip_chop(float drive_in, int *bounce, int *landed) {
+  sc_init_presets(AR_BAY, PRE_LAUNCH, PRE_CHOP, 0);
+  /* standing: touching the flipper's front; driving in: from 0.9 away at 5 u/s, the flipper fired as its
+   * front crosses the plate's middle */
+  sc_place(0, drive_in > 0 ? -1.9f : -1.0f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  SM.bots[1].b.vx = -drive_in;
+  sc_log_t L; sc_log_init(&L); int fired = 0, fire_f = -1;
+  for (int f = 0; f < 150; f++) {
+    float near = (SM.bots[1].b.x - SM.bots[0].b.x) - SM.bots[1].b.hl;
+    int press = drive_in > 0 ? (!fired && near < 0.72f) : f < 2;
+    if (press && !fired) { fired = 1; fire_f = f; }
+    sc_pad(0, 0, 0, press || (fire_f >= 0 && f < fire_f + 2) ? IN_A : 0); sc_pad(1, 0, 0, 0);
+    if (drive_in > 0 && !fired) SM.bots[1].b.vx = -drive_in;
+    sc_step(); sc_log(&L);
+  }
+  *bounce = L.first[EV_LAND][LAND_BOUNCE] >= 0; *landed = L.first[EV_LAND][LAND_WHEELS] >= 0 || L.first[EV_LAND][LAND_INVERTED] >= 0;
+  return SM.bots[1].inverted;
+}
+static int sc_flip_lowboy(char *msg, int n) {
+  int b1, l1, b2, l2;
+  int stand = flip_chop(0, &b1, &l1), drive = flip_chop(5.0f, &b2, &l2);
+  SC_OK(!stand && l1 && drive, "standing CHOP: inverted %d (0), bounced %d, landed %d; driving in at 5 u/s: inverted %d (1), bounced %d", stand, b1, l1, drive, b2);
+}
+
+/* a BOX at k 0.5 (its front 0.15 out from the flipper, half way along the plate) lands on an edge, bounces
+ * once, and the second landing decides inside 90 frames */
+static int sc_flip_bounce(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_LAUNCH, PRE_LAUNCH, 0);
+  sc_place(0, -1.15f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  sc_log_t L; sc_log_init(&L); int t_launch = -1, t_end = -1; float pitch_at = 0;
+  for (int f = 0; f < 150; f++) {
+    float p = SM.bots[1].b.pitch;
+    sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step(); sc_log(&L);
+    for (int e = 0; e < SNEV; e++) {
+      if (SEV[e].type == EV_LAUNCH && t_launch < 0) t_launch = f;
+      if (SEV[e].type == EV_LAND && SEV[e].b == 1 && SEV[e].zone == LAND_BOUNCE && pitch_at == 0) pitch_at = fabsf(p) * 57.29578f;
+      if (SEV[e].type == EV_LAND && SEV[e].b == 1 && SEV[e].zone != LAND_BOUNCE && t_end < 0) t_end = f;
+    }
+  }
+  SC_OK(L.first[EV_LAND][LAND_BOUNCE] >= 0 && pitch_at >= 60 && pitch_at <= 120 && t_end >= 0 && t_end - t_launch < 90,
+        "first landing at %.0f degrees (60 to 120) is a BOUNCE %d, decided at %d frames after the launch (< 90), inverted %d", pitch_at, L.first[EV_LAND][LAND_BOUNCE] >= 0, t_end - t_launch, SM.bots[1].inverted);
+}
+
 static const scenario_t SCENARIOS[] = {
   { "ghost-sim", sc_ghost_sim },
   { "mound-contact", sc_mound_contact },
   { "corpse-hittable", sc_corpse_hittable },
   { "slide-drives", sc_slide_drives },
+  { "wedge-front-lunchbox", sc_wedge_front_lunchbox },
+  { "wedge-side-lunchbox", sc_wedge_side_lunchbox },
+  { "wedge-front-box-slow", sc_wedge_front_box_slow },
+  { "wedge-vs-wedge", sc_wedge_vs_wedge },
+  { "wedge-under-hover", sc_wedge_under_hover },
+  { "wedge-lowboy", sc_wedge_lowboy },
+  { "push-treads", sc_push_treads },
+  { "dig-in", sc_dig_in },
+  { "flip-inverts-tall", sc_flip_inverts_tall },
+  { "flip-lowboy", sc_flip_lowboy },
+  { "flip-bounce", sc_flip_bounce },
 };
 
 static int scenarios(const char *which) {

@@ -166,9 +166,12 @@ static const float DRIVE_RIDE_LOSS[DR_COUNT] __attribute__((unused)) = { 1.0f, 0
  * heavy tracks hold on, tall legs and a short wheelbase let go) */
 static const float CHASSIS_TIP_DEG[CH_COUNT] __attribute__((unused)) = { 55, 58, 66, 50, 55, 35 };
 static const float DRIVE_TIP_ADJ_DEG[DR_COUNT] __attribute__((unused)) = { -5, 0, 0, 6, 0, -5, 6, 0 };
-/* the flipper tumble rate per chassis, rad/s at k 0.5 (the old flip_odds column, as a rate: a LUNCHBOX goes
- * over from almost any launch, a LOWBOY needs a deep hit on a bot driving in) */
-static const float CHASSIS_TUMBLE[CH_COUNT] __attribute__((unused)) = { 4.5f, 4.2f, 2.7f, 4.5f, 5.0f, 6.3f };
+/* the flipper tumble rate per chassis, rad/s at k 0.5 (the old flip_odds column, as a rate). Over a 0.6 to
+ * 0.7 s flight a LUNCHBOX turns 120 to 240 degrees from anywhere on the plate and lands on its lid; a BOX
+ * goes over only from deep on the plate and lands on an edge from the tip; a LOWBOY needs a deep hit on a
+ * bot driving in. (deep-physics 3.8 had BOX 4.5, LOWBOY 2.7, LUNCHBOX 6.3: a LUNCHBOX turned past 240 and
+ * landed on its back edge, and a standing LOWBOY went over after its bounce) */
+static const float CHASSIS_TUMBLE[CH_COUNT] __attribute__((unused)) = { 3.0f, 4.2f, 1.8f, 4.5f, 5.0f, 5.1f };
 /* the closing speed at which a wedge that rode all the way under a chassis tips it over (u/s); a SHELL never
  * tips (it rolls off), a HOVER never tips (it is carried) */
 #ifndef V_TIP_BOX
