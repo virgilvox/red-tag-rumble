@@ -687,6 +687,14 @@ static void cycle_row(int s, int row, int dir) {
   seat_t *st = &G.seats[s];
   build_t *b = &st->build;
   if (row == ROW_WEAPON && b->drive == DR_MELTY) return;          /* MELTY has no weapon row */
+  if (row == ROW_PAINT) {
+    /* the four schemes, then the same four with the next decal set (3.7): 16 steps round */
+    int np = PAINT_COUNT * DECAL_COUNT, o = wrap(b->paint + b->decal * PAINT_COUNT + dir, np);
+    b->paint = (uint8_t)(o % PAINT_COUNT); b->decal = (uint8_t)(o / PAINT_COUNT);
+    build_changed(s);
+    audio_part(row, b->paint);
+    return;
+  }
   int n = row_count(b, row), cur = build_get(b, row);
   for (int k = 1; k < n; k++) {
     int o = wrap(cur + dir * k, n);
