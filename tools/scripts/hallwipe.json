@@ -1,0 +1,7 @@
+[
+  { "from": 20, "to": 22, "pad": 0, "buttons": ["DOWN"] },
+  { "from": 30, "to": 32, "pad": 0, "buttons": ["DOWN"] },
+  { "from": 40, "to": 42, "pad": 0, "buttons": ["DOWN"] },
+  { "from": 60, "to": 62, "pad": 0, "buttons": ["A"] },
+  { "from": 240, "to": 440, "pad": 0, "buttons": ["B"] }
+]

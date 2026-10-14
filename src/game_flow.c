@@ -37,12 +37,6 @@
 #define FIRST_CARD_S    3.0f        /* the controls card over a pad's first seat of the evening (10.24) */
 #define RIG_COMBO       (IN_SELECT | IN_L3 | IN_R3)
 
-#ifdef RTR_WORLD_COMPILE_ONE
-/* world.c compiles one scene with a camera per call: 0..5 the arenas, 6 the garage (the boot calls it once a
- * frame so the bar moves); without it the whole set compiles on the first boot frame */
-extern void world_compile_one(int step);
-#endif
-
 static const int MODE_MIN_PLAYERS[MODE_COUNT] = { 1, 2, 3, 2, 4, 3 };
 
 static float title_idle, attract_over_t;
@@ -629,11 +623,7 @@ static void boot_update(void) {
   /* the first frame shows the boot screen; from the second, one scene compiles per frame and the bar
    * fills a step at a time (10.1); a few frames after the last step, the title */
   if (G.phase_frames >= 2 && boot_step < BOOT_STEPS) {
-#ifdef RTR_WORLD_COMPILE_ONE
-    world_compile_one(boot_step);
-#else
-    if (boot_step == 0) world_compile_all();
-#endif
+    world_compile_one(boot_step);                /* world.c: 0..5 the arenas, 6 the garage, one scene a frame so the bar moves */
     boot_step++;
     return;
   }

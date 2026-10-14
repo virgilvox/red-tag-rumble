@@ -1,0 +1,21 @@
+[
+  { "from": 30,  "to": 32,  "pad": 0, "buttons": ["A"] },
+  { "from": 60,  "to": 62,  "pad": 0, "buttons": ["A"] },
+  { "from": 70,  "to": 72,  "pad": 1, "buttons": ["A"] },
+  { "from": 110, "to": 112, "pad": 0, "buttons": ["START"] },
+  { "from": 230, "to": 232, "pad": 0, "buttons": ["A"] },
+  { "from": 230, "to": 232, "pad": 1, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 0, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 1, "buttons": ["A"] },
+  { "from": 330, "to": 332, "pad": 0, "buttons": ["RIGHT"] },
+  { "from": 330, "to": 332, "pad": 1, "buttons": ["RIGHT"] },
+  { "from": 700, "to": 1090, "pad": 0, "ly": -20000 },
+  { "from": 700, "to": 1400, "pad": 1, "ly": -20000 },
+  { "from": 800, "to": 900, "pad": 0, "buttons": ["Y"] },
+  { "from": 900, "to": 1000, "pad": 1, "rx": 32767 },
+  { "from": 1100, "to": 1102, "pad": 0, "buttons": ["START"] },
+  { "from": 1230, "to": 1232, "pad": 0, "buttons": ["DOWN"] },
+  { "from": 1260, "to": 1262, "pad": 0, "buttons": ["A"] },
+  { "from": 1300, "to": 1302, "pad": 0, "buttons": ["B"] },
+  { "from": 1330, "to": 1332, "pad": 0, "buttons": ["B"] }
+]

@@ -8,11 +8,11 @@ A red tag on a project means fourteen days and then it is free for the taking or
 
 ## An evening
 
-1. Title. FIGHT for 1 to 4 pads, SOLO against the practice bot, HOW IT WORKS (seven rules cards, about 18 s), HALL OF FAME and SETTINGS. Leave it alone and two house AIs fight in THE BAY behind the menu.
-2. Lobby. Any pad joins with A, B, X, Y or Start. Pick a mode, X flips your stick scheme between ARCADE and TANK, A marks READY, and Start readies you and goes to the garage. Y plays HOW IT WORKS. FILL WITH BOT puts AI seats in the empty chairs. On a cabinet's first evening HOW IT WORKS plays itself once before the lobby; any button skips it.
+1. Title. FIGHT for 1 to 4 pads, SOLO against the practice bot (EASY on a fresh cabinet; hold Y in the garage with Left or Right for MEDIUM or HARD), HOW IT WORKS (seven rules cards, about 18 s), HALL OF FAME and SETTINGS. Leave it alone and two house AIs fight in THE BAY behind the menu.
+2. Lobby. Any pad joins with A, B, X, Y or Start. Pick a mode, X flips your stick scheme between ARCADE and TANK, A marks READY, and Start readies you and goes to the garage. Y plays HOW IT WORKS. FILL WITH BOT puts AI seats in the empty chairs, each with a different bot. On a cabinet's first evening HOW IT WORKS plays itself once before the lobby; any button skips it.
 3. Garage. One panel per seat around a turntable with your bot on it. Spend the tags, lock in with A, or press Start to lock and go.
 4. Arena vote. Six cards; the stick picks, A votes, majority wins, ties go random. The vote closes 2 s after everyone has voted, or at 8 s.
-5. Countdown, then the fight. Each seat gets its own camera: halves for two, quadrants for four, two plus a big map for three, one full view for solo.
+5. Countdown, then the fight. Each seat gets its own camera: halves for two, quadrants for four, two plus a big map for three, one full view for solo. One approach is one hit and no single hit takes more than a fifth of a bot, so a fight runs about 35 to 60 s; the music is a 156 bpm industrial track that brings in a rising riff for the last 20 s or when a bot is under 30 HP.
 6. KO or TIME. A KO goes slow motion on a shared camera; TIME goes to the judges (damage, aggression, control).
 7. Results and the rematch vote: REBUILD, SAME BOTS, NEW ARENA or LOBBY. The evening tally and the hall of fame persist in the cabinet's save. A table that says nothing after a fight goes back to the lobby after 40 s, and an empty lobby back to the title, so an abandoned cabinet returns to the attract on its own.
 
@@ -100,7 +100,8 @@ STATION=1 node tools/shot.mjs ...     # only pad 1 reports connected, as the Ret
 WAV=build/out.wav node tools/shot.mjs ...                      # also write the audio
 SAVE_OUT=build/s.sav node tools/shot.mjs ...                   # write the save region at the end
 SAVE_IN=build/s.sav node tools/shot.mjs ...                    # boot with that save
-build/balance --robin 20                                       # every preset pair on every arena
+build/balance --robin 20                                       # every preset pair on every arena, the AI driving
+node tools/serve.mjs 8794 & node tools/play.mjs 'http://127.0.0.1:8794/?v=1' build/play   # a real Chrome, keyboard only
 ```
 
 `HANDOFF.md` lists every script, tool and check.
@@ -112,6 +113,6 @@ build/balance --robin 20                                       # every preset pa
 
 ## Stack
 
-three.c (three.js r186 in C99) for the 3D, a CPU painted 1280 x 720 HUD composited in a second render pass, Bellows for the live sound effects, baked WAV stems for the music, and a deterministic 60 Hz simulation that compiles natively for balancing. The same `.wasc` runs in the browser, in RetroArch and on the station.
+three.c (three.js r186 in C99) for the 3D, a CPU painted 1280 x 720 HUD composited in a second render pass (only the bands that changed go to the GPU each frame), Bellows for the live sound effects, three songs composed in Bellows and baked to six WAV stems (a 100 bpm garage groove, the 156 bpm arena track with a stomp verse and a breakbeat chorus, a 172 bpm overtime siren), and a deterministic 60 Hz simulation that compiles natively for balancing. The same `.wasc` runs in the browser, in RetroArch and on the station.
 
 MIT licensed. Fonts under the SIL Open Font License (assets/fonts/OFL.txt).

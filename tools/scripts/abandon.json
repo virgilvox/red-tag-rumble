@@ -1,0 +1,12 @@
+[
+  { "from": 30,  "to": 32,  "pad": 0, "buttons": ["A"] },
+  { "from": 60,  "to": 62,  "pad": 0, "buttons": ["A"] },
+  { "from": 70,  "to": 72,  "pad": 1, "buttons": ["A"] },
+  { "from": 110, "to": 112, "pad": 0, "buttons": ["START"] },
+  { "from": 230, "to": 232, "pad": 0, "buttons": ["A"] },
+  { "from": 230, "to": 232, "pad": 1, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 0, "buttons": ["A"] },
+  { "from": 308, "to": 310, "pad": 1, "buttons": ["A"] },
+  { "from": 700, "to": 1000, "pad": 0, "buttons": ["A"], "ly": -32767, "lx": 6000 },
+  { "from": 700, "to": 1000, "pad": 1, "buttons": ["A"], "ly": -32767, "lx": -6000 }
+]

@@ -6,7 +6,9 @@ The complete specification is `docs/design/FINAL-bots.md`. Read section 20 (thin
 
 ## Status
 
-Feature complete and playable from boot to the rematch vote, for 1 to 4 pads, in all six modes and all six arenas. The six subsystem branches (sim, world, draw-fight, draw-menus, audio, ai) are merged on main and their worktrees removed. Three integration stages followed: the phase machine (R3a), the fight feel and the modes (R3b), and a polish pass with these docs (R3c).
+Feature complete and playable from boot to the rematch vote, for 1 to 4 pads, in all six modes and all six arenas. The six subsystem branches (sim, world, draw-fight, draw-menus, audio, ai) are merged on main and their worktrees removed. Three integration stages followed: the phase machine (R3a), the fight feel and the modes (R3b), and a polish pass with these docs (R3c). A five lens audit (models, controls, fight, menus, robustness) then ran against that build and five fix branches were merged in October 2026 (R4): sim-feel (steering sign, hit retune to 35 to 60 s fights, EASY practice bot, hover drift and skirt, chase camera lift, fight fixtures from the balance tool), models-fx (wedge winding, every weapon seated on every chassis, SHELL and FRAME dressing, the FREE PILE mound and the DOCK deck, streak sparks, soft smoke, warm flash, fire on a BURNING bot, the boot warm up compile), menus-flow (the boot bar, lobby and garage prompts, the 3 player match card, pause arming, the abandoned cabinet path, the first time teaching beats, Enter everywhere), perf-robust (banded HUD uploads through a ring of three GL textures, the 30 fps fallback release, the rebuild leaks, the log diet, -Wshadow) and music (three new songs, the stingers on their palette, the master off the limiter, six stems in 4.36 MB).
+
+What changed for a player in R4, in one list: stick or d-pad right turns the bot right under every camera; a fresh save's practice bot is EASY and a first SOLO fight lasts about a minute with the player at 85 HP after ten seconds; one approach is one hit and no hit takes over 20 percent of max HP; FILL WITH BOT seats get different bots; Start (Enter) always does something; the lobby says A marks READY; the rematch menu goes to the LOBBY on a silent table and an empty lobby returns to the title; the rules flash plays itself once on a fresh save; the music is an industrial fight score with a 156 bpm arena track and a riser for the last 20 s.
 
 - `src/game_flow.c` runs the phase machine of 10.1: boot, title with the attract fight, settings, hall of fame, the rules flash, lobby, garage, arena vote, countdown, fight with pause, KO, judges, results and the rematch vote. Every phase change logs `[phase] N at frame F`.
 - `src/game.c` keeps the state that has no renderer in it (the save struct with its crc, seats, the settings rows) so `tools/hudtest.c` still links it natively. Keep renderer, camera and audio calls out of it.
@@ -22,9 +24,9 @@ Feature complete and playable from boot to the rematch vote, for 1 to 4 pads, in
 |---|---|---|
 | Builds | `./build.sh`, `./build.sh balance`, `./build.sh music`, `HUD_DIV=2 ./build.sh`, the `RTR_FAKE_HUD`, `RTR_FAKE_MENUS` and `RTR_FAKE_SIM` probe builds | no warnings; no missing render state in any rig run |
 | House lint | `./build.sh lint`, and the hackerspace deliverable lint over content.h, README.md and HANDOFF.md | zero findings |
-| Determinism | `build/balance --hashcheck`; the cart's `[sim] f= h=` lines against `build/balance --replay` for drive-bay and 2p-fight | identical |
+| Determinism | `build/balance --hashcheck`; the cart's `[sim] f= h=` lines against `build/balance --replay` for the six drive laps, dpad-turn, 2p-fight and 4p-fight (the replay emulates main.c's frame clock, mini-KO slow motion included) | identical |
 | Arenas | `build/balance --check-arenas` | PASS on all six |
-| Balance | `build/balance --robin 20` (builtin driver) | PASS: every preset between 35 and 65 percent, no stalls, every KO cause occurs |
+| Balance | `build/balance --robin 20` (driver=ai is the default since R4) | every preset between 35 and 65 percent, mean fight 39.8 s (min 5.8, max 75), no stalls, every KO cause occurs, WEDGE over HORIZONTAL 71 percent; two guardrails still print FAIL: HOVER against TREADS in THE BAY (68 percent, must be under 45) and one shoving match a run pinned on a wall long enough for the sim's [stuck] nudge (about 40 frames of 8640 matches). See risk 1 |
 | Parts | `build/test_parts` | PASS |
 | AI | `build/aitest` | 30 of 30 situations |
 | Save | `SAVE_OUT` after `flow.json`, then `SAVE_IN` into `menu.json` | the hall of fame shows the fight's records after a cold boot (196 byte save; rechecked in the perf pass: MATCHES 1, the ROLL OUT win and the streak show, a cold boot shows zeros) |
@@ -33,15 +35,16 @@ Feature complete and playable from boot to the rematch vote, for 1 to 4 pads, in
 | Render fallback | `render_measure` on the host delta | trips after 30 frames over 20 ms, releases after 3 s at 60 Hz (doubling on a re-trip in the same phase), resets on every phase change; never trips in the rig (fixed 16.7 ms deltas) |
 | Warnings | `-Wall -Wshadow` in build.sh (cart and balance); a probe compile of every src/*.c with `-Wextra -Wshadow -Wno-unused-parameter` | zero |
 | Sound | every SFX of the 11.3 table has a call site (menus, lock, count, horn, hits by band, clash, launch, klaxon variants, KO); music modes, slow-mo, tension, duck, whines and crowd follow the phases | wired; `WAV=` captures checked in R3b |
-| Screens | the R3c screenshot pass (title, attract, lobby, garage 2p and 4p with OVER BUDGET, vote, countdown, fights 1p to 4p, a big hit, KO, results, rematch, settings, hall of fame, the seven rules cards, the controls card, pause) | looked at; fixes listed in the R3c commit |
+| Screens | the R4 rig pass: boot bar, rules flash, lobby 1 2 and 4 seats, garage 2p and 4p, the garage part sweep (`garage-parts.json`, every chassis drive weapon armour paint and 2ND on four turntables), vote, countdown, fights 1p 2p and 4p, hit bursts, the KO card, results, the rematch menu, settings, hall of fame, rules card 1, the Y card, the nudge, pause | looked at; no missing render state, no [stuck] in any fixture |
+| Keyboard play | `node tools/play.mjs http://127.0.0.1:8794/?v=1 out` against `node tools/serve.mjs 8794`: a real Chrome, keyboard only, title, rules, lobby, garage (two row edits), vote, fight (Up, Left, Right, Down, Z, Q), pause, results, rematch | the bot turns right on Right; a first SOLO fight on EASY ran 64 s with the player at 85 HP after ten seconds; `[music] mode GARAGE`, `mode off`, `mode ARENA`, `mode OVERTIME` and `on the beat OVERTIME` in the log |
 
-Robin 20 with the builtin driver (overall win percent, both sides, every arena, hazards on and off):
+Robin 20 with the AI driver (overall win percent, both sides, every arena, hazards on and off, 8640 matches):
 
 | ROLL OUT | LAUNCH | CHOP | STOMP | TOAST | SPIN |
 |---|---|---|---|---|---|
-| 41.8 | 43.8 | 44.1 | 37.6 | 49.6 | 63.6 |
+| 35.3 | 64.4 | 36.9 | 50.1 | 62.3 | 48.5 |
 
-WEDGE beats HORIZONTAL 82 percent. The two HOVER against TREADS guardrails are printed as GUARD with this driver (HOVER wins THE BAY 100 percent and THE LASER ROOM 8 percent).
+Mean fight length per preset: ROLL OUT 38.3 s, LAUNCH 36.5, CHOP 31.7, STOMP 33.4, TOAST 50.4, SPIN 38.3; per arena BAY 44.5, LASER 37.4, PILE 32.8, DOCK 41.0, SHOP 40.5, ROOF 40.6. 1235 of 8640 went to the judges. WEDGE beats HORIZONTAL 71 percent. HOVER beats TREADS 75 percent in THE LASER ROOM (guardrail passes) and 68 percent in THE BAY (guardrail fails, see risk 1). `driver=builtin` still runs the old scripted driver.
 
 ## How to run each tool
 
@@ -59,6 +62,9 @@ build/balance --replay tools/scripts/drive-bay.json --setup "<the [sim] setup li
 build/balance --trace bay "ROLL OUT" SPIN 3000
 build/balance --map bay out.ppm tools/scripts/drive-bay.json
 build/balance --make-drive bay tools/scripts/drive-bay.json
+build/balance --make-fight tools/scripts/2p-fight.json --setup "<the [sim] setup line>"   # record a real AI fight as a rig fixture
+build/balance --replay tools/scripts/dpad-turn.json --setup "..." verbose=2              # verbose=2 prints the headings
+node tools/serve.mjs 8794 & node tools/play.mjs 'http://127.0.0.1:8794/?v=1' build/play  # a real Chrome, keyboard only, PNGs and the log
 
 cc -std=gnu11 -Wall -Wextra -I src tools/test_parts.c -o build/test_parts && build/test_parts
 cc -std=gnu11 -O2 -Wall -DRTR_HEADLESS -I src src/sim.c src/bot.c src/arena.c src/ai.c tools/aitest.c -lm -o build/aitest && build/aitest
@@ -82,12 +88,16 @@ Scripts in `tools/scripts/` (frame numbers at seed 7):
 | `menus.json` | title, lobby, two seats, garage picks, vote, countdown (lobby 100, garage 180, vote 340, countdown 560) |
 | `menu.json` | settings (140), hall of fame (220), the seven rules cards (285 to 525) |
 | `overbudget.json` | seat 1 builds 21 tags: OVER BUDGET BY 1 at 296 |
-| `2p-fight.json` | the 15.5 2 player session: fight from 668, KO at 2234, results 2385, rematch 2745 |
+| `2p-fight.json` | the 15.5 2 player session, recorded by `--make-fight` (ROLL OUT vs CHOP, THE LASER ROOM): fight from 668, KO at 1534, results 1684, rematch 2044, lobby after the silent table |
 | `pause.json` | 2p-fight with a pause at 1600 and the controls card at 1660 |
-| `4p-fight.json` | four seats in THE BAY: garage 260, mini-KOs 1525 and 1733, final KO 2765 |
+| `4p-fight.json` | four seats in THE BAY, recorded by `--make-fight`: garage 240, vote 249, fight 668, two mini-KOs, final KO 2460, results 2610 |
+| `keyboard-solo.json` | pad 0 with d-pad bits and buttons only (run with `STATION=1`): garage 111, vote 259, fight 661, the EASY practice bot, KO at 2971, results 3121 |
+| `dpad-turn.json` | the steering proof: a d-pad lap under ONE CAMERA in THE BAY, Right from 760, Left from 881; the bot turns clockwise on screen and `--replay ... verbose=2` prints the heading falling under RIGHT |
+| `garage-parts.json` | four seats step every chassis, drive, weapon, armour, paint and 2ND with RT test fire; the shot frames are in `garage-parts.frames` |
+| `abandon.json`, `fighty.json`, `garage3.json`, `rematch.json`, `hallwipe.json` | the abandoned cabinet path (rematch to lobby after 40 s of silence, lobby to the title), the fight Y card, the right stick nudge and the pause (pause 1100, controls card 1260), the 3 player match card steppers, the touched rematch menu, the hall of fame wipe |
 | `feel.json` | the feel gate: a 14 damage WEDGE ram at 863 |
 | `2p-time.json` | a 60 s fight to TIME (4240) and the judges |
-| `solo.json`, `3p-fight.json` | the 1 player full view and the 3 player layout |
+| `solo.json`, `3p-fight.json` | the 1 player full view (the automatic rules flash shifts it: garage 121, lock 198, vote 217) and the 3 player layout |
 | `mode-flip`, `mode-lbs`, `mode-hill`, `mode-2v2`, `mode-tourn`, `mode-tourn3` | each mode played to a result |
 | `flow.json` | a 60 s fight through KO, results and the rematch menu |
 | `drive-<arena>.json` | the six 90 s solo laps over every hazard (PRACTICE=off, replayable by balance) |
@@ -96,12 +106,27 @@ Under the rig a `"practice": 0` entry makes `tools/shot.mjs` hold SELECT, L3 and
 
 ## Risks
 
-1. Balance with the AI driving. `build/balance --robin 20 driver=ai` fails: SPIN about 83, TOAST 64, ROLL OUT 26 and STOMP 25 percent, and 40 stuck frames. MEDIUM against MEDIUM is close to deterministic, so most pairings land at 0 or 100 percent; MELTY damage, spin bleed and tip speed moved SPIN by only a few points in a sweep. The fix is in ai.c (how the AI approaches and escapes a MELTY, how slow builds close distance) before parts.h costs. The default robin, which A18 names, passes.
+1. Balance. `build/balance --robin 20` prints FAIL for two guardrails. HOVER (TOAST) beats TREADS (ROLL OUT) 68 percent in THE BAY where spec 8.6 wants under 45: the hover floats over the pit, the wedge cannot get under a hover, so only the two pulverizers and OPS can hurt it there, and the AI's ROLL OUT does not shove it under the hammers often enough; the drift, the pinched skirt, the 1.5x knock, the shorter flame cone and the armoured burn were all tried. The fix is in ai.c (a shove toward a pulverizer when the enemy is a HOVER) before any table number. And one shoving match a run (about 40 of 8640 matches times 4500 frames) stays pinned on a wall for the 120 frames of the sim's wall wedge nudge: the AI's own stuck detector shares the 120 frame window and the pin rule wakes OPS at 240, so a true corner pin logs once; shortening the AI window to 90 frames when wall pinned only moved the pin to another pair. Everything else in the robin passes.
 2. Pi performance is unmeasured. The 30 fps render fallback exists (render_measure: on after 30 frames over 20 ms, off after 3 s at 60 Hz, reset per phase; it reads the host delta, since a cart has no clock of its own and GPU time only shows as missed vsyncs), but nothing has run on the station yet. Check THE SHOP in quadrants first, and read the `[perf]` line: `half=1` for long stretches of a fight means the HUD compare plus the draw calls still do not fit; the next cut is `HUD_DIV=2`.
-2a. Four GL programs still link during play rather than at boot (three when the first bot appears on a lobby turntable, one at the first countdown): `world_compile_all` compiles the scenes without bots, debris or fx. A warm up that builds one bot of every material bearing part, shows the debris and one spark and one puff before the compile, then hides them, belongs in world.c with fx.c's help.
-3. The music set is 5.79 MiB against the 4.4 MB line of section 13. `MUSIC_RATE=22050` in the bake or dropping arena_lead2 brings it down.
+3. The music ships as six 22050 Hz mono stems (garage, overtime, arena_base, arena_stomp, arena_break, arena_riff), 4.36 MB, inside the 4.4 MB line of section 13; the 11.2 structure (INTRO, BUILD, DROP, DROP2 at 150 bpm) was replaced on purpose by a 156 bpm STOMP verse and BREAK chorus with a riser riff that `audio_tension` fades in under 30 HP and in the last 20 s of a timed fight. Nobody has listened to it: `./build.sh music` renders `build/preview-garage.wav`, `preview-arena.wav` and `preview-overtime.wav` (20 s each, the song under the hit SFX through the master chain) for a human audition. HIT_LIGHT sits only 3 dB over the arena music peak (it is the tap band); the spinner whine fills the floor to about -7 dBFS in a spinner fight (the knob is the whine gain in SfxSpan).
 4. KING OF THE HILL can run long in wall time: mini-KO slow motion stretches it, and idle pads respawn and get counted out in a loop.
 5. The OPS-driven final is wired (sim_ops_driven, the driver's and gunner's pads) but no script drives OPS.
+6. Small rough edges seen in the R4 pass and left: the lock confetti plays over the AI seat's panel at the garage open (a spray of pixels across its rows for a second); the first join controls card covers that seat's lobby card or garage panel for 3 s; the rematch menu highlights the auto pick row (LOBBY IN n) while each seat's cursor chip sits on its own row, which reads oddly to a lone player; the 4p garage shortens some option names (ALUMIN, FOUR WH, HORIZ); the PAINT row label says SCHEME n while Left and Right now walk 16 scheme and decal pairs.
+
+## Deviations from the spec
+
+Numbers the R4 pass changed from the FINAL-bots tables on purpose; the spec in the planning folder has not been rewritten.
+
+- Damage: base damages one notch under the table (HORIZ 22, DRUM 17, HAMMER 20, SPIKE 15, MELTY 12 plus 3 self, FLAME 2 per 30 frames with a 1.5 u cone and a 1 dps burn that does not re-light and skips armoured bots, CRUSHER 15, SAW 4); no hit over 20 percent of max HP (`HIT_CAP`), with the bands tap 1 to 5, hit 6 to 10, heavy 11 to 17, huge 18 and up and the BIG HIT stinger at 18 (`sim.h BAND_*_MIN`, `juice.h`); flip landing 5.
+- Spinners hit only above 0.5 spin and spend 0.7 (HORIZ), 0.6 (DRUM) or all (MELTY) spin per hit, 30 frame cooldown (90 for MELTY); tip speeds 3.6 HORIZ, 3.0 DRUM and MELTY, 4.0 for the hammer, spike and flipper swings; closing clamp 0.4 to 1.3.
+- Ram base 9 with a 90 frame cooldown and a 1.5 u/s floor; clashes at 0.4 of the hit once per 90 frames; push is traction squared times mass times 8 (the spec formula let a TWO WHEEL box out push TREADS).
+- HOVER drifts (weak braking and lateral thrust), takes 1.5x knock, has push 0 and a pinched skirt for 24 frames after contact; an undriven bot's yaw rate decays.
+- Self damage is never charged against OPS, a carried bot's weapon is inert, OPS never takes a KO credit.
+- AI: EASY runs 0.75 throttle, no lead, misses half its tap windows, aims 0.7 u wide, never boosts or evades and backs off 90 frames after every hit it lands; MEDIUM leads 0.3 s; HARD 0.5 s with no hesitation. A fresh save's practice bot is EASY.
+- Camera: the chase camera stays 1.0 u inside the lexan (spec 9.2 says 0.4) so the shelves behind the wall stay out of a spawn camera's frame; the occluder lift, the side view while carried and the OPS push out are additions.
+- Fx: the impact flash is 0.55 times the band size in fx.c (juice.h's sizes are untouched), smoke is soft discs, sparks are streaks.
+- Music: see risk 3. SFX: EV_SPIN_WALL plays the 0.6 CLASH variant, EV_HAZ_HIT picks the heavy clang at 15 damage and over, an inverted bot's count tick is the KLAXON low tick.
+- Logs: `[hit]` and `[rumble]` per event only under `-DRTR_TRACE`; the shipped cart prints one `[hits]` summary per sim second, `[perf]` every 5 s, `[mem]` at every countdown and `[music]` at every mode switch.
 
 ## The header contract
 
@@ -131,7 +156,7 @@ The headers in `src/` are the contract between the subsystem agents, who impleme
 | `src/draw_menus.c`, `src/draw_menus.h` | menus (11) | boot, title, lobby, garage, vote, countdown, settings, hall, rules flash, controls card |
 | `src/game.h`, `src/game.c`, `src/game_flow.c` | game (10, 11, 16) | game.c holds renderer-free state; the phase machine is game_flow.c |
 | `src/content.h` | content (22); every agent adds its strings here | |
-| `src/audio.h`, `src/audio_band.cpp`, `src/audio_pcm.c`, `tools/bake_music.cpp` | audio (17) | complete; music ships as eight baked stems |
+| `src/audio.h`, `src/audio_band.cpp`, `src/audio_pcm.c`, `tools/bake_music.cpp` | audio (17) | complete; music ships as six baked stems (the bake prints peak, true peak, RMS and a low mid high split per file) |
 | `tools/balance.c`, `tools/scripts/*.json` | balance (19), arena (4), integration (18) | `--parts` prints every preset's cost, bars and name |
 | `tools/lint.sh` | content (22) | |
 | `HANDOFF.md`, `README.md` | integration | |
@@ -161,7 +186,7 @@ The perf log: the station build prints `[perf] f= host_ms= half= hud_calls= hud_
 
 Every build must pass with no new warnings. Look at every screenshot you take. If the console prints a missing render state (`t3_renderer_generated_missing`, logged every 120 frames), append it to `tools/states.txt`, regenerate, commit.
 
-The rig scripts in `tools/scripts/` are shared: `2p-fight.json` (seats 1 and 2, ROLL OUT and CHOP, THE LASER ROOM, drives and hits), `4p-fight.json` (four seats, THE BAY, drives, taunts, a brake and a boost) and `keyboard-solo.json` (pad 0 with d-pad bits and buttons only, as the station keyboard: lobby, a Y tap and two arrow rows in the garage, Start to lock and go, A on the vote, then a d-pad drive with a flipper and a boost). Their frame numbers are the acceptance frames of spec section 18, with two shifts since the controls pass: A locks on the press (no 1 s hold), so the garage shots of the 2p and 4p scripts are at 240 and the vote opens at 249; and nobody has voted when the vote opens, so every script presses A on the vote (308 for the 230 lock scripts) to keep the fight start at 668. Seat 2 of the 2p scripts taps Y at 200 to reach CHOP; Start in the garage locks and starts.
+The rig scripts in `tools/scripts/` are shared: `2p-fight.json` (seats 1 and 2, ROLL OUT and CHOP, THE LASER ROOM), `4p-fight.json` (four seats, THE BAY) and `keyboard-solo.json` (pad 0 with d-pad bits and buttons only, as the station keyboard: lobby, a Y tap and two arrow rows in the garage, Start to lock and go, A on the vote, then a d-pad drive with a flipper and a boost). Their frame numbers are the acceptance frames of spec section 18, with two shifts since the controls pass: A locks on the press (no 1 s hold), so the garage shots of the 2p and 4p scripts are at 240 and the vote opens at 249; and nobody has voted when the vote opens, so every script presses A on the vote (308 for the 230 lock scripts) to keep the fight start at 668. The fight segments of the 2p and 4p scripts are generated by `build/balance --make-fight` from the cart's `[sim] setup` line (seed 1401181144 under the rig) so a real AI fight with hits and a KO replays bit exact; regenerate them after any sim or AI change or their hashes drift from the cart. The automatic rules flash on a fresh save plays after FIGHT or SOLO on the title, so every script's A at 60 skips it and the later frames stand; scripts with no input after the fight reach the lobby 40 s after the last input.
 
 ## Platform facts
 
