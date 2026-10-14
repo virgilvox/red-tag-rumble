@@ -59,6 +59,11 @@ typedef struct {
   float mass, inv_mass, inertia, inv_inertia;
   float hl, hw;             /* half length (local z), half width (local x); hl is the radius for SH_CIRCLE */
   uint8_t shape;            /* SH_BOX or SH_CIRCLE */
+  /* DEEP (docs/design/DEEP-plan.md 2.1): orientation and the underride geometry */
+  float pitch, wp, roll, wr;          /* pitch about local x, nose up positive; roll about local z, left up positive; rates rad/s */
+  float pp, pr;                        /* previous step pitch and roll, interpolated like h */
+  float clr, hgt, lip_f, lip_b;        /* ground clearance, chassis height, front and back lip heights over the floor (0 = no wedge on that edge) */
+  float inertia_p, inv_inertia_p;      /* pitch inertia m (hl^2 + (hgt/2)^2) / 3; OPS has inverse 0 */
 } body_t;
 
 typedef struct {
@@ -87,6 +92,14 @@ typedef struct {
   int16_t haz_t[MAX_HAZ];                   /* per hazard contact or cooldown counter */
   float drive_yaw; uint8_t strafe_held;     /* HOVER and MELTY: the camera yaw latched when the stick left the dead zone */
   int16_t skirt_t;                          /* HOVER: frames since a bot pressed on the skirt; the cushion is pinched and the drive is weak */
+  /* DEEP 2.2: the underride (ride_by and riding are slot + 1, 0 for none) */
+  uint8_t ride_by, riding, ride_edge, wheel_flag; int16_t ride_t; float ride_up, ride_s, ride_cl_peak;
+  /* DEEP 2.2: per panel pools, PN_FRONT..PN_MOUNT; 0 means no pool (AR_NONE) */
+  float panel_hp[6]; int16_t panel_wear_cd[6];
+  /* DEEP 2.2: contact and status timers the renderer and the band read */
+  int16_t grind_t, slide_t, tread_hit, dig_t, dig_cd; float grind_x, grind_z; int8_t wheel_hit_side;
+  /* DEEP 2.2: HUD readiness, written every step, never read by the sim */
+  float ram_closing; int16_t hit_flash_t, spent_t; uint8_t weapon_ready, can_self_right, self_right_key, last_hit_reason;
 } bot_t;
 
 typedef struct { float x, z, y, vx, vz, vy, spin; int16_t life; uint8_t kind, colour, pickup, owner, bounced, panel; } debris_t;   /* panel: PN_* for DB_PANEL */
@@ -94,10 +107,40 @@ typedef struct { float x, z, y, vx, vz, vy, spin; int16_t life; uint8_t kind, co
 typedef enum { EV_HIT, EV_CLASH, EV_WALL, EV_RAM, EV_LAUNCH, EV_LAND, EV_INVERT, EV_SELFRIGHT, EV_SHED, EV_BURST,
                EV_KO, EV_MINI_KO, EV_COUNT_TICK, EV_HAZ_TELL, EV_HAZ_HIT, EV_OPS_WAKE, EV_OPS_LEAVE, EV_OPS_LINE,
                EV_WEAPON_TELL, EV_TAUNT, EV_BOOST, EV_HILL_MOVE, EV_RED_TAG, EV_PICKUP, EV_NOT_VACUUM,
-               EV_BENCH_BREAK, EV_BUMPER_BREAK, EV_SPIN_WALL, EV_CLOSING, EV_STUCK, EV_HILL_SCORE, EV_RESPAWN, EV_TYPE_COUNT } ev_type_t;
-/* a is the attacker or subject bot, b the victim or the hazard index; zone is the
- * hit zone times 10 for hits, the panel for EV_SHED, the KO cause for EV_KO */
-typedef struct { uint8_t type, a, b, zone; float x, z, y, dmg, nx, nz; } event_t;
+               EV_BENCH_BREAK, EV_BUMPER_BREAK, EV_SPIN_WALL, EV_CLOSING, EV_STUCK, EV_HILL_SCORE, EV_RESPAWN,
+               /* DEEP 2.3, appended */
+               EV_UNDERRIDE, EV_RIDE_END, EV_WEDGE_CLASH, EV_WHEEL_HIT, EV_PANEL_WEAR, EV_SCRAPE, EV_GRIND,
+               EV_BURN_START, EV_BURN_END, EV_SPIN_CHANGE, EV_SLIDE, EV_LIFT, EV_LIFT_DROP, EV_FALL, EV_TYPE_COUNT } ev_type_t;
+/* a is the attacker or subject bot, b the victim or the hazard index; zone is the hit zone times 10 for hits,
+ * the panel for EV_SHED, the KO cause for EV_KO, and the per event code of the enums below otherwise.
+ * DEEP 2.3: panel is the PN_* the contact landed on; weapon is WP_* or an EVW_* sentinel; flags are EVF_*;
+ * reason is HIT_WHY_*; speed is the closing speed (u/s) or the spin before a change; j is the impulse, the
+ * launch vy or the pitch rate, per the table in the plan. Unset fields are 0. */
+typedef struct { uint8_t type, a, b, zone; float x, z, y, dmg, nx, nz;
+                 uint8_t panel, weapon, flags, reason; float speed, j; } event_t;
+/* event_t.weapon beyond the WP_* table */
+enum { EVW_MELTY = WP_COUNT, EVW_HAZARD, EVW_OPS, EVW_LAND, EVW_WALL, EVW_NONE = 255 };
+/* event_t.flags */
+#define EVF_CORPSE   1    /* the victim is a counted out or flipped out corpse: dmg 0, no tallies */
+#define EVF_DEFLECT  2    /* a spinner, saw or spike glanced off a wedge front (loc 0.4) */
+#define EVF_WHEEL    4    /* the contact was on a wheel, track or leg station */
+#define EVF_STRIPPED 8    /* the panel there is gone: reduction 0, loc 1.25 */
+#define EVF_TOP      16   /* the TOP panel: hammer, pulverizer, drop, landing on a bot, crusher hold */
+/* event_t.reason: the one word the HUD shows under a landed number (priority order in the plan) */
+enum { HIT_WHY_NONE, HIT_WHY_FRONT, HIT_WHY_WEDGE, HIT_WHY_SPINNING_DOWN, HIT_WHY_SHELL, HIT_WHY_ARMOUR,
+       HIT_WHY_WALL, HIT_WHY_EXPOSED, HIT_WHY_STRIPPED, HIT_WHY_WHEEL, HIT_WHY_COUNT };
+/* EV_WEAPON_TELL zone */
+enum { TELL_WINDUP, TELL_HAMMER_MISS, TELL_DIG_IN, TELL_SPIKE_OUT, TELL_SPIKE_BACK, TELL_CLAMP_START, TELL_CLAMP_BITE,
+       TELL_CLAMP_RELEASE, TELL_FLAME_ON, TELL_FLAME_OUT, TELL_FLIPPER_RESET, TELL_SAW_ON, TELL_SAW_OFF, TELL_COUNT };
+/* zones of the other events */
+enum { RIDE_SLIP, RIDE_BACKED_OFF, RIDE_TIPPED, RIDE_CARRIED_OFF, RIDE_OPS };      /* EV_RIDE_END */
+enum { LAUNCH_FLIPPER, LAUNCH_RAMP, LAUNCH_WEDGE, LAUNCH_DRUM };                    /* EV_LAUNCH */
+enum { LAND_WHEELS, LAND_INVERTED, LAND_BOUNCE, LAND_ON_BOT };                      /* EV_LAND */
+enum { INV_FLIPPER, INV_WEDGE, INV_HAZARD, INV_ROLL };                              /* EV_INVERT */
+enum { SPIN_LOST_HIT, SPIN_LOST_CLASH, SPIN_LOST_WALL, SPIN_ARMED, SPIN_LOST_STUN };/* EV_SPIN_CHANGE */
+enum { FALL_ROOF, FALL_PIT };                                                       /* EV_FALL */
+enum { SCRAPE_FLOOR, SCRAPE_WALL };                                                 /* EV_SCRAPE */
+enum { GRIND_START, GRIND_END, GRIND_TICK };                                        /* EV_GRIND */
 
 /* active and tell are this step's phase (also set by a seat or auto fire); fire_t counts a fired
  * burst down; cooldown is the seat or auto cooldown; hp is a roof bumper's hp (p1); seat is the
@@ -160,6 +203,22 @@ typedef struct {
 /* count-out and deck count frames (2.7, 6.2) */
 #define COUNTOUT_FRAMES 600
 #define DECK_FRAMES     600
+
+/* DEEP 2.4: balance knobs the HUD reads (moved from sim.c; the -D overrides stay) */
+#ifndef SPINNER_HIT_MIN
+#define SPINNER_HIT_MIN 0.5f
+#endif
+#ifndef RAM_MIN_CLOSING
+#define RAM_MIN_CLOSING 1.5f
+#endif
+#ifndef RAM_CD
+#define RAM_CD 90
+#endif
+/* DEEP 2.4: derived state every branch can link against */
+static inline float sim_spin_energy(const bot_t *b) { return b->spin * b->spin; }
+static inline int   sim_ridden(const bot_t *b) { return b->ride_by != 0; }
+/* DEEP 2.4: the thrown track (physics 3.10), after the existing DB_* kinds */
+enum { DB_TREAD = DB_BUMPER + 1 };
 
 /* -- API, the whole surface ---------------------------------------- */
 void     sim_init(match_t *m, const match_setup_t *s);

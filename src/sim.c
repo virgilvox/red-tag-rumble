@@ -34,10 +34,9 @@
 #define SPIN_BLEED_MELTY 1.0f
 #endif
 /* a ram is an event, not a drumbeat: one per victim per RAM_CD frames (the spec's 30 let a wedge
- * bounce a bot ten times in ten seconds); RAM_BASE plus RAM_BASE by closing speed (the spec's 10 + 10) */
-#ifndef RAM_CD
-#define RAM_CD 90
-#endif
+ * bounce a bot ten times in ten seconds); RAM_BASE plus RAM_BASE by closing speed (the spec's 10 + 10).
+ * RAM_CD and RAM_MIN_CLOSING (the closing speed floor; the spec's 2.0 let a TREADS wedge push a backing
+ * bot all day without a single ram) are in sim.h (DEEP 2.4) */
 #ifndef RAM_BASE
 #define RAM_BASE 9.0f
 #endif
@@ -49,11 +48,6 @@
  * CLASH_FRAC of the hit it would have dealt and the pair cannot clash again for CLASH_CD frames */
 #ifndef MELTY_HIT_CD
 #define MELTY_HIT_CD 90
-#endif
-/* the ram's closing speed floor (the spec's 2.0 let a TREADS wedge at 3.8 u/s push a backing bot all day
- * without a single ram) */
-#ifndef RAM_MIN_CLOSING
-#define RAM_MIN_CLOSING 1.5f
 #endif
 #ifndef CLASH_FRAC
 #define CLASH_FRAC 0.4f
@@ -89,10 +83,8 @@
 #endif
 /* a HORIZONTAL or DRUM hits only at this much spin (the spec's 0.3 let a spent disc keep tapping
  * for 1 to 4 damage every half second; a hit spends SPIN_BLEED, so one approach is one hit and the
- * next needs a visible spin up). The spun down zone of 4.7 still opens under 0.3 */
-#ifndef SPINNER_HIT_MIN
-#define SPINNER_HIT_MIN 0.5f
-#endif
+ * next needs a visible spin up). The spun down zone of 4.7 still opens under 0.3. SPINNER_HIT_MIN is
+ * in sim.h (DEEP 2.4) so the HUD reads the same number */
 
 /* -- the trig table (4.2) ----------------------------------------- */
 /* 1024 entries over a full turn, built once with a double precision series so
@@ -182,12 +174,12 @@ void sim_event(match_t *m, const event_t *e) {
 }
 
 static void ev_simple(match_t *m, int type, int a, int b, int zone, float x, float z, float y) {
-  event_t e = { (uint8_t)type, (uint8_t)a, (uint8_t)b, (uint8_t)zone, x, z, y, 0, 0, 0 };
+  event_t e = { (uint8_t)type, (uint8_t)a, (uint8_t)b, (uint8_t)zone, x, z, y, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
   sim_event(m, &e);
 }
 
 static void ev_hit(match_t *m, int type, int a, int b, float zone, float x, float z, float y, float dmg, float nx, float nz) {
-  event_t e = { (uint8_t)type, (uint8_t)a, (uint8_t)b, (uint8_t)(zone * 10.0f + 0.5f), x, z, y, dmg, nx, nz };
+  event_t e = { (uint8_t)type, (uint8_t)a, (uint8_t)b, (uint8_t)(zone * 10.0f + 0.5f), x, z, y, dmg, nx, nz, 0, 0, 0, 0, 0, 0 };
   sim_event(m, &e);
 }
 
