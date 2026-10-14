@@ -296,7 +296,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
   float dist = e ? len2(e->x - mx, e->z - mz) : 1e9f;
   int my_spinner = weapon_spinner(me->build.weapon) || me->build.drive == DR_MELTY;
   float my_spin = me->spin;
-  int ready_bonus = 0;
+  int ready_bonus = 0, edge_hold = 0;
 
   /* ATTACK */
   if (e) {
@@ -358,10 +358,28 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     if (a->backoff_t > 0 && dist > 4.0f) { s->tx[GOAL_EVADE] = mx + dx * 1.0f; s->tz[GOAL_EVADE] = mz + dz * 1.0f; }
   }
 
+  /* a practice bot (EASY, and MEDIUM against a person) never shoves a person toward an open edge: with the
+   * person within 4 u of a drop and me on the far side of them, my charge runs straight at the drop, so I
+   * hold off and circle until they have come back in (THE ROOF used to end a first fight OFF THE ROOF in
+   * 14 s with no exchange) */
+  if (e && ar->open_mask && skill_of(a)->backoff > 0 && !m->bots[a->target].is_ai && !m->bots[a->target].is_ops) {
+    float hw = ar->w * 0.5f, hd = ar->d * 0.5f;
+    float ux = e->x - mx, uz = e->z - mz; norm2(&ux, &uz);
+    int at_drop = 0;
+    if ((ar->open_mask & OPEN_PX) && hw - e->x < 4.0f && ux > 0.3f) at_drop = 1;
+    if ((ar->open_mask & OPEN_NX) && e->x + hw < 4.0f && ux < -0.3f) at_drop = 1;
+    if ((ar->open_mask & OPEN_PZ) && hd - e->z < 4.0f && uz > 0.3f) at_drop = 1;
+    if ((ar->open_mask & OPEN_NZ) && e->z + hd < 4.0f && uz < -0.3f) at_drop = 1;
+    if (at_drop) {
+      s->score[GOAL_ATTACK] = 0; edge_hold = 1;
+      if (s->score[GOAL_EVADE] < 0.95f) s->score[GOAL_EVADE] = 0.95f;
+    }
+  }
+
   /* HAZARD PUSH */
   if (e && !e->is_ops) {
     const bot_t *eb = &m->bots[a->target];
-    if (push_of(me) > push_of(eb)) {
+    if (push_of(me) > push_of(eb) && !edge_hold) {
       int best = -1; float bd = 1e9f;
       for (int i = 0; i < ar->nhaz && i < MAX_HAZ; i++) {
         const hazard_def_t *h = &ar->haz[i];
@@ -474,9 +492,10 @@ static void ops_goals(ai_t *a, const match_t *m, scores_t *s) {
   if (state == OPS_PARKED) {
     /* the wake triggers, read the same way the sim reads them */
     int pinner = -1, pinned = pinned_bot(a, m, &pinner);
-    int wake = m->no_hit_frames >= 720 || pinned >= 0;
+    int rescue = sim_ops_rescue(m);
+    int wake = m->no_hit_frames >= 720 || pinned >= 0 || rescue >= 0;
     if (!wake) { a->ops_target = -1; a->carry_set = 0; return; }
-    target = pinned >= 0 ? pinner : hp_leader(m);     /* LEADER TAX */
+    target = rescue >= 0 ? rescue : pinned >= 0 ? pinner : hp_leader(m);     /* the rescue, else LEADER TAX */
     if (target < 0) return;
     a->ops_target = target;
     s->score[GOAL_OPS_GO] = 0.8f; s->tx[GOAL_OPS_GO] = m->bots[target].b.x; s->tz[GOAL_OPS_GO] = m->bots[target].b.z;
@@ -545,10 +564,14 @@ static void choose(ai_t *a, const scores_t *s) {
 }
 
 /* -- steering (8.5) ------------------------------------------------ */
-/* keep a target inside the floor, 1.2 u off every wall and open edge */
-static void clamp_inside(const arena_def_t *ar, float *x, float *z) {
-  float hw = ar->w * 0.5f - 1.2f, hd = ar->d * 0.5f - 1.2f;
-  *x = rtr_clamp(*x, -hw, hw); *z = rtr_clamp(*z, -hd, hd);
+/* keep a target inside the floor, 1.2 u off every wall and edge_margin off an open edge: 1.2 for a bot that
+ * means to shove someone over it, 3 u for the practice bot (a bot easing away from the horn's breath on
+ * THE ROOF used to stop 0.6 u from the drop, with the wind blowing it the rest of the way) */
+static void clamp_inside(const arena_def_t *ar, float *x, float *z, float edge_margin) {
+  float hw = ar->w * 0.5f, hd = ar->d * 0.5f;
+  float px = (ar->open_mask & OPEN_PX) ? edge_margin : 1.2f, nx = (ar->open_mask & OPEN_NX) ? edge_margin : 1.2f;
+  float pz = (ar->open_mask & OPEN_PZ) ? edge_margin : 1.2f, nz = (ar->open_mask & OPEN_NZ) ? edge_margin : 1.2f;
+  *x = rtr_clamp(*x, -hw + nx, hw - px); *z = rtr_clamp(*z, -hd + nz, hd - pz);
 }
 
 /* steer around a danger square that sits between me and the target: the target
@@ -602,7 +625,7 @@ static void write_stick(pad_state_t *out, float turn, float throttle) {
 static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float tz, pad_state_t *out, int allow_reverse) {
   const arena_def_t *ar = ai_arena(a, m);
   const drive_def_t *d = &DRIVES[me->build.drive];
-  clamp_inside(ar, &tx, &tz);
+  clamp_inside(ar, &tx, &tz, !me->is_ops && skill_of(a)->backoff > 0 ? 3.0f : 1.2f);
   avoid_hazards(a, m, me, &tx, &tz);
   float mx = me->b.x, mz = me->b.z;
   float dx = tx - mx, dz = tz - mz, dist = len2(dx, dz);

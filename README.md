@@ -14,7 +14,7 @@ A red tag on a project means fourteen days and then it is free for the taking or
 4. Arena vote. Six cards; the stick picks, A votes, majority wins, ties go random. The vote closes 2 s after everyone has voted, or at 8 s.
 5. Countdown, then the fight. Each seat gets its own camera: halves for two, quadrants for four, two plus a big map for three, one full view for solo. One approach is one hit and no single hit takes more than a fifth of a bot, so a fight runs about 35 to 60 s; the music is a 156 bpm industrial track that brings in a rising riff for the last 20 s or when a bot is under 30 HP.
 6. KO or TIME. A KO goes slow motion on a shared camera; TIME goes to the judges (damage, aggression, control).
-7. Results and the rematch vote: REBUILD, SAME BOTS, NEW ARENA or LOBBY. The evening tally and the hall of fame persist in the cabinet's save. A table that says nothing for 40 s after a fight ends goes back to the lobby, and an empty lobby back to the title, so an abandoned cabinet returns to the attract on its own.
+7. Results and the rematch vote: REBUILD, SAME BOTS (the same bots on the same arena, straight to the countdown), NEW ARENA (the vote opens on the next card) or LOBBY. The evening tally and the hall of fame persist in the cabinet's save. A table that says nothing for 40 s after a fight ends goes back to the lobby, and an empty lobby back to the title, so an abandoned cabinet returns to the attract on its own.
 
 ![Four garage panels](docs/garage.png)
 
@@ -75,7 +75,7 @@ COMEBACK (on in free-for-all and 2V2, off in any 1v1) adds the RED TAG boost und
 | THE SHOP | benches that break when you drive through them |
 | THE ROOF | no rails on two edges, and wind |
 
-OPS, the house robot, wakes when a fight goes quiet or a pin lasts too long, picks up whoever is hogging it, and carries them toward the middle.
+OPS, the house robot, wakes when a fight goes quiet or a pin lasts too long, picks up whoever is hogging it, and carries them toward the middle. In a 1v1 it also comes for a bot that is flipped with no way to drive or right itself once its count passes 5, and sets it down the right way up (not in KO BY FLIP, where the flip is the point).
 
 ![Results and the rematch vote](docs/results.png)
 

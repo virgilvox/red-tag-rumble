@@ -120,7 +120,7 @@ typedef struct {
   float wind_x, wind_z; int16_t hill_t; uint8_t hazard_seat[4];   /* chosen hazard per seat, 255 = none */
   uint8_t fight_len_s;
   /* sim internals */
-  uint8_t hazards_on, hitstop_off, gate_open, ops_driven, ops_driver, ops_gunner, ops_awake_once;
+  uint8_t hazards_on, hitstop_off, gate_open, ops_driven, ops_driver, ops_gunner, ops_awake_once, ops_rescue;
   uint8_t ko_count;                          /* eliminations so far, for the mini-KO vs KO decision */
   int16_t ops_punish_t; uint8_t ops_punish_target;
   float ops_tx, ops_tz, ops_carry_x, ops_carry_z;
@@ -190,6 +190,10 @@ const struct arena_def_s *sim_arena(const match_t *m);
 int      sim_countout_number(const bot_t *b);
 /* a 1v1 is any match with two bots that are not OPS; the comeback rule reads it */
 int      sim_is_1v1(const match_t *m);
+/* inverted with no way to drive (the count runs and a hit's knockback does not reset it) */
+int      sim_inv_stuck(const bot_t *b);
+/* the slot OPS should rescue (a 1v1, not KO BY FLIP: inverted, no drive, no self right, count past 5), or -1 */
+int      sim_ops_rescue(const match_t *m);
 /* helpers shared by sim.c, ai.c and the renderer */
 static inline float rtr_clamp(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static inline float rtr_wrap_pi(float a) { while (a > 3.14159265f) a -= 6.2831853f; while (a < -3.14159265f) a += 6.2831853f; return a; }

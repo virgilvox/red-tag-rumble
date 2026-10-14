@@ -438,7 +438,10 @@ static float apply_damage(match_t *m, int att, int vic, float raw, int weapon, i
     a->dealt += dmg;
     if (dmg > a->biggest) a->biggest = dmg;
     if (weapon_is_spinner(weapon) || weapon == -2) a->spinner_dealt += dmg;   /* -2 is MELTY */
-    a->countout = 0;                                /* a landed hit resets the count (2.7) */
+    /* a landed hit resets the count (2.7), unless the attacker is inverted with no way to drive: a spinner
+     * that still bites while it is shoved around is not moving, and its count used to restart on every
+     * graze so a flipped TREADS and HORIZONTAL build lay there for 17 s instead of 10 */
+    if (!sim_inv_stuck(a)) a->countout = 0;
     v->last_hit_by = (uint8_t)(att + 1); v->last_hit_t = 90;
     if (v->is_ops) { v->ops_dmg += dmg; v->ops_dmg_t = 300; }
   } else if (v->last_hit_by && v->last_hit_t > 0 && v->last_hit_by - 1 < m->nbots) {
@@ -1480,11 +1483,16 @@ static void checks_step(match_t *m) {
       b->still_t++;
       if (b->still_t >= 120) { b->still = (uint8_t)(moved < 0.2f); b->still_x = bd->x; b->still_z = bd->z; b->still_t = 0; }
       float speed = len2(bd->vx, bd->vz);
-      if (speed > 0.5f) { b->fast_t++; if (b->fast_t >= 10) { b->countout = 0; } } else b->fast_t = 0;
-      int inv_stuck = b->inverted && !b->airborne && b->build.drive != DR_HOVER && b->build.drive != DR_MELTY && !WEAPONS[b->build.weapon].inv_drive;
+      int inv_stuck = sim_inv_stuck(b);
+      int inv_cant = b->inverted && b->build.drive != DR_HOVER && b->build.drive != DR_MELTY && !WEAPONS[b->build.weapon].inv_drive;
+      /* ten fast frames reset the count, unless the bot is inverted with no way to drive (on the floor or in
+       * the air off a flipper): a hit's knockback or a launch is not movement, and it used to restart a
+       * helpless bot's count on every hit so the KO took 17 s instead of 10, or never came at all */
+      if (speed > 0.5f) { b->fast_t++; if (b->fast_t >= 10 && !inv_cant) { b->countout = 0; } } else b->fast_t = 0;
       int counting = inv_stuck || (b->still && !b->airborne && !b->lifted_by && !b->clamped_by && speed < 0.5f);
       if (m->park && b->is_ai) counting = 0;          /* a parked practice bot under the rig */
       if (m->frame < COUNTOUT_GRACE_FRAMES && !inv_stuck) counting = 0;   /* the first 5 s: a player reading the screen is not counted */
+      if (m->ops_rescue && m->ops_target == i && (m->ops_state == OPS_GO || m->ops_state == OPS_LIFT || m->ops_state == OPS_CARRY)) counting = 0;   /* OPS is on its way */
       if (counting) {
         b->countout++;
         if (b->countout % 60 == 0 && b->countout < COUNTOUT_FRAMES) ev_simple(m, EV_COUNT_TICK, i, i, 10 - b->countout / 60, bd->x, bd->z, bd->y);
@@ -1532,7 +1540,9 @@ static void checks_step(match_t *m) {
         bot_t *o = &m->bots[j];
         if (!o->alive || o->is_ops || (m->mode == MODE_2V2 && o->team == b->team)) continue;
         float dx = o->b.x - bd->x, dz = o->b.z - bd->z, d = len2(dx, dz);
-        if (d < 2.0f && d > 0.01f && dotp(bd->vx - o->b.vx, bd->vz - o->b.vz, dx / d, dz / d) > 0.5f) b->aggro += 1;
+        /* my own speed toward them (the relative speed is the same for both bots, so it tallied every fight
+         * as an even split and the judges card read 2.0 and 2.0, or 0.0 and 0.0) */
+        if (d < 2.0f && d > 0.01f && dotp(bd->vx, bd->vz, dx / d, dz / d) > 0.5f) b->aggro += 1;
         if (o->inverted && o->inverted_by == i + 1) b->control += 1;
       }
     }
@@ -1625,12 +1635,14 @@ static void ops_step(match_t *m) {
       if (leaving_time || m->over) break;
       int pinner = -1;
       for (int i = 0; i < m->nbots; i++) if (m->bots[i].alive && !m->bots[i].is_ops && (m->bots[i].pinned & 2) && m->bots[i].last_hit_by) pinner = m->bots[i].last_hit_by - 1;
-      int wake = m->no_hit_frames >= 720 || pinner >= 0;
+      int rescue = sim_ops_rescue(m);
+      int wake = m->no_hit_frames >= 720 || pinner >= 0 || rescue >= 0;
       if (m->ops_driven) wake = wake || (m->ops_in_drive.ly < -16000);
       if (!wake) break;
-      int target = pinner >= 0 && pinner < m->nbots && m->bots[pinner].alive ? pinner : hp_leader(m, -1);
+      int target = rescue >= 0 ? rescue : pinner >= 0 && pinner < m->nbots && m->bots[pinner].alive ? pinner : hp_leader(m, -1);
       if (target < 0) break;
-      m->ops_target = (uint8_t)target; m->ops_state = OPS_GO; m->gate_open = 1; m->ops_t = 420; m->ops_awake_once = 1;
+      m->ops_rescue = (uint8_t)(rescue >= 0);
+      m->ops_target = (uint8_t)target; m->ops_state = OPS_GO; m->gate_open = 1; m->ops_t = (int16_t)(rescue >= 0 ? 900 : 420); m->ops_awake_once = 1;   /* a rescue chases a bot that is still being shoved about */
       m->no_hit_frames = 0;
       for (int i = 0; i < m->nbots; i++) m->bots[i].pinned &= 1, m->bots[i].pin_t = 0;
       ev_simple(m, EV_OPS_WAKE, OPS_SLOT, target, 0, o->b.x, o->b.z, o->b.y);
@@ -1666,8 +1678,12 @@ static void ops_step(match_t *m) {
       if (!m->ops_driven) { ops_steer(o, m->ops_carry_x, m->ops_carry_z, 0.8f); o->in.buttons |= IN_A | IN_X; }
       int there = len2(o->b.x - m->ops_carry_x, o->b.z - m->ops_carry_z) < 1.0f;
       if (t->lifted_by != OPS_SLOT + 1 || there || o->carry_t > 170 || leaving_time) {
-        if (t->lifted_by == OPS_SLOT + 1) { t->lifted_by = 0; t->airborne = 1; t->b.vy = 0.5f; }
-        o->carry_t = 0; o->lift = 0; o->saw_on = 0; m->ops_state = OPS_RETURN;
+        if (t->lifted_by == OPS_SLOT + 1) {
+          t->lifted_by = 0; t->airborne = 1; t->b.vy = 0.5f;
+          /* a rescue sets the bot down the right way up and its count starts over */
+          if (m->ops_rescue && t->inverted) { t->inverted = 0; t->countout = 0; ev_simple(m, EV_SELFRIGHT, m->ops_target, m->ops_target, 1, t->b.x, t->b.z, t->b.y); }
+        }
+        o->carry_t = 0; o->lift = 0; o->saw_on = 0; m->ops_state = OPS_RETURN; m->ops_rescue = 0;
       }
       break;
     }
@@ -1694,6 +1710,26 @@ static void ops_step(match_t *m) {
     for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == OPS_SLOT + 1) { m->bots[i].lifted_by = 0; m->bots[i].airborne = 1; }
     o->carry_t = 0; o->lift = 0; m->ops_state = OPS_LEAVING;
   }
+  if (m->ops_state == OPS_RETURN || m->ops_state == OPS_LEAVING || m->ops_state == OPS_PARKED) m->ops_rescue = 0;
+}
+
+/* inverted with no way to drive (4.8, 3.5): HOVER and MELTY drive either way up, WEDGE, NONE, DRUM, SAW and
+ * SPIKE drive inverted at 70 percent, the rest sit there */
+int sim_inv_stuck(const bot_t *b) {
+  return b->inverted && !b->airborne && b->build.drive != DR_HOVER && b->build.drive != DR_MELTY && !WEAPONS[b->build.weapon].inv_drive;
+}
+
+/* the OPS rescue: in a 1v1 that is not KO BY FLIP, a bot inverted with no way to drive and no self right has
+ * nothing left to do, so once its count passes 5 OPS comes, lifts it, sets it down the right way up near the
+ * centre and the count starts over; the count holds while OPS is on its way */
+int sim_ops_rescue(const match_t *m) {
+  if (!sim_is_1v1(m) || m->mode == MODE_KO_FLIP) return -1;
+  for (int i = 0; i < m->nbots; i++) {
+    const bot_t *b = &m->bots[i];
+    if (!b->alive || b->is_ops || b->hp_max <= 0) continue;
+    if (sim_inv_stuck(b) && WEAPONS[b->build.weapon].selfright == SR_NONE && b->countout >= 300) return i;
+  }
+  return -1;
 }
 
 /* -- KING OF THE HILL (2.2, 6.2) ----------------------------------- */

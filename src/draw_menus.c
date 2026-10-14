@@ -161,15 +161,13 @@ void boot_screen(float frac) {
 /* -- title and attract (10.7)  -- */
 void attract_overlay(void) {
   if (!G.attract || M.nbots < 2) return;
-  const int bx[2] = { 496, 1064 };
-  for (int i = 0; i < 2 && i < M.nbots; i++) {
-    const bot_t *b = &M.bots[i];
-    float f = b->hp_max > 0 ? clampf(b->hp / b->hp_max, 0, 1) : 0;
-    hud_rect(bx[i] - 8, 28, 216, 36, C_CHAR, 210);           /* a char backing so the bars read over a light floor */
-    hud_rect(bx[i], 32, 200, 10, C_STEEL, 200);
-    hud_rect(bx[i], 32, (int)(200 * f), 10, C_ASH, 255);
-    hud_text(F_MONO_S, i == 0 ? bx[i] : bx[i] + 200, 46, b->name, C_ASH, 255, i == 0 ? AL_LEFT : AL_RIGHT);
-  }
+  /* the two names in small type at the top right, no HP bars (bars half under the marquee and against
+   * the right edge read as a layout bug, not as part of the attract) */
+  char line[64];
+  snprintf(line, sizeof line, S_ATTRACT_VS, M.bots[0].name, M.bots[1].name);
+  int nw = hud_text_w(F_MONO_S, line) + 24;
+  hud_rect(1256 - nw, 32, nw, 28, C_CHAR, 210);
+  hud_text(F_MONO_S, 1244, 38, line, C_ASH, 255, AL_RIGHT);
   int tip = (int)(G.phase_t / 8) % LEN(ATTRACT_TIPS);
   int tw = hud_text_w(F_MONO, ATTRACT_TIPS[tip]) + 32;
   hud_rect(880 - tw / 2, 596, tw, 36, C_CHAR, 220);     /* clear of the BEST EVENING line at 668 */
@@ -355,7 +353,7 @@ void lobby_screen(float dt) {
   } else lobby_empty_t = 0;
   /* the controls card over a seat's card for 3 s after its pad's first join (10.24) */
   if (G.controls_card_t > 0 && G.controls_card_seat >= 0 && G.controls_card_seat < 4 && G.seats[G.controls_card_seat].kind == SEAT_HUMAN) {
-    rect_t cr = { 20 + 310 * G.controls_card_seat - 10, 240, 320, 180 };
+    rect_t cr = { 20 + 310 * G.controls_card_seat - 10, 226, 320, 180 };   /* over the turntable and the name; A READY stays in view under it */
     if (cr.x < 8) cr.x = 8;
     if (cr.x + cr.w > 1272) cr.x = 1272 - cr.w;
     controls_card(&cr, 1, G.controls_card_seat);
@@ -481,6 +479,14 @@ static const char *row_value(const seat_t *s, int row, int opt, int short_form, 
   return buf;
 }
 
+/* a build with no self right and no inverted drive sits there once flipped (3.5): LIFTER, FLAME, HORIZONTAL
+ * and CRUSHER on anything but HOVER or MELTY BRAIN */
+static int build_helpless_flipped(const build_t *b) {
+  if (b->drive == DR_HOVER || b->drive == DR_MELTY) return 0;
+  const weapon_def_t *w = &WEAPONS[b->weapon < WP_COUNT ? b->weapon : WP_NONE];
+  return !w->inv_drive && w->selfright == SR_NONE;
+}
+
 void garage_panel(const rect_t *r, int seat, int compact, float dt) {
   const seat_t *s = &G.seats[seat];
   if (s->kind == SEAT_EMPTY) return;
@@ -516,7 +522,8 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
     } else {
       hud_text(F_H3, x + 52, y + 6, name, C_BONE, 255, AL_LEFT);
       hud_text(F_MONO_S, x + 624, y + 12, preset_label(&s->build), C_ASH, 255, AL_RIGHT);
-      if (s->hint[0]) hud_text(F_MONO_S, x + 52, y + 40, s->hint, C_BONE, 255, AL_LEFT);
+      if (build_helpless_flipped(&s->build)) hud_text(F_MONO_S, x + 52, y + 40, S_WARN_NO_SELF_RIGHT, C_RUST, 255, AL_LEFT);
+      else if (s->hint[0]) hud_text(F_MONO_S, x + 52, y + 40, s->hint, C_BONE, 255, AL_LEFT);
     }
     int bw = tag_bar(x + 16, y + 72, &s->build, 0, garage_shake_t[seat]);
     snprintf(buf, sizeof buf, S_TAGS_SPENT, cost, clampi(budget - cost, 0, 99));
@@ -606,8 +613,10 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
       stat_bar(x + 384, by + k * 20, 120, s, k);
     }
     int fy = rows > 5 ? y + 282 : y + 262;
-    /* the hint line replaces the flavour line for the first 5 s of a rebuild */
+    /* the hint line replaces the flavour line for the first 5 s of a rebuild; a build that stays flipped
+     * shows its warning in the slot two seconds in every four */
     if (s->hint[0] && G.phase_t < 5 && !ai) hud_text_wrap(F_MONO_S, x + 330, fy, 300, s->hint, C_BONE, 255, 17);
+    else if (!ai && build_helpless_flipped(&s->build) && (((int)(G.phase_t * 0.5f)) & 1)) hud_text_wrap(F_MONO_S, x + 330, fy, 300, S_WARN_NO_SELF_RIGHT, C_RUST, 255, 17);
     else hud_text_wrap(F_MONO_S, x + 330, fy, 300, fl, fl_ink, 255, 17);
     int hy = y + 306;
     if (ai) hud_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, C_ASH, 255, AL_LEFT);
@@ -696,15 +705,18 @@ void garage_screen(float dt, int frames_left, int total_frames) {
     hud_tape(0, 358, 1280, 4, G.tape_phase);
   }
   garage_timer_tape(frames_left, total_frames);
-  /* the controls card over a seat's own panel while Y is held, or for 3 s after a first join */
+  /* the controls card over a seat's own panel while Y is held; the automatic card after a pad's first join
+   * is the compact one over the turntable hole only, so the rows, the cursor and the A and START prompts
+   * stay in view while a first timer looks for what to press */
   if (G.controls_card_seat >= 0 && G.controls_card_seat < 4 && G.seats[G.controls_card_seat].kind != SEAT_EMPTY) {
     int s = G.controls_card_seat;
+    int first = G.controls_card_t > 0;
     if (seated <= 2) {
       int k = 0; for (int i = 0; i < n; i++) if (order[i] == s) k = i;
-      rect_t cr = { k * 640, 180, 640, 360 };
-      controls_card(&cr, 0, s);
+      rect_t cr = first ? (rect_t){ k * 640 + 160, 125, 320, 180 } : (rect_t){ k * 640, 180, 640, 360 };
+      controls_card(&cr, first, s);
     } else {
-      rect_t cr = { (s & 1) * 640 + 160, (s >> 1) * 360 + 90, 320, 180 };
+      rect_t cr = first ? (rect_t){ (s & 1) * 640 + 6, (s >> 1) * 360 + 57, 320, 180 } : (rect_t){ (s & 1) * 640 + 160, (s >> 1) * 360 + 90, 320, 180 };
       controls_card(&cr, 1, s);
     }
   }

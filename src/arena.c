@@ -316,9 +316,11 @@ const arena_def_t ARENAS[6] = {
       PR(PR_HVAC, -2, -4, 2.0f, 2.0f, 1.2f, 0, 0x8a857c, 0),
       PR(PR_HVAC, -5,  1, 2.0f, 2.0f, 1.2f, 0, 0x8a857c, 0) },
     .nprops = 2,
-    .spawn4 = { { -6.5f, -4.5f, 0.7853982f }, { 6.5f, 6.5f, -2.3561945f }, { -6.5f, 6.5f, -0.7853982f }, { 6.5f, -6.5f, 2.3561945f } },
-    /* 5.5 u in so the spawn clears the OPS zone by 1.5 (the spec's 6 sits 1.4 from it) */
-    .spawn2 = { { -5.5f, -5.5f, 0.7853982f }, { 5.5f, 5.5f, -2.3561945f } },
+    /* the seats on the open sides sit 2 u further in than the closed side's (4.5, not 6.5): a first fight
+     * used to end OFF THE ROOF in 14 s because the exchange started a bot length from the drop */
+    .spawn4 = { { -6.5f, -4.5f, 0.7853982f }, { 4.5f, 4.5f, -2.3561945f }, { -6.5f, 4.5f, -0.7853982f }, { 4.5f, -6.5f, 2.3561945f } },
+    /* seat 0 5.5 u in so the spawn clears the OPS zone by 1.5 (the spec's 6 sits 1.4 from it); seat 1 at 3.5 */
+    .spawn2 = { { -5.5f, -5.5f, 0.7853982f }, { 3.5f, 3.5f, -2.3561945f } },
     .ops_zone = { -8, -8 }, .traction_mult = 1, .vis = VIS_ALL, .one_camera_default = 0, .shared_yaw_deg = 0, .tiles_w = 30, .tiles_h = 30,
     .hill = { { -5, -5 }, { 4, -5 }, { 4, 4 }, { -5, 4 } } },
 };

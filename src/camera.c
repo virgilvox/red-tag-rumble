@@ -205,6 +205,13 @@ static void push_out(float *x, float *y, float *z) {
       if (p->h + 0.3f < *y) continue;
       push_out_box(x, z, p->x, p->z, p->w / 2, p->d / 2);
     }
+    /* the mound: the camera stays outside the pile (its boxes used to fill the lens at the foot of it) */
+    for (int i = 0; i < arena->nhaz; i++) {
+      const hazard_def_t *h = &arena->haz[i];
+      if (h->type != HZ_MOUND) continue;
+      float r = h->w * 0.5f + 0.6f, dx = *x - h->x, dz = *z - h->z, d = sqrtf(dx * dx + dz * dz);
+      if (d < r) { if (d < 0.01f) { dx = 1; dz = 0; d = 1; } *x = h->x + dx / d * r; *z = h->z + dz / d * r; }
+    }
     /* the pulverizer: its post stands 1.5 behind the strike square toward the wall and the arm rests
      * raised above it (world.c), a 3.7 u column a chase camera at 2.2 would otherwise sit inside */
     for (int i = 0; i < arena->nhaz; i++) {
@@ -224,8 +231,37 @@ static void push_out(float *x, float *y, float *z) {
       float dx = *x - o->b.x, dz = *z - o->b.z, d = sqrtf(dx * dx + dz * dz), r = 1.3f;
       if (d < r) { if (d < 0.01f) { dx = 1; dz = 0; d = 1; } *x = o->b.x + dx / d * r; *z = o->b.z + dz / d * r; }
     }
+    /* never under the deck, a ramp or the mound: 1.2 over the ground at the camera's own position */
+    float g = arena_floor_y(arena, *x, *z) + 1.2f;
+    if (*y < g) *y = g;
   }
   if (*y < 0.6f) *y = 0.6f;
+}
+
+/* the chase camera's base height: the higher of the bot's floor and the ground under the camera (the deck,
+ * a ramp, the mound), plus 1.8 while the bot is on the mound so the view clears the box tops */
+static float chase_base(const bot_t *b, float x, float z) {
+  float g = arena ? arena_floor_y(arena, x, z) : 0;
+  float base = b->floor_y > g ? b->floor_y : g;
+  if (arena) for (int i = 0; i < arena->nhaz; i++) {
+    const hazard_def_t *h = &arena->haz[i];
+    if (h->type != HZ_MOUND) continue;
+    float r = h->w * 0.5f + 0.5f, dx = b->b.x - h->x, dz = b->b.z - h->z;
+    if (dx * dx + dz * dz < r * r) base += 1.8f;
+  }
+  return base;
+}
+
+/* never past 55 degrees down: when the camera has ended up over the bot (pushed out of the mound, lifted
+ * over the deck) it is pulled back along its own line, or straight back from the bot, until the pitch holds */
+static void cap_pitch(float *px, float *py, float *pz, float lx, float ly, float lz, float bfx, float bfz) {
+  float dx = lx - *px, dz = lz - *pz, dh = sqrtf(dx * dx + dz * dz), dy = *py - ly;
+  if (dy <= 0) return;
+  float need = dy / 1.4281f;                                        /* tan 55 */
+  if (dh >= need) return;
+  float ux, uz;
+  if (dh > 0.2f) { ux = -dx / dh; uz = -dz / dh; } else { ux = -bfx; uz = -bfz; }
+  *px = lx + ux * need; *pz = lz + uz * need;
 }
 
 /* does the segment from the camera to its look point cross another bot's circle: the player's own bot
@@ -282,7 +318,8 @@ static void chase_update(int vp, int seat, const match_t *m, float dt) {
   int blocked = c->init && view_blocked(m, slot, c->px, c->pz, lx, lz);
   c->lift += ((blocked ? 1.0f : 0.0f) - c->lift) * k;
   float follow = 3.5f - 1.1f * c->lift;
-  float tx = bx - rfx * follow, ty = 2.2f + 1.2f * c->lift, tz = bz - rfz * follow;
+  float tx = bx - rfx * follow, tz = bz - rfz * follow;
+  float ty = chase_base(b, tx, tz) + 2.2f + 1.2f * c->lift;        /* 2.2 over the terrain, not over the arena floor */
   /* carried on a lifter (OPS or a LIFTER bot): the camera sits off the lifter's side, 3 u out and 2.8 up, on
    * the side nearer the arena centre, so the player sees themselves on the forks instead of the inside of
    * the lifter's body */
@@ -297,6 +334,8 @@ static void chase_update(int vp, int seat, const match_t *m, float dt) {
   c->px += (tx - c->px) * k; c->pz += (tz - c->pz) * k; c->py += (ty - c->py) * k;   /* the camera keeps its own height while the bot is airborne */
   c->lx += (lx - c->lx) * kl; c->ly += (ly - c->ly) * kl; c->lz += (lz - c->lz) * kl;
   float px = c->px, py = c->py, pz = c->pz;
+  push_out(&px, &py, &pz);
+  cap_pitch(&px, &py, &pz, c->lx, c->ly, c->lz, rfx, rfz);
   push_out(&px, &py, &pz);
   c->yaw = atan2f(c->lx - px, c->lz - pz);
   /* punch along the hit normal, recovering with 1 - (1 - t)^3 over 0.30 s */

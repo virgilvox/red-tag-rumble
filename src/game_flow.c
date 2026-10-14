@@ -34,7 +34,7 @@
 #define JUDGES_SKIP_AT  210         /* A skips to results once the winner chip is up (card t > 2.4 s) */
 #define RESULTS_FRAMES  360         /* 6 s, then the rematch menu */
 #define BOOT_STEPS      7           /* the six arenas and the garage, one scene compiled per boot frame (10.1) */
-#define FIRST_CARD_S    3.0f        /* the controls card over a pad's first seat of the evening (10.24) */
+#define FIRST_CARD_S    2.0f        /* the controls card over a pad's first seat of the evening (10.24): 2 s, over the turntable, not the rows */
 #define RIG_COMBO       (IN_SELECT | IN_L3 | IN_R3)
 
 static const int MODE_MIN_PLAYERS[MODE_COUNT] = { 1, 2, 3, 2, 4, 3 };
@@ -404,13 +404,15 @@ static void go_garage(int rebuild) {
   audio_music(MUSIC_GARAGE);
 }
 
-static void go_vote(void) {
+static void go_vote(int start_card) {
   G.sim_on = 0; G.timescale = 1;
   game_set_phase(PH_VOTE);
-  /* every seat's cursor starts on the last arena (THE BAY on the first fight). Nobody has voted yet: the
-   * vote closes at 8 s, or 2 s after every human has pressed A; the card a human sits on counts at the bell */
-  for (int s = 0; s < 4; s++) { G.seats[s].vote = G.seats[s].kind != SEAT_EMPTY ? G.arena : -1; G.seats[s].voted = 0; }
-  G.vote_leader = G.arena; G.vote_decided = 0; G.vote_decided_t = -1; G.vote_one_camera = SAVE.one_camera;
+  /* every seat's cursor starts on start_card (THE BAY on the first fight, the last arena for the next
+   * pairing of a bracket, the card after the last arena from NEW ARENA). Nobody has voted yet: the vote
+   * closes at 8 s, or 2 s after every human has pressed A; the card a human sits on counts at the bell */
+  start_card = clampi_(start_card, 0, ARENA_COUNT - 1);
+  for (int s = 0; s < 4; s++) { G.seats[s].vote = G.seats[s].kind != SEAT_EMPTY ? start_card : -1; G.seats[s].voted = 0; }
+  G.vote_leader = start_card; G.vote_decided = 0; G.vote_decided_t = -1; G.vote_one_camera = SAVE.one_camera;
   vote_all_frame = -1; vote_decide_frame = -1; vote_tie = 0;
 }
 
@@ -1043,7 +1045,7 @@ static void garage_update(float dt) {
     /* the tape snaps to zero over 0.3 s: the drawn clock reads phase_frames */
     int left = garage_total - G.phase_frames;
     if (snap_left > 0 && left > 0) G.phase_frames += left / snap_left;
-    if (snap_left-- <= 0) go_vote();
+    if (snap_left-- <= 0) go_vote(G.arena);
   }
 }
 
@@ -1060,10 +1062,11 @@ static void vote_update(float dt) {
         if (PADS[p].nav_x) { G.vote_one_camera = clampi_(G.vote_one_camera + PADS[p].nav_x, 0, 2); SAVE.one_camera = (uint8_t)G.vote_one_camera; save_commit(); audio_play(SFX_MENU_MOVE); }
         continue;
       }
-      /* Left and Right walk the six cards in order (wrapping across the rows); Up and Down jump a row.
-       * Moving is not a vote: only A (or Start) is, and it stays cast if the cursor moves on */
-      if (PADS[p].nav_x) { st->vote = wrap(st->vote + PADS[p].nav_x, ARENA_COUNT); audio_play(SFX_MENU_MOVE); }
-      if (PADS[p].nav_y) { st->vote = wrap(st->vote + 3 * PADS[p].nav_y, ARENA_COUNT); audio_play(SFX_MENU_MOVE); }
+      /* Left and Right walk the six cards in order and stop at the ends (one Left on THE BAY used to wrap
+       * to THE ROOF, the open edged arena, which is the worst first arena for a new driver); Up and Down
+       * jump a row. Moving is not a vote: only A (or Start) is, and it stays cast if the cursor moves on */
+      if (PADS[p].nav_x) { int nv = clampi_(st->vote + PADS[p].nav_x, 0, ARENA_COUNT - 1); if (nv != st->vote) { st->vote = nv; audio_play(SFX_MENU_MOVE); } }
+      if (PADS[p].nav_y) { int nv = st->vote + 3 * PADS[p].nav_y; if (nv >= 0 && nv < ARENA_COUNT) { st->vote = nv; audio_play(SFX_MENU_MOVE); } }
       if (edge(p, IN_A | IN_START) && !st->voted) { st->voted = 1; audio_play(SFX_MENU_OK); }
     }
     /* the tally; AI seats go where the humans lead */
@@ -1207,7 +1210,7 @@ static void ko_update(void) {
 
 /* -- results and rematch (10.21) --------------------------------- */
 static void results_next(void) {
-  if (tourney_on() && !t_done) { audio_play(SFX_MENU_OK); go_vote(); }   /* the bracket goes on: the next pairing votes an arena */
+  if (tourney_on() && !t_done) { audio_play(SFX_MENU_OK); go_vote(G.arena); }   /* the bracket goes on: the next pairing votes an arena */
   else go_rematch();
 }
 
@@ -1220,7 +1223,10 @@ static void rematch_apply(int row) {
   audio_play(SFX_MENU_OK);
   switch (row) {
     case RM_REBUILD: go_garage(1); break;
-    case RM_SAME_BOTS: case RM_NEW_ARENA: go_vote(); break;
+    /* SAME BOTS means the bots and the arena: straight to the countdown, no vote (a lone player who had just
+     * lost to an arena used to get it again by pressing Enter). NEW ARENA opens the vote on the next card */
+    case RM_SAME_BOTS: G.sim_on = 0; G.timescale = 1; go_countdown(); break;
+    case RM_NEW_ARENA: go_vote((G.arena + 1) % ARENA_COUNT); break;
     default: go_lobby(); break;
   }
 }

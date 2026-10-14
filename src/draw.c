@@ -306,11 +306,18 @@ void countout(const rect_t *vp, const bot_t *b) {
   int font = compact ? F_H1 : F_TITLE;
   int fh = hud_font_h(font);
   int y = compact ? vp->y + 196 : cy - fh / 2 - 30;
+  /* the prompt tells the truth: B when the build can right itself, the OPS rescue in a 1v1, else only that
+   * the bot is inverted (one word with the strip; GET MOVING is for a bot that can move) */
+  const char *prompt = S_GET_MOVING;
+  if (b->inverted) prompt = can_self_right(b) ? S_RIGHT_YOURSELF : (sim_is_1v1(&M) && M.mode != MODE_KO_FLIP ? S_NO_SELF_RIGHT_OPS : S_NO_SELF_RIGHT);
+  /* a char plate behind the numeral and the prompt, like the clock's, so the count reads over tape and ramps */
+  int pw = hud_text_w(F_MONO, prompt) + 48, nw = hud_text_w(font, s) + 48; if (nw > pw) pw = nw;
+  int ph = fh + (compact ? 24 : 28);
+  hud_rect(cx - pw / 2, y - 4, pw, ph, C_CHAR, 200);
   hud_text(font, cx + 4, y + 4, s, C_SHADOW, 200, AL_CENTER);
   hud_text(font, cx, y, s, C_RUST, 255, AL_CENTER);
-  const char *prompt = b->inverted ? (can_self_right(b) ? S_RIGHT_YOURSELF : S_GET_MOVING) : S_GET_MOVING;
   hud_text_sh(F_MONO, cx, y + fh - (compact ? 4 : 10), prompt, C_BONE, 255, AL_CENTER);
-  hud_dirty(cx - 200, y, 400, fh + 40);
+  hud_dirty(cx - pw / 2 - 4, y - 4, pw + 8, ph + 8);
 }
 
 /* -- the per viewport strip (10.4) ------------------------------- */
@@ -357,6 +364,33 @@ static void hp_bar(int x, int y, int w, int h, const bot_t *b, int seat_idx) {
     hud_rect(x + w - sw, y, sw, h, C_RUST, 255);
     hud_text(F_MONO_S, x + w - sw / 2, cy_text(F_MONO_S, y, h), S_RED_TAG, C_TAPE, 255, AL_CENTER);
   }
+}
+
+/* KO BY FLIP has no HP: the bar slot holds the flip or fall meter (the count filling rust while the bot is
+ * inverted or still, the mode's rule otherwise) and the number slot the flips so far */
+static void flip_meter(int x, int y, int w, int h, const bot_t *b) {
+  hud_rect(x, y, w, h, C_SLAB, 255);
+  hud_rect(x + 2, y + 2, w - 4, h - 4, C_STEEL, 255);
+  int counting = b->countout > 0 && b->alive;
+  if (counting) {
+    int fw = (int)((w - 4) * clampf(b->countout / (float)COUNTOUT_FRAMES, 0, 1));
+    if (fw > 0) hud_rect(x + 2, y + 2, fw, h - 4, C_RUST, 255);
+  }
+  const char *word = counting ? (b->inverted ? STATUS_WORD[SW_INVERTED] : S_GET_MOVING) : S_FLIP_METER;
+  hud_text(F_MONO_S, x + w / 2, cy_text(F_MONO_S, y, h), word, counting ? C_BONE : C_ASH, 255, AL_CENTER);
+}
+static void flips_count(int right_x, int y, int h, const bot_t *b, int label) {
+  char n[8]; snprintf(n, sizeof n, "%d", b->flips);
+  int nw = hud_text_w(F_MONO_L, n);
+  hud_text(F_MONO_L, right_x, cy_text(F_MONO_L, y, h), n, C_BONE, 255, AL_RIGHT);
+  hud_glyph(right_x - nw - 22, y + h / 2 - 8, GL_FLIPPER, 1, C_ASH, 255);
+  if (label) hud_text(F_MONO_S, right_x, y + h + 8, S_FLIPS_LABEL, C_ASH, 255, AL_RIGHT);
+}
+static void strip_hp(int x, int y, int w, int h, int num_right, int num_h, const bot_t *b, int seat_idx, int label) {
+  if (M.mode == MODE_KO_FLIP) { flip_meter(x, y, w, h, b); flips_count(num_right, y - 2, num_h, b, label); return; }
+  hp_bar(x, y, w, h, b, seat_idx);
+  char hp[8]; snprintf(hp, sizeof hp, "%d", (int)ceilf(b->hp > 0 ? b->hp : 0));
+  hud_text(F_MONO_L, num_right, cy_text(F_MONO_L, y - 2, num_h), hp, C_BONE, 255, AL_RIGHT);
 }
 
 /* seat chip with the stun flicker, the red tag frame and the count badge */
@@ -503,9 +537,7 @@ void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
   if (!compact) {
     strip_chip(x + 8, y + 8, 36, 56, b, F_H2);
     hud_text(F_MONO_S, x + 52, y + 6, name, C_BONE, 255, AL_LEFT);
-    hp_bar(x + 52, y + 26, 340, 18, b, seat_idx);
-    char hp[8]; snprintf(hp, sizeof hp, "%d", (int)ceilf(b->hp > 0 ? b->hp : 0));
-    hud_text(F_MONO_L, x + 460, cy_text(F_MONO_L, y + 24, 22), hp, C_BONE, 255, AL_RIGHT);
+    strip_hp(x + 52, y + 26, 340, 18, x + 460, 22, b, seat_idx, 1);
     gauge(x + 474, y + 8, 44, b, sc);
     speed_ticks(x + 530, y + 26, 60, 18, b, 6);
     if (DRIVES[b->build.drive].boost) {
@@ -521,9 +553,7 @@ void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
   } else {
     strip_chip(x + 8, y + 8, 28, 40, b, F_H3);
     hud_text(F_MONO_S, x + 40, y + 4, name, C_BONE, 255, AL_LEFT);
-    hp_bar(x + 40, y + 20, 280, 14, b, seat_idx);
-    char hp[8]; snprintf(hp, sizeof hp, "%d", (int)ceilf(b->hp > 0 ? b->hp : 0));
-    hud_text(F_MONO_L, x + 384, cy_text(F_MONO_L, y + 18, 18), hp, C_BONE, 255, AL_RIGHT);
+    strip_hp(x + 40, y + 20, 280, 14, x + 384, 18, b, seat_idx, 0);
     gauge(x + 400, y + 10, 36, b, sc);
     speed_ticks(x + 446, y + 20, 40, 12, b, 6);
     if (DRIVES[b->build.drive].boost) {
@@ -552,9 +582,7 @@ void hud_strip_short(const rect_t *vp, const bot_t *b) {
   char name[24];
   fit_text(name, sizeof name, F_MONO_S, b->name, vp->w - 60);
   hud_text(F_MONO_S, x + 52, y + 6, name, C_BONE, 255, AL_LEFT);
-  hp_bar(x + 52, y + 26, vp->w - 52 - 76, 18, b, seat_idx);
-  char hp[8]; snprintf(hp, sizeof hp, "%d", (int)ceilf(b->hp > 0 ? b->hp : 0));
-  hud_text(F_MONO_L, x + vp->w - 12, cy_text(F_MONO_L, y + 24, 22), hp, C_BONE, 255, AL_RIGHT);
+  strip_hp(x + 52, y + 26, vp->w - 52 - 76, 18, x + vp->w - 12, 22, b, seat_idx, 0);
   int sw = status_of(b);
   if (sw != SW_NONE) hud_text(F_MONO_S, x + 52, y + 54, STATUS_WORD[sw], status_colour(sw, C_LIVE), 255, AL_LEFT);
   hud_dirty(x, y, vp->w, h);
@@ -873,11 +901,15 @@ void judges_card(float t) {
     /* bars fill in sequence over 0.6 s each: damage, aggression, control */
     float f = clampf((t - 0.3f - c * 0.6f) / 0.6f, 0, 1);
     f = hud_ease_out(f);
+    /* each bar is drawn against the row's leader, so the winner of a row reads full and a 1.2 against a
+     * 0.4 shows as a three to one bar; the number is the points as before */
+    float vmax = 0;
+    for (int i = 0; i < n; i++) { float v = G.judge_bars[c][bot_slot(bs[i])]; if (v > vmax) vmax = v; }
     for (int i = 0; i < n; i++) {
       int by = cy + 30 + i * pitch;
       const bot_t *b = bs[i];
       float v = G.judge_bars[c][bot_slot(b)];
-      float frac = clampf(v / weights[c], 0, 1) * f;
+      float frac = (vmax > 0 ? clampf(v / vmax, 0, 1) : 0) * f;
       hud_seat_chip(x + 20, by, bh, bh, b->seat & 3, F_MONO_S, b->is_ai);
       hud_bar(x + 20 + bh + 8, by, w - 40 - bh - 8 - 52, bh, frac, SEAT_RGB[b->seat & 3], C_STEEL);
       char vs[8]; snprintf(vs, sizeof vs, "%.1f", v * f);

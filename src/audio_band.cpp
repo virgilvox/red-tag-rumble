@@ -654,7 +654,7 @@ class Band {
       clang_.Process(bl_, br_, 0, n);
       punch_.Process(bl_, br_, 0, n);
       for (int i = 0; i < n; ++i) {
-        float a = bl_[i] * 0.85f * g, b = br_[i] * 0.85f * g;
+        float a = bl_[i] * 0.75f * g, b = br_[i] * 0.75f * g;   /* 0.75: a heavy hit peaks about -3 dBFS instead of pinning the limiter */
         l[from + i] += a; r[from + i] += b;
         sl_[i] += 0.25f * a; sr_buf_[i] += 0.25f * b;
       }
