@@ -53,15 +53,31 @@ static int hover_ignores(int type) { return type == HZ_PIT || type == HZ_KILLSAW
 /* -- skill (8.4, and the house brief: EASY gentle, MEDIUM fair, HARD mean) ----
  * throttle caps the drive; lead is how far ahead (seconds of enemy velocity) the attack point sits;
  * hesitate is the chance per think that a tap weapon's window is missed; boost allows the L boost;
- * backoff is how long EASY drives away after it lands a hit, so a new player gets a breath */
+ * backoff is how long EASY and MEDIUM drive away after they land a hit, so a new player gets a breath.
+ * Two tables: SKILL drives AI against AI (the robin, the attract, the FILL WITH BOT seats among
+ * themselves) and SKILL_VS_HUMAN applies whenever a human seat is in the match, where MEDIUM is slower,
+ * aims wider and takes the breath; HARD is the same in both */
 typedef struct { float throttle, lead, hesitate, aim; int boost, backoff; } skill_t;
 static const skill_t SKILL[3] = {
   /* throttle lead  hesitate aim   boost backoff */
   { 0.75f, 0.0f, 0.50f, 0.7f, 0, 90 },     /* EASY: slow, no lead, misses half its windows, aims 0.7 u wide, backs off after a hit, never evades */
-  { 1.00f, 0.30f, 0.15f, 0.3f, 1, 0 },     /* MEDIUM: fair */
+  { 1.00f, 0.30f, 0.25f, 0.3f, 1, 0 },     /* MEDIUM: fair; misses a quarter of its tap windows */
   { 1.00f, 0.50f, 0.00f, 0.1f, 1, 0 },     /* HARD: mean; BAIT and the habit memory are HARD only */
 };
-static const skill_t *skill_of(const ai_t *a) { return &SKILL[a->difficulty > AI_HARD ? AI_MEDIUM : a->difficulty]; }
+static const skill_t SKILL_VS_HUMAN[3] = {
+  { 0.75f, 0.0f, 0.50f, 0.7f, 0, 90 },
+  { 0.85f, 0.30f, 0.25f, 0.5f, 1, 180 },   /* MEDIUM against a person: 0.85 throttle, aims 0.5 u wide, a 3 s breath after a landed hit */
+  { 1.00f, 0.50f, 0.00f, 0.1f, 1, 0 },
+};
+#define AI_OPENING_BREATH 180                  /* frames EASY and MEDIUM hold off at the horn when a human is in the match */
+static const skill_t *skill_of(const ai_t *a) {
+  int d = a->difficulty > AI_HARD ? AI_MEDIUM : a->difficulty;
+  return a->vs_human ? &SKILL_VS_HUMAN[d] : &SKILL[d];
+}
+static int human_in_match(const match_t *m) {
+  for (int i = 0; i < m->nbots && i < MAX_BOTS; i++) if (!m->bots[i].is_ai && !m->bots[i].is_ops && m->bots[i].hp_max > 0) return 1;
+  return 0;
+}
 
 /* can I self-right right now (3.5, 4.8) */
 static int can_selfright(const bot_t *b) {
@@ -332,12 +348,14 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
       if (e->weapon == WP_HAMMER && e->windup > 0 && dist < 1.5f && sc < 0.6f) sc = 0.6f;
       if (me->hp < 25 && e->hp > 60 && sc < 0.5f) sc = 0.5f;
     }
-    if (a->backoff_t > 0) sc = 1.2f;                                       /* EASY: a breath after a landed hit */
+    if (a->backoff_t > 0) sc = 1.2f;                                       /* EASY and MEDIUM: a breath after a landed hit */
     s->score[GOAL_EVADE] = sc;
-    /* back off to 3.5 u and circle at 60 degrees */
+    /* back off to 3.5 u and circle at 60 degrees; during a breath with the enemy already far, ease away a
+     * little instead of closing to the circle (the breath is a hold, not an approach) */
     float dx = mx - e->x, dz = mz - e->z; norm2(&dx, &dz);
     float rx, rz; rot2(dx, dz, DEG(60), &rx, &rz);
     s->tx[GOAL_EVADE] = e->x + rx * 3.5f; s->tz[GOAL_EVADE] = e->z + rz * 3.5f;
+    if (a->backoff_t > 0 && dist > 4.0f) { s->tx[GOAL_EVADE] = mx + dx * 1.0f; s->tz[GOAL_EVADE] = mz + dz * 1.0f; }
   }
 
   /* HAZARD PUSH */
@@ -742,7 +760,7 @@ static int lifter_carry_target(const ai_t *a, const match_t *m, const bot_t *me,
 /* boost (8.3): a straight line over 4 u on ATTACK, or EVADE needing it; never on TREADS or LEG TRACKS */
 static void maybe_boost(ai_t *a, const match_t *m, const ai_frame_t *f, pad_state_t *out) {
   const bot_t *me = &m->bots[a->slot];
-  if (!skill_of(a)->boost) return;                                                     /* EASY never boosts */
+  if (!skill_of(a)->boost || a->backoff_t > 0) return;                                 /* EASY never boosts; nobody boosts during a breath */
   if (!DRIVES[me->build.drive].boost || me->boost > 0 || me->boost_cd > 0 || me->inverted || !bot_can_drive(me)) return;
   if (a->prev_buttons & IN_L) return;
   const ai_view_t *e = a->target >= 0 ? &f->bots[a->target] : 0;
@@ -777,9 +795,13 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
   if (!me->alive) { a->prev_buttons = 0; return; }
   const ai_frame_t *f = ring_read(a, a->reaction);
 
-  /* skill bookkeeping: EASY backs off after it lands a hit; the EVADE budget */
+  /* skill bookkeeping: EASY and MEDIUM back off after they land a hit on a person, and hold off for the
+   * opening breath at the horn so a player still reading the screen is not hit before they have moved
+   * (HARD charges); the EVADE budget */
   if (!me->is_ops) {
+    a->vs_human = (uint8_t)human_in_match(m);
     const skill_t *sk = skill_of(a);
+    if (m->frame <= 1 && sk->backoff > 0 && a->vs_human) a->backoff_t = AI_OPENING_BREATH;
     if (me->dealt > a->last_dealt + 0.5f && sk->backoff > 0) a->backoff_t = sk->backoff;
     a->last_dealt = me->dealt;
     if (a->backoff_t > 0) a->backoff_t--;

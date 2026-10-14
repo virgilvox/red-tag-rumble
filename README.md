@@ -8,13 +8,13 @@ A red tag on a project means fourteen days and then it is free for the taking or
 
 ## An evening
 
-1. Title. FIGHT for 1 to 4 pads, SOLO against the practice bot (EASY on a fresh cabinet; hold Y in the garage with Left or Right for MEDIUM or HARD), HOW IT WORKS (seven rules cards, about 18 s), HALL OF FAME and SETTINGS. Leave it alone and two house AIs fight in THE BAY behind the menu.
-2. Lobby. Any pad joins with A, B, X, Y or Start. Pick a mode, X flips your stick scheme between ARCADE and TANK, A marks READY, and Start readies you and goes to the garage. Y plays HOW IT WORKS. FILL WITH BOT puts AI seats in the empty chairs, each with a different bot. On a cabinet's first evening HOW IT WORKS plays itself once before the lobby; any button skips it.
+1. Title. FIGHT for 1 to 4 pads, SOLO against the practice bot (EASY on a fresh cabinet; hold Y in the garage with Left or Right for MEDIUM or HARD; it never builds a copy of your bot), HOW IT WORKS (seven rules cards, about 18 s), HALL OF FAME and SETTINGS. Leave it alone and two house AIs fight in THE BAY behind the menu.
+2. Lobby. Any pad joins with A, B, X, Y or Start (a Start that joins also goes). Pick a mode, X flips your stick scheme between ARCADE and TANK, A marks READY, and Start readies you and goes to the garage. Y plays HOW IT WORKS. FILL WITH BOT puts AI seats in the empty chairs, each with a different bot; an unseated pad steps it with its stick, a seated pad (the keyboard) holds Y with Left or Right. On a cabinet's first evening HOW IT WORKS plays itself once before the lobby; any button skips it.
 3. Garage. One panel per seat around a turntable with your bot on it. Spend the tags, lock in with A, or press Start to lock and go.
 4. Arena vote. Six cards; the stick picks, A votes, majority wins, ties go random. The vote closes 2 s after everyone has voted, or at 8 s.
 5. Countdown, then the fight. Each seat gets its own camera: halves for two, quadrants for four, two plus a big map for three, one full view for solo. One approach is one hit and no single hit takes more than a fifth of a bot, so a fight runs about 35 to 60 s; the music is a 156 bpm industrial track that brings in a rising riff for the last 20 s or when a bot is under 30 HP.
 6. KO or TIME. A KO goes slow motion on a shared camera; TIME goes to the judges (damage, aggression, control).
-7. Results and the rematch vote: REBUILD, SAME BOTS, NEW ARENA or LOBBY. The evening tally and the hall of fame persist in the cabinet's save. A table that says nothing after a fight goes back to the lobby after 40 s, and an empty lobby back to the title, so an abandoned cabinet returns to the attract on its own.
+7. Results and the rematch vote: REBUILD, SAME BOTS, NEW ARENA or LOBBY. The evening tally and the hall of fame persist in the cabinet's save. A table that says nothing for 40 s after a fight ends goes back to the lobby, and an empty lobby back to the title, so an abandoned cabinet returns to the attract on its own.
 
 ![Four garage panels](docs/garage.png)
 
@@ -41,7 +41,7 @@ W3C standard gamepad. The keyboard is pad 1: arrows, Z (A), X (B), A (X), S (Y),
 | Left stick or d-pad | drive: throttle and steer (HOVER and MELTY: the direction to travel, relative to your camera) |
 | Right stick | camera nudge, 30 degrees, springs back; turntable scrub in the garage |
 | A or RT | weapon: hold for spinners, flame and lifter, tap for flipper, hammer, spike and crusher, tap toggles the saw |
-| B | brake; self-right when upside down; hold 1 s to leave the lobby or garage |
+| B | brake; self-right when upside down; hold 1 s to leave the lobby, or to take the table from the garage back to the lobby |
 | X | taunt; RANDOM BOT in the garage |
 | Y | hold for the controls card, in the garage and the fight; a tap in the garage cycles the presets; a tap in the lobby plays HOW IT WORKS; held with the d-pad or stick it steps the garage's shared settings |
 | L or LT | boost (not on TREADS or LEG TRACKS) |

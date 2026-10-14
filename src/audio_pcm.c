@@ -52,6 +52,9 @@ static float scratch[8192 * 2];
 static int cur_mode;              /* the mode the game asked for last */
 static int tension, slowmo;
 static float duck_t = 1.0f;
+static float hit_duck_left;                    /* seconds left of the hit duck (audio_duck_hit) */
+#define HIT_DUCK_GAIN 0.63f                    /* 4 dB under the bed */
+#define HIT_DUCK_S 0.15f
 
 #ifndef MUSIC_LIVE
 /* -- the baked stems ------------------------------------------------ */
@@ -182,8 +185,11 @@ static void ramp_gains(float dt) {
   }
   { float d = fade_t - fade, step = fade_r > 0 ? dt / fade_r : 1.0f;
     if (d > step) fade += step; else if (d < -step) fade -= step; else fade = fade_t; }
-  { float d = duck_t - duck, step = dt / 0.1f;
-    if (d > step) duck += step; else if (d < -step) duck -= step; else duck = duck_t; }
+  { /* the pause duck ramps over 0.1 s; a hit duck drops in 20 ms and recovers over 0.1 s */
+    float target = duck_t;
+    if (hit_duck_left > 0.0f) { hit_duck_left -= dt; if (target > HIT_DUCK_GAIN) target = HIT_DUCK_GAIN; }
+    float d = target - duck, step = d < 0 && hit_duck_left > 0.0f ? dt / 0.02f : dt / 0.1f;
+    if (d > step) duck += step; else if (d < -step) duck -= step; else duck = target; }
   for (int i = 0; i < STEMS; i++) if (ch[i] >= 0) wc_mixer_set_volume(ch[i], stem_vol(i));
   if (out_fade > 0.0f) {
     out_fade -= dt / out_secs;
@@ -304,6 +310,9 @@ void audio_duck(float gain) {
   duck_t = gain < 0.0f ? 0.0f : gain > 1.0f ? 1.0f : gain;
   audio_band_duck(duck_t);
 }
+
+/* a landed hit: the stems drop HIT_DUCK_GAIN for HIT_DUCK_S so the clang sits over the music (11.3) */
+void audio_duck_hit(void) { if (duck_t >= 0.99f) hit_duck_left = HIT_DUCK_S; }
 
 #ifdef RTR_AUDIO_PROBE
 /* a scripted run of every call for the rig (EXTRA_CFLAGS=-DRTR_AUDIO_PROBE=1 or 2),

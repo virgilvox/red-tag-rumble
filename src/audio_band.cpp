@@ -443,8 +443,8 @@ class Band {
         else { Push(0, I_BUZZ, Mtof(47), 1.0f); Push(30, I_BUZZ, Mtof(52), 1.0f); Push(kBeatMs * 3 / 2, I_BUZZ_OFF, 0, 0); }   /* B2 into E3, a beat and a half */
         break;
       case SFX_HIT_LIGHT:
-        Push(0, I_SPARK, Mtof(Pal(64, r)), 0.6f);
-        if (!low) Push(0, I_CLANG, Mtof(Pal(76, rng_bells_.Next())), 0.5f);   /* the low variant is a landing or a wall: no metal */
+        Push(0, I_SPARK, Mtof(Pal(64, r)), 0.9f);
+        if (!low) Push(0, I_CLANG, Mtof(Pal(76, rng_bells_.Next())), 0.8f);   /* the low variant is a landing or a wall: no metal */
         break;
       case SFX_HIT_HEAVY:
         Push(0, I_IMPACT, kImpactHz, 1.0f); Push(0, I_CLANG, Mtof(Pal(52, r)), 0.9f);
@@ -640,9 +640,9 @@ class Band {
 
   /* SFX gains are measured, not the reference rack's: Bellows engines differ
    * by 10x in native loudness (tools/bake_music.cpp prints the peak and RMS
-   * of every patch). The buses are trimmed so a HIT_HEAVY at the default
-   * level peaks near -5 dBFS before the limiter and only CLASH and KO reach
-   * the ceiling; the stems under them are trimmed in audio_pcm.c */
+   * of every patch). The buses are trimmed so a hit sits about 6 dB over the
+   * arena bed (the stems duck 4 dB under every hit, audio_pcm.c) and only
+   * CLASH and KO reach the ceiling; the stems' trims are in audio_pcm.c */
   void SfxSpan(float* l, float* r, int from, int n, bool songs) {
     for (int i = 0; i < n; ++i) { sl_[i] = sr_buf_[i] = 0.0f; }
     const float g = sfx_gain_;
@@ -654,12 +654,12 @@ class Band {
       clang_.Process(bl_, br_, 0, n);
       punch_.Process(bl_, br_, 0, n);
       for (int i = 0; i < n; ++i) {
-        float a = bl_[i] * 0.68f * g, b = br_[i] * 0.68f * g;
+        float a = bl_[i] * 0.85f * g, b = br_[i] * 0.85f * g;
         l[from + i] += a; r[from + i] += b;
         sl_[i] += 0.25f * a; sr_buf_[i] += 0.25f * b;
       }
     }
-    Mix(spark_, 0.3f * g, 0.22f * g, 0.0f, l, r, from, n);
+    Mix(spark_, 0.5f * g, 0.22f * g, 0.0f, l, r, from, n);
     Mix(buzz_, 0.6f * g, 0.0f, 0.0f, l, r, from, n);
     Mix(bells_, 0.5f * g, 0.25f * g, 0.0f, l, r, from, n);
     Mix(gong_, 0.5f * g, 0.2f * g, 0.0f, l, r, from, n);

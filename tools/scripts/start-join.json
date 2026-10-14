@@ -1,0 +1,26 @@
+[
+{
+"from": 30,
+"to": 32,
+"pad": 0,
+"buttons": [
+"A"
+]
+},
+{
+"from": 60,
+"to": 62,
+"pad": 0,
+"buttons": [
+"A"
+]
+},
+{
+"from": 90,
+"to": 92,
+"pad": 1,
+"buttons": [
+"START"
+]
+}
+]

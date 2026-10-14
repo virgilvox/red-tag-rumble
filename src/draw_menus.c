@@ -232,7 +232,8 @@ static void lobby_seat_card(int i, float t, float dt) {
     int a = 140 + (int)(115 * pulse(t, 1));
     hud_text(F_H2, x + w / 2, y + 62, S_PRESS_A_TO_JOIN_1, C_BONE, a, AL_CENTER);
     hud_text(F_H2, x + w / 2, y + 104, S_PRESS_A_TO_JOIN_2, C_BONE, a, AL_CENTER);
-    hud_text(F_MONO_S, x + 16, y + 180, S_FILL_WITH_BOT, C_ASH, 255, AL_LEFT);
+    hud_text(F_MONO_S, x + 16, y + 172, S_FILL_WITH_BOT, C_ASH, 255, AL_LEFT);
+    hud_text(F_MONO_S, x + 16, y + 194, S_FILL_HINT, C_SMOKE, 255, AL_LEFT);   /* how a seated pad (the keyboard) steps it */
     int fill = G.fill_with_bot;
     stepper(x + w - 64, y + 194, F_MONO, VAL_OFF_ON[fill ? 1 : 0], C_BONE, fill, !fill, 0);
     return;

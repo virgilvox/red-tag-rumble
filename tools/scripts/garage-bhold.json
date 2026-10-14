@@ -1,0 +1,58 @@
+[
+{
+"from": 30,
+"to": 32,
+"pad": 0,
+"buttons": [
+"A"
+]
+},
+{
+"from": 60,
+"to": 62,
+"pad": 0,
+"buttons": [
+"A"
+]
+},
+{
+"from": 70,
+"to": 72,
+"pad": 1,
+"buttons": [
+"A"
+]
+},
+{
+"from": 90,
+"to": 92,
+"pad": 0,
+"buttons": [
+"A"
+]
+},
+{
+"from": 94,
+"to": 96,
+"pad": 1,
+"buttons": [
+"A"
+]
+},
+{
+"from": 110,
+"to": 112,
+"pad": 0,
+"buttons": [
+"START"
+]
+},
+{
+"from": 200,
+"to": 270,
+"pad": 0,
+"buttons": [
+"B"
+]
+}
+]

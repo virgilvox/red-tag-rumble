@@ -324,6 +324,7 @@ static void drain_events(void) {
       if (as >= 0 && band >= BAND_HEAVY) cam_punch(as, -e->nx, -e->nz, hb->punch * 0.5f);
       if (!(sfx_band_done & (1 << band))) {
         audio_play(hb->sfx);
+        audio_duck_hit();
         sfx_band_done |= 1 << band;
       }
       if (hb->crowd) audio_crowd(hb->crowd / 100.0f);

@@ -77,6 +77,8 @@
 #define CLOSING_MIN 0.4f
 #define CLOSING_MAX 1.3f
 #define SPINNER_HIT_CD 30
+/* no count-out for stillness in the first 5 s of a fight (an inverted bot still counts) */
+#define COUNTOUT_GRACE_FRAMES 300
 /* frames a HOVER's skirt stays pinched after a bot pressed on it (drive_step, bots_collide) */
 #define SKIRT_FRAMES 24
 /* a HOVER has thrust but no brakes: the part of its drive that fights the current velocity (slowing,
@@ -1482,6 +1484,7 @@ static void checks_step(match_t *m) {
       int inv_stuck = b->inverted && !b->airborne && b->build.drive != DR_HOVER && b->build.drive != DR_MELTY && !WEAPONS[b->build.weapon].inv_drive;
       int counting = inv_stuck || (b->still && !b->airborne && !b->lifted_by && !b->clamped_by && speed < 0.5f);
       if (m->park && b->is_ai) counting = 0;          /* a parked practice bot under the rig */
+      if (m->frame < COUNTOUT_GRACE_FRAMES && !inv_stuck) counting = 0;   /* the first 5 s: a player reading the screen is not counted */
       if (counting) {
         b->countout++;
         if (b->countout % 60 == 0 && b->countout < COUNTOUT_FRAMES) ev_simple(m, EV_COUNT_TICK, i, i, 10 - b->countout / 60, bd->x, bd->z, bd->y);

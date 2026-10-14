@@ -1,0 +1,4 @@
+[
+  { "from": 200, "to": 202, "pad": 0, "buttons": ["A"] },
+  { "from": 260, "to": 262, "pad": 0, "buttons": ["A"] }
+]

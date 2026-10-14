@@ -67,6 +67,7 @@ typedef struct {
    * tap weapon's window); EVADE has a budget: evade_t counts frames spent evading one target and
    * evade_block_t suppresses it after 120 so a spinner is attacked from the rear, not orbited forever */
   int backoff_t, evade_t, evade_block_t; float last_dealt; uint8_t hesitate;
+  uint8_t vs_human;                           /* a human seat is in this match: the gentler skill table applies */
   float esc_dx, esc_dz; uint8_t esc_wall;    /* the stuck detector's escape: off the nearest wall, never backing into it */
   uint8_t seeded;                             /* the match seed is folded into rng on the first think */
   float aim_x, aim_z;                         /* this think's aim error on the attack point */

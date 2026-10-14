@@ -37,6 +37,7 @@ void audio_crowd(float level);
 void audio_slowmo(int on);                /* drums stem only while on, immediate */
 void audio_tension(int on);               /* fades the lead stem in while any human bot is under 30 HP */
 void audio_duck(float gain);              /* pause: 0.3 */
+void audio_duck_hit(void);                /* a hit: the music drops 4 dB for 150 ms so the clang reads */
 /* part sounds in the garage (spec 3.1): the part's own sound when a row cycles or RT test fires */
 void audio_part(int row, int option);
 void audio_render(float *ring, uint32_t cap, uint32_t *cursor, uint32_t rate, double dt_ms);

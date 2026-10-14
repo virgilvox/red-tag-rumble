@@ -122,6 +122,7 @@ STR char *MODE_CARD_2[] = { "", "", "STANDING", "THE HILL", "", "" };
 STR char *S_PRESS_A_TO_JOIN_1 = "PRESS A";
 STR char *S_PRESS_A_TO_JOIN_2 = "TO JOIN";
 STR char *S_FILL_WITH_BOT = "FILL WITH BOT";
+STR char *S_FILL_HINT = "HOLD Y, LEFT RIGHT";
 STR char *S_READY = "READY";
 STR char *S_ARCADE = "ARCADE";
 STR char *S_TANK = "TANK";

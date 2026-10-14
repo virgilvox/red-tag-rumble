@@ -449,6 +449,26 @@ static int check_arena(int ai) {
     if (d < 1.5f - 1e-3f) { printf("  FAIL spawn %d at (%.1f, %.1f) is %.2f from the OPS zone\n", k, sp[0], sp[1], d); fail = 1; }
     if (fabsf(sp[0]) > hw - 1.0f || fabsf(sp[1]) > hd - 1.0f) { printf("  FAIL spawn %d at (%.1f, %.1f) is within 1 u of a wall\n", k, sp[0], sp[1]); fail = 1; }
   }
+  /* 3b. a timed hazard that can reach a spawn (within 1.5 u of it) is idle at haz_clock 0: nobody is hit or
+   *     shown a tell before the first tell has had time to play (the laser sweeps the whole floor) */
+  for (int h = 0; h < a->nhaz; h++) {
+    const hazard_def_t *hz = &a->haz[h];
+    if (hz->period <= 0 || hz->type == HZ_RAMP || hz->type == HZ_DECK || hz->type == HZ_MOUND || hz->type == HZ_WIND || hz->type == HZ_HILL) continue;
+    float x0, z0, x1, z1; arena_hazard_rect(hz, &x0, &z0, &x1, &z1);
+    box_t hb = { x0, z0, x1, z1, 0, "hazard", -1 };
+    int reaches = 0;
+    for (int k = 0; k < 6; k++) {
+      const float *sp = k < 4 ? a->spawn4[k] : a->spawn2[k - 4];
+      box_t me = { sp[0], sp[1], sp[0], sp[1], 0, "spawn", -1 };
+      if (box_dist(&me, &hb) < 1.5f) reaches = 1;
+    }
+    if (!reaches) continue;
+    float pt; int ph = hazard_phase(hz, 0, &pt);
+    if (ph) { printf("  FAIL hazard %d (type %d) reaches a spawn and is %s at haz_clock 0 (offset %.1f)\n", h, hz->type, ph == 1 ? "active" : "telling", hz->offset); fail = 1; }
+    /* and its first active phase comes after a full tell: the idle band before it is at least tell_s long */
+    float first = hz->period - hz->offset; while (first < 0) first += hz->period;
+    if (first < hz->tell_s + 1.0f) { printf("  FAIL hazard %d (type %d) reaches a spawn and fires %.1f s after the horn\n", h, hz->type, first); fail = 1; }
+  }
   /* 4. hazard reach inside the floor; the OPS zone outside pits, hazards and spawns */
   for (int h = 0; h < a->nhaz; h++) {
     float x0, z0, x1, z1; arena_hazard_rect(&a->haz[h], &x0, &z0, &x1, &z1);
