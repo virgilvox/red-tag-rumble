@@ -90,7 +90,7 @@ STR char *MELTY_ADJ     = "DIZZY";
 STR char *CHASSIS_NOUN[] = { "BOX", "DOORSTOP", "PANCAKE", "BOWL", "SKELETON", "LUNCHBOX" };
 /* control card */
 STR char *CARD_LINE      = "FLIPPED? B TO RIGHT YOURSELF.  STUCK? OPS IS COMING.";
-STR char *CARD_KEYS      = "KEYBOARD: ARROWS, Z WEAPON, X BRAKE, A TAUNT, Q BOOST, ENTER PAUSE";
+STR char *CARD_KEYS      = "KEYBOARD: ARROWS DRIVE, Z WEAPON, X BRAKE, A TAUNT, S CARD, Q BOOST, ENTER PAUSE";
 /* placement words, under 10 */
 STR char *PLACE_WORD[]   = { "WINNER", "HP ZERO", "FLIPPED", "PITTED", "OFF ROOF", "COUNTED", "DECK", "TIMED OUT" };
 
@@ -107,11 +107,15 @@ STR char *S_KEY_BACK = "BACK";
 STR char *S_KEY_NEXT = "NEXT";
 STR char *S_KEY_SKIP = "SKIP";
 STR char *S_KEY_VOTE = "VOTE";
+STR char *S_KEY_CLOSE = "CLOSE";
+STR char *S_KEY_UNDO = "UNDO";
+STR char *S_KEY_ANY = "ANY BUTTON";
 /* boot */
 STR char *S_BOOT = "WARMING UP THE SHELF";
+STR char *S_BOOT_GARAGE = "THE GARAGE";
 /* lobby (10.8) */
 STR char *S_PICK_A_MODE = "PICK A MODE";
-STR char *S_EVENING = "EVENING: %d - %d - %d - %d";
+STR char *S_EVENING = "EVENING %d . %d . %d . %d";
 STR char *MODE_NAME[]   = { "DEATHMATCH", "KO BY FLIP", "LAST BOT STANDING", "KING OF THE HILL", "2V2", "TOURNAMENT" };
 STR char *MODE_CARD_1[] = { "DEATHMATCH", "KO BY FLIP", "LAST BOT", "KING OF", "2V2", "TOURNAMENT" };
 STR char *MODE_CARD_2[] = { "", "", "STANDING", "THE HILL", "", "" };
@@ -121,7 +125,9 @@ STR char *S_FILL_WITH_BOT = "FILL WITH BOT";
 STR char *S_READY = "READY";
 STR char *S_ARCADE = "ARCADE";
 STR char *S_TANK = "TANK";
-STR char *S_HOLD_B_LEAVE = "HOLD B 1 S TO LEAVE";
+STR char *S_HOLD_B_LEAVE = "HOLD 1 S TO LEAVE";
+STR char *S_TANK_NOTE = "TWO STICKS";
+STR char *S_LOBBY_RULES = "HOW IT WORKS";
 STR char *S_ONE_CAMERA = "ONE CAMERA";
 STR char *S_SPLIT = "SPLIT";
 STR char *S_COMEBACK = "COMEBACK";
@@ -162,8 +168,14 @@ STR char *S_PRACTICE_BOT = "PRACTICE BOT (AI)";
 STR char *S_NEXT_FIGHT = "NEXT FIGHT";
 STR char *S_N_BOTS = "%d BOTS";
 STR char *S_FIGHT_LENGTH = "FIGHT LENGTH";
-STR char *S_GARAGE_HINT_1 = "ANY SEAT: UP DOWN PICKS A ROW,";
+STR char *S_GARAGE_HINT_1 = "HOLD Y: UP DOWN PICKS A ROW,";
 STR char *S_GARAGE_HINT_2 = "LEFT RIGHT STEPS IT";
+STR char *S_AI_TOGGLE_HINT = "HOLD Y, LEFT RIGHT SETS IT";
+STR char *S_PRACTICE_ROW = "PRACTICE BOT";
+STR char *S_TOAST_TIME_TRIMMED = "TIME UP. SEAT %d WAS %s, SO IT WAS TRIMMED";
+/* the PAINT row: scheme number and decal set (3.7) */
+STR char *DECAL_NAME[] = { "PLAIN", "STRIPES", "TAPE", "NUMBER" };
+STR char *S_PAINT_ROW = "%d %s";
 STR char *BAR_NAME[]    = { "SPEED", "HIT", "TOUGH" };
 STR char *S_SCHEME = "SCHEME %d";
 /* vote (10.12) */
@@ -208,11 +220,12 @@ STR char *S_AIR = "AIR %d.%d S";
 STR char *S_FLIPS = "FLIPS %d";
 STR char *REMATCH_ROWS[] = { "REBUILD", "SAME BOTS", "NEW ARENA", "LOBBY" };
 STR char *S_AUTO_N = "AUTO %d";
+STR char *S_LOBBY_IN_N = "LOBBY IN %d";
 STR char *S_WINS_TALLY = "WINS  1: %d   2: %d   3: %d   4: %d";
 /* settings (10.22) */
 STR char *S_SETTINGS = "SETTINGS";
 STR char *SETTINGS_ROWS[] = { "SPLIT", "ONE CAMERA", "FIGHT LENGTH", "COMEBACK", "SHAKE", "HIT STOP", "STINGER SIZE", "SFX", "MUSIC", "COLOURBLIND", "RUMBLE", "STICKS", "RESET SAVE" };
-STR char *S_HOLD_A_2S = "HOLD A 2 S";
+STR char *S_HOLD_A_2S = "HOLD 2 S";
 STR char *S_SAVED = "SAVED TO THE CABINET";
 /* hall of fame (10.23) */
 STR char *S_HALL = "HALL OF FAME";
@@ -223,14 +236,14 @@ STR char *S_KOS_BY_CAUSE = "KOS BY CAUSE";
 STR char *S_MATCHES = "MATCHES %d";
 STR char *S_NONE_YET = "NONE YET";
 STR char *S_CUSTOM = "CUSTOM";
-STR char *S_HOLD_B_WIPE = "HOLD B 3 S: WIPE";
+STR char *S_HOLD_B_WIPE = "HOLD 3 S: WIPE";
 STR char *KO_SHORT[]    = { "HP ZERO", "FLIP", "PIT", "ROOF", "COUNT", "DECK" };
 /* rules flash (10.25) */
 STR char *S_HOW_IT_WORKS = "HOW IT WORKS";
 STR char *S_N_OF_M = "%d OF %d";
 /* controls card (10.24) callouts, two words each */
 STR char *CARD_CALLOUT[] = { "DRIVE", "WEAPON", "BRAKE", "BOOST", "TAUNT", "PAUSE" };
-STR char *CARD_CALLOUT_SUB[] = { "LEFT STICK", "A OR RT", "B", "L OR LT", "X", "START" };
+STR char *CARD_CALLOUT_SUB[] = { "STICK OR D PAD", "A OR RT", "B", "L OR LT", "X", "START" };
 
 /* fight HUD chips, the bracket card and the results eyebrow (draw.c, items 9, 10, 16) */
 STR char *S_HILL = "HILL";

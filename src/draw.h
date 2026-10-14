@@ -77,4 +77,18 @@ void hall_screen(float dt);
 void flash_card(int step, float t);
 void controls_card(const rect_t *r, int compact, int seat);
 
+/* -- flow state the HUD reads (bodies in game_flow.c) -------------- */
+/* the boot: progress 0..1 over the compile steps and the scene being compiled */
+float game_boot_progress(void);
+const char *game_boot_step_name(void);
+/* the live garage clock total in frames (60 s, 30 s on a rebuild) */
+int  game_garage_total(void);
+/* the 3 player match card: the focused row, and how many rows it has (3, plus PRACTICE BOT with an AI seat) */
+int  game_match_card_row(void);
+int  game_match_card_rows(void);
+/* the rematch menu: seconds until it decides by itself; *to_lobby is set while a silent table heads to the lobby */
+int  game_rematch_auto(int *to_lobby);
+/* the rules flash was offered automatically (a fresh save's first evening): any button skips it */
+int  game_rules_auto(void);
+
 #endif
