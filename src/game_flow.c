@@ -345,6 +345,7 @@ static void go_garage(int rebuild) {
   garage_total = rebuild ? REBUILD_FRAMES : GARAGE_FRAMES;
   snap_left = -1;
   world_attach_garage();
+  build_t picked[4]; int npicked = 0;         /* the AI seats never share a build or a name (FILL WITH BOT) */
   for (int s = 0; s < 4; s++) {
     seat_t *st = &G.seats[s];
     if (st->kind == SEAT_EMPTY) { world_bot_visible(s, 0); continue; }
@@ -352,8 +353,9 @@ static void go_garage(int rebuild) {
     seat_reset_garage(st);
     st->join_slide = 0;
     if (st->kind == SEAT_AI) {
-      ai_pick_build(&ai_pick[s], st->ai_level, human_last_build(), SAVE.habits, &grng);
+      ai_pick_build_nth(&ai_pick[s], st->ai_level, human_last_build(), SAVE.habits, &grng, picked, npicked);
       if (!build_legal(&ai_pick[s], G.players)) build_preset(&ai_pick[s], PRE_LAUNCH);
+      picked[npicked++] = ai_pick[s];
       ai_pick[s].paint = (uint8_t)s;
       ai_frame[s] = 0;
       if (G.rig_park) { build_preset(&ai_pick[s], PRE_LAUNCH); ai_pick[s].paint = (uint8_t)s; st->build = ai_pick[s]; st->locked = 1; }   /* the drive scripts' parked practice bot (balance drive_setup) */

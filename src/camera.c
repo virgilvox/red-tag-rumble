@@ -21,6 +21,7 @@ typedef struct {
   float n0x, n0y, n1x, n1y;    /* value noise samples */
   float punch_x, punch_z, punch_t;
   float yaw;                   /* the chase yaw written into pad_state_t.cam_yaw */
+  float lift;                  /* 0..1: another bot sits between the camera and the bot, the camera rises and pulls in */
   int init;
 } chase_t;
 
@@ -34,7 +35,7 @@ static float shake_scale = 1.0f;
 static int cut_frames, cut_target;             /* the tape cut: frames left and the ONE CAMERA state to switch to at the midpoint */
 static int engage_frames, release_frames;
 static rect_t fixed_rects[4]; static int nfixed;
-static float ko_angle; static int ko_victim = -1, ko_victor = -1;
+static float ko_angle, ko_angle0; static int ko_victim = -1, ko_victor = -1;
 static float time_t_;
 static float shared_px, shared_py, shared_pz, shared_lx, shared_ly, shared_lz; static int shared_init;
 static float attract_t;
@@ -130,7 +131,7 @@ void cam_set_match(const match_t *m, int one_camera_setting, int split_setting, 
   one_cam_allowed = one_camera_setting == ONECAM_ALWAYS ? 1 : one_camera_setting == ONECAM_OFF ? 0 : (a && a->one_camera_default && cur_players == 2);
   one_cam_active = one_camera_setting == ONECAM_ALWAYS;
   cut_frames = 0; engage_frames = release_frames = 0;
-  for (int i = 0; i < 4; i++) { ch[i].init = 0; ch[i].shake_amp = 0; ch[i].punch_t = 1; ch[i].nudge = 0; }
+  for (int i = 0; i < 4; i++) { ch[i].init = 0; ch[i].shake_amp = 0; ch[i].punch_t = 1; ch[i].nudge = 0; ch[i].lift = 0; }
   shared_init = 0;
   ko_victim = ko_victor = -1;
 }
@@ -162,6 +163,7 @@ void cam_punch(int seat, float nx, float nz, float amount) {
   ch[seat].punch_x = nx / l * amount; ch[seat].punch_z = nz / l * amount; ch[seat].punch_t = 0;
 }
 void cam_nudge(int seat, float rx, float ry) { (void)ry; if (seat >= 0 && seat < 4) ch[seat].nudge_v = rx; }
+static void set_all_yaw(float yaw) { for (int s = 0; s < 4; s++) ch[s].yaw = yaw; }
 float cam_yaw(int seat) { return seat >= 0 && seat < 4 ? ch[seat].yaw : 0; }
 
 /* 28 Hz value noise in -1..1, two channels */
@@ -181,9 +183,17 @@ static void shake_offset(chase_t *c, float dt, float *ox, float *oy) {
 }
 
 /* -- wall push-out (9.2) ------------------------------------------ */
+/* push a point out of an axis aligned box grown by 0.4, along the nearer face */
+static void push_out_box(float *x, float *z, float cx, float cz, float hx, float hz) {
+  float ex = hx + 0.4f, ez = hz + 0.4f, dx = *x - cx, dz = *z - cz;
+  if (fabsf(dx) >= ex || fabsf(dz) >= ez) return;
+  if (ex - fabsf(dx) < ez - fabsf(dz)) *x = cx + (dx < 0 ? -ex : ex); else *z = cz + (dz < 0 ? -ez : ez);
+}
 static void push_out(float *x, float *y, float *z) {
   if (arena) {
-    float hw = arena->w / 2 - 0.4f, hd = arena->d / 2 - 0.4f;
+    /* a full bot length inside the lexan (9.2 says 0.4): at 0.4 the shelves and signs standing right behind
+     * the wall filled the edge of a spawn camera's frame */
+    float hw = arena->w / 2 - 1.0f, hd = arena->d / 2 - 1.0f;
     if (!(arena->open_mask & OPEN_PX) && *x > hw) *x = hw;
     if (!(arena->open_mask & OPEN_NX) && *x < -hw) *x = -hw;
     if (!(arena->open_mask & OPEN_PZ) && *z > hd) *z = hd;
@@ -193,22 +203,53 @@ static void push_out(float *x, float *y, float *z) {
       const prop_def_t *p = &arena->props[i];
       if (p->kind != PR_HVAC && p->kind != PR_SERVER && p->kind != PR_SHELF && p->kind != PR_WALL) continue;
       if (p->h + 0.3f < *y) continue;
-      float ex = p->w / 2 + 0.4f, ez = p->d / 2 + 0.4f;
-      float dx = *x - p->x, dz = *z - p->z;
-      if (fabsf(dx) < ex && fabsf(dz) < ez) {
-        if (ex - fabsf(dx) < ez - fabsf(dz)) *x = p->x + (dx < 0 ? -ex : ex); else *z = p->z + (dz < 0 ? -ez : ez);
-      }
+      push_out_box(x, z, p->x, p->z, p->w / 2, p->d / 2);
+    }
+    /* the pulverizer: its post stands 1.5 behind the strike square toward the wall and the arm rests
+     * raised above it (world.c), a 3.7 u column a chase camera at 2.2 would otherwise sit inside */
+    for (int i = 0; i < arena->nhaz; i++) {
+      const hazard_def_t *h = &arena->haz[i];
+      if (h->type != HZ_PULVERIZER || *y > 3.8f) continue;
+      float ix = -h->x, iz = -h->z, il = sqrtf(ix * ix + iz * iz); if (il < 0.01f) { ix = 0; iz = 1; il = 1; }
+      ix /= il; iz /= il;                                            /* inward, as world.c aims the arm */
+      float cx = h->x - ix * 0.75f, cz = h->z - iz * 0.75f;         /* the square and the post, as one box */
+      float hx = h->w / 2 + fabsf(ix) * 0.95f, hz = h->d / 2 + fabsf(iz) * 0.95f;
+      push_out_box(x, z, cx, cz, hx, hz);
+    }
+    /* OPS: its taped zone while it is parked behind the gate (a spawn camera used to sit beside the
+     * referee in THE BAY), and its body wherever it drives; both only when the camera is low enough to see it */
+    if (M.nbots > OPS_SLOT && M.bots[OPS_SLOT].is_ops && *y < 2.8f) {
+      const bot_t *o = &M.bots[OPS_SLOT];
+      if (M.ops_state == OPS_PARKED) push_out_box(x, z, arena->ops_zone[0], arena->ops_zone[1], 1.0f, 1.0f);
+      float dx = *x - o->b.x, dz = *z - o->b.z, d = sqrtf(dx * dx + dz * dz), r = 1.3f;
+      if (d < r) { if (d < 0.01f) { dx = 1; dz = 0; d = 1; } *x = o->b.x + dx / d * r; *z = o->b.z + dz / d * r; }
     }
   }
   if (*y < 0.6f) *y = 0.6f;
 }
 
-/* forward for the camera: the heading for drives with a front, the velocity for HOVER, the heading intent for MELTY */
-static void bot_forward(const bot_t *b, float *fx, float *fz) {
-  if (b->build.drive == DR_HOVER) {
-    float sp = sqrtf(b->b.vx * b->b.vx + b->b.vz * b->b.vz);
-    if (sp > 0.5f) { *fx = b->b.vx / sp; *fz = b->b.vz / sp; return; }
+/* does the segment from the camera to its look point cross another bot's circle: the player's own bot
+ * would be hidden behind it (an attacker sitting between the camera and the bot) */
+static int view_blocked(const match_t *m, int slot, float px, float pz, float lx, float lz) {
+  if (!m) return 0;
+  float dx = lx - px, dz = lz - pz, L2 = dx * dx + dz * dz; if (L2 < 1e-4f) return 0;
+  for (int i = 0; i < m->nbots; i++) {
+    const bot_t *o = &m->bots[i];
+    if (i == slot || !o->alive || o->hp_max == 0) continue;
+    float r = (o->b.hl > o->b.hw ? o->b.hl : o->b.hw) + 0.3f;
+    float t = ((o->b.x - px) * dx + (o->b.z - pz) * dz) / L2;
+    if (t < 0.1f || t > 0.85f) continue;                            /* only between the camera and the bot, not beyond it */
+    float cx = px + dx * t - o->b.x, cz = pz + dz * t - o->b.z;
+    if (cx * cx + cz * cz < r * r) return 1;
   }
+  return 0;
+}
+
+/* forward for the camera: the body heading for every drive. A HOVER's heading follows its direction of
+ * travel at up to 3 rad/s in the sim (drive_step) and only while it drives, so this is the smoothed travel
+ * direction 9.2 asks for without the whip of the raw velocity when the bot is shoved; MELTY's heading is
+ * its intent, the spin is render only */
+static void bot_forward(const bot_t *b, float *fx, float *fz) {
   *fx = rtr_sin(b->b.h); *fz = rtr_cos(b->b.h);
 }
 
@@ -227,17 +268,32 @@ static void chase_update(int vp, int seat, const match_t *m, float dt) {
   float bx, by, bz;
   if (!world_bot_pos(slot, &bx, &by, &bz)) { bx = b->b.x; by = b->b.y; bz = b->b.z; }
   float fx, fz; bot_forward(b, &fx, &fz);
-  /* the right stick nudges yaw plus and minus 30 degrees and springs back */
-  float target_nudge = -c->nudge_v * (30 * PI / 180);
+  /* the right stick nudges yaw plus and minus 30 degrees and springs back: stick right swings the camera to
+   * the bot's left so the view looks to the right (a positive nudge lowers the heading, see sim.c right_of) */
+  float target_nudge = c->nudge_v * (30 * PI / 180);
   c->nudge += (target_nudge - c->nudge) * (1 - expf(-dt / 0.15f));
   float cn = cosf(c->nudge), sn = sinf(c->nudge);
   float rfx = fx * cn - fz * sn, rfz = fx * sn + fz * cn;
-  float tx = bx - rfx * 3.5f, ty = 2.2f, tz = bz - rfz * 3.5f;
   float lx = bx + fx * 0.6f, ly = by + 0.3f, lz = bz + fx * 0 + fz * 0.6f;
   if (b->b.y > 0.05f) ly = by + 0.3f; else ly = 0.3f;
-  if (!c->init) { c->px = tx; c->py = ty; c->pz = tz; c->lx = lx; c->ly = ly; c->lz = lz; c->init = 1; }
+  /* another bot between the camera and this one hides it: rise toward 3.4 and pull in toward 2.4 */
   float tau = b->b.y > 0.05f ? 0.2f : 0.12f;
   float k = 1 - expf(-dt / tau), kl = 1 - expf(-dt / 0.06f);
+  int blocked = c->init && view_blocked(m, slot, c->px, c->pz, lx, lz);
+  c->lift += ((blocked ? 1.0f : 0.0f) - c->lift) * k;
+  float follow = 3.5f - 1.1f * c->lift;
+  float tx = bx - rfx * follow, ty = 2.2f + 1.2f * c->lift, tz = bz - rfz * follow;
+  /* carried on a lifter (OPS or a LIFTER bot): the camera sits off the lifter's side, 3 u out and 2.8 up, on
+   * the side nearer the arena centre, so the player sees themselves on the forks instead of the inside of
+   * the lifter's body */
+  if (b->lifted_by && b->lifted_by - 1 < m->nbots) {
+    const bot_t *l = &m->bots[b->lifted_by - 1];
+    float lfx = rtr_sin(l->b.h), lfz = rtr_cos(l->b.h), rx = -lfz, rz = lfx;
+    float side = rx * -l->b.x + rz * -l->b.z >= 0 ? 1.0f : -1.0f;
+    tx = l->b.x + rx * side * 3.0f; tz = l->b.z + rz * side * 3.0f; ty = 2.8f;
+    lx = bx; ly = by + 0.3f; lz = bz;
+  }
+  if (!c->init) { c->px = tx; c->py = ty; c->pz = tz; c->lx = lx; c->ly = ly; c->lz = lz; c->init = 1; }
   c->px += (tx - c->px) * k; c->pz += (tz - c->pz) * k; c->py += (ty - c->py) * k;   /* the camera keeps its own height while the bot is airborne */
   c->lx += (lx - c->lx) * kl; c->ly += (ly - c->ly) * kl; c->lz += (lz - c->lz) * kl;
   float px = c->px, py = c->py, pz = c->pz;
@@ -327,6 +383,9 @@ void cam_update(const match_t *m, float dt) {
         t3_object_set_position(shared, shared_px + sx, shared_py + sy, shared_pz);
         t3_object_look_at(shared, shared_lx, shared_ly, shared_lz);
         shared->fov = cam_fov(LAY_SHARED);
+        /* every seat steers against the shared view now (HOVER and MELTY read cam_yaw): the chase yaw would be
+         * whatever the last split frame left, 0 before any, so stick up drove toward the camera */
+        set_all_yaw(atan2f(shared_lx - shared_px, shared_lz - shared_pz));
       } else {
         for (int i = 0; i < nvp; i++) chase_update(i, vp_seat[i], m, dt);
       }
@@ -341,8 +400,19 @@ void cam_update(const match_t *m, float dt) {
       float sep = sqrtf((ax - vx) * (ax - vx) + (az - vz) * (az - vz));
       float dist = J_KO_ORBIT_DIST, k = sep * 0.8f + 2.0f;
       if (k > dist) dist = k > 10.0f ? 10.0f : k;
-      float px = vx + sinf(ko_angle) * dist, pz = vz + cosf(ko_angle) * dist, py = J_KO_ORBIT_HEIGHT * dist / J_KO_ORBIT_DIST;
+      float ang = ko_angle, py = J_KO_ORBIT_HEIGHT * dist / J_KO_ORBIT_DIST;
+      /* a victim within 3 u of a closed wall: the orbit sweeps the half circle that faces the arena, 70
+       * degrees either side of the line from the victim to the centre, bouncing instead of wrapping, and
+       * sits higher so the floor and the bots fill the frame, not the lexan and the fog outside */
+      float wnx, wnz, wd;
+      if (arena && arena_nearest_wall(arena, vx, vz, &wnx, &wnz, &wd) && wd < 3.0f) {
+        float cyaw = atan2f(-vx, -vz);
+        ang = cyaw + 1.22f * sinf(ko_angle - ko_angle0);
+        py = 0.75f * dist;
+      }
+      float px = vx + sinf(ang) * dist, pz = vz + cosf(ang) * dist;
       push_out(&px, &py, &pz);
+      set_all_yaw(atan2f(vx - px, vz - pz));
       t3_object_set_position(shared, px, py, pz);
       t3_object_look_at(shared, vx + (ax - vx) * 0.25f, 0.4f, vz + (az - vz) * 0.25f);
       shared->fov = 50;
@@ -353,6 +423,7 @@ void cam_update(const match_t *m, float dt) {
       float u = time_t_ / 0.6f; if (u > 1) u = 1; u = 1 - (1 - u) * (1 - u) * (1 - u);
       t3_object_set_position(shared, shared_px + (px - shared_px) * u, shared_py + (py - shared_py) * u, shared_pz + (pz - shared_pz) * u);
       t3_object_look_at(shared, shared_lx + (lx - shared_lx) * u, shared_ly + (ly - shared_ly) * u, shared_lz + (lz - shared_lz) * u);
+      set_all_yaw(atan2f(lx - px, lz - pz));
       break; }
     case CAMM_ATTRACT: attract_t += dt; cam_attract(attract_t); break;
     default: break;      /* garage and lobby cameras are fixed by cam_set_garage and cam_set_lobby */
@@ -366,6 +437,7 @@ void cam_ko(int victim, int victor) {
   if (!world_bot_pos(victim, &vx, &y, &vz)) { vx = M.bots[victim & 3].b.x; vz = M.bots[victim & 3].b.z; }
   if (victor >= 0 && world_bot_pos(victor, &ax, &y, &az)) ko_angle = atan2f(ax - vx, az - vz) + 0.6f;   /* start on the line from victor to victim, a little aside */
   else ko_angle = 0;
+  ko_angle0 = ko_angle;
   cut_frames = J_TAPE_CUT_FRAMES; cut_target = 1;
 }
 

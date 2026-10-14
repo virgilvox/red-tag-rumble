@@ -5,9 +5,11 @@
  * the fields of ai_t; everyone else treats it as opaque storage.
  *
  * Conventions ai.c shares with sim.c: heading 0 is +z, forward is (sin h, cos h),
- * right is (cos h, -sin h), a positive stick X turns right (h grows), a stick
+ * the body's local +x is (cos h, -sin h) and lies on the bot's LEFT as seen on
+ * screen, so a right turn (stick X positive) is a heading DECREASE; a stick
  * pushed up is a negative ly and means forward. HOVER and MELTY get a world
- * direction with cam_yaw 0. lifted_by is the lifter's slot plus one. */
+ * direction against cam_yaw 0 (stick up +z, stick right -x). lifted_by is the
+ * lifter's slot plus one. */
 #ifndef RTR_AI_H
 #define RTR_AI_H
 #include "sim.h"
@@ -61,6 +63,13 @@ typedef struct {
   const arena_def_t *arena;                   /* override for tests; NULL means ARENAS[m->arena] */
   float last_haz_taken[MAX_BOTS]; int contact_t[MAX_BOTS];   /* habit observation */
   int last_boost[MAX_BOTS];
+  /* skill (8.4): EASY backs off for backoff_t frames after it lands a hit; a think may hesitate (skip a
+   * tap weapon's window); EVADE has a budget: evade_t counts frames spent evading one target and
+   * evade_block_t suppresses it after 120 so a spinner is attacked from the rear, not orbited forever */
+  int backoff_t, evade_t, evade_block_t; float last_dealt; uint8_t hesitate;
+  float esc_dx, esc_dz; uint8_t esc_wall;    /* the stuck detector's escape: off the nearest wall, never backing into it */
+  uint8_t seeded;                             /* the match seed is folded into rng on the first think */
+  float aim_x, aim_z;                         /* this think's aim error on the attack point */
 } ai_t;
 
 void ai_init(ai_t *a, int difficulty, int seat);
@@ -68,6 +77,10 @@ void ai_init(ai_t *a, int difficulty, int seat);
 void ai_think(ai_t *a, const match_t *m, pad_state_t *out);
 /* EASY picks ROLL OUT, LAUNCH or STOMP; MEDIUM counter-picks the human's last build; HARD reads habits (8.4) */
 void ai_pick_build(build_t *b, int difficulty, const build_t *human_last, const uint8_t habits[8], uint32_t *rng);
+/* the same for the n-th AI seat of a garage: `others` are the builds already picked for the other AI
+ * seats (FILL WITH BOT). The pick never shares a weapon and chassis pair (so never a name) with one of
+ * them: the first seat picks as ai_pick_build, the next ones take the other presets in turn */
+void ai_pick_build_nth(build_t *b, int difficulty, const build_t *human_last, const uint8_t habits[8], uint32_t *rng, const build_t *others, int nothers);
 /* bind an ai_t to a match slot (OPS uses slot 4) */
 void ai_bind(ai_t *a, int slot);
 /* HARD AI memory: fold a finished match into save.habits (8.4); human_slot -1 means no human */

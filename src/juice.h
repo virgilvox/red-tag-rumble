@@ -5,6 +5,7 @@
 #define RTR_JUICE_H
 #include <stdint.h>
 #include "audio.h"
+#include "sim.h"
 
 typedef struct { uint8_t stop; float punch, shake, flash; uint8_t sparks, chips; float rum_lo, rum_hi; uint16_t rum_ms; uint8_t sfx, crowd; } hit_band_t;
 enum { BAND_TAP, BAND_HIT, BAND_HEAVY, BAND_HUGE, BAND_CLASH, BAND_KO, BAND_COUNT };
@@ -30,10 +31,10 @@ static const hit_band_t HIT_BANDS[BAND_COUNT] __attribute__((unused)) = {
   { J_STOP_CLASH, 0.14f, 0.28f, 1.00f, 40, 8, 1.0f, 1.0f, 200, SFX_CLASH,     100 },
   { J_STOP_KO,    0.14f, 0.30f, 0.00f, 40, 8, 1.0f, 1.0f, 400, SFX_KO,        100 },
 };
-/* damage numbers from this much damage up use F_H2 (spec: heavy and up); 8 puts the hit
- * band on the big font so a 12 reads at a glance in a 640 wide half */
-#define J_NUMBER_BIG_MIN      8.0f
-static inline int hit_band(float dmg) { return dmg < 8 ? BAND_TAP : dmg < 15 ? BAND_HIT : dmg < 30 ? BAND_HEAVY : BAND_HUGE; }
+/* the band edges live in sim.h (BAND_*_MIN: tap 1 to 5, hit 6 to 10, heavy 11 to 17, huge 18 and up),
+ * under the HIT_CAP of a fifth of the bar; the sim applies the stop from the same edges */
+#define J_NUMBER_BIG_MIN      BAND_HIT_MIN       /* damage numbers from the hit band up use F_H2 */
+static inline int hit_band(float dmg) { return dmg < BAND_HIT_MIN ? BAND_TAP : dmg < BAND_HEAVY_MIN ? BAND_HIT : dmg < BAND_HUGE_MIN ? BAND_HEAVY : BAND_HUGE; }
 #define J_BAND_HUGE_WHITE_A   40     /* viewport white alpha, 1 frame */
 #define J_BAND_CLASH_WHITE_A  60
 #define J_SHAKE_CLAMP         0.34f
@@ -41,7 +42,7 @@ static inline int hit_band(float dmg) { return dmg < 8 ? BAND_TAP : dmg < 15 ? B
 #define J_SHAKE_HZ            28.0f
 #define J_SHAKE_SCALE         { 0.0f, 0.5f, 1.0f, 1.5f }   /* settings 0..3 */
 #define J_PUNCH_T             0.30f
-#define J_STINGER_BIGHIT_MIN  25.0f
+#define J_STINGER_BIGHIT_MIN  BAND_HUGE_MIN      /* BIG HIT on a huge band hit (the spec's 25 sat above HIT_CAP) */
 #define J_SPARK_SPEED_MIN     4.0f
 #define J_SPARK_SPEED_MAX     9.0f
 #define J_SPARK_CONE_DEG      50.0f

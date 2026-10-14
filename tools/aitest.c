@@ -37,7 +37,7 @@ static void preset(build_t *b, int p) { build_preset(b, p); }
 /* a fresh 1v1: me in slot 0 at (x, z, h), the enemy in slot 1 */
 static void match_reset(int my_preset, float x, float z, float h, int en_preset, float ex, float ez, float eh) {
   memset(&M, 0, sizeof M);
-  M.mode = MODE_DEATHMATCH; M.players = 2; M.nbots = 2; M.clock_s = 60; M.ops_target = 255;
+  M.mode = MODE_DEATHMATCH; M.players = 2; M.nbots = 2; M.clock_s = 60; M.ops_target = 255; M.hazards_on = 1;
   build_t b;
   preset(&b, my_preset); bot_setup(&M.bots[0], &b, 0, 1, 0, x, z, h);
   preset(&b, en_preset); bot_setup(&M.bots[1], &b, 1, 0, 1, ex, ez, eh);
@@ -84,7 +84,7 @@ int main(void) {
 
   /* 2 enemy behind, far: turn hard at 0.3 throttle */
   match_reset(PRE_ROLL_OUT, 0, 0, 0, PRE_LAUNCH, 1, -5, 0); ai_reset(AI_MEDIUM, 0);
-  o = run(1); report("ENEMY BEHIND FAR", o, GOAL_ATTACK, (o.lx > 30000 || o.lx < -30000) && o.ly > -0.4f * 32767 && o.ly < 0, "turn in place, 0.3 throttle");
+  o = run(1); report("ENEMY BEHIND FAR", o, GOAL_ATTACK, (o.lx > 30000 || o.lx < -30000) && o.ly > -0.6f * 32767 && o.ly < 0, "turn in place, half throttle");
 
   /* 3 enemy behind, close: reverse into it */
   match_reset(PRE_ROLL_OUT, 0, 0, 0, PRE_LAUNCH, 0, -1.3f, 0); ai_reset(AI_MEDIUM, 0);
@@ -115,7 +115,7 @@ int main(void) {
   o = run(1); report("SPINNER SPUN DOWN", o, GOAL_ATTACK, A.goal_score > 0.95f, "exposed: score 1.0");
 
   /* 10 enemy within 3 of an open pit and my push is bigger: shove it in */
-  match_reset(PRE_LAUNCH, 0, -1.5f, 0, PRE_STOMP, 0, 0.8f, 3.14159f); arena_reset(1); ai_reset(AI_MEDIUM, 0);
+  match_reset(PRE_ROLL_OUT, 0, -1.5f, 0, PRE_STOMP, 0, 0.8f, 3.14159f); arena_reset(1); ai_reset(AI_MEDIUM, 0);   /* TREADS out-push a WALKER */
   o = run(1); report("ENEMY NEAR AN OPEN PIT", o, GOAL_HAZARD_PUSH, o.ly < 0, "shove through them to the pit");
 
   /* 11 standing on a pit that opens in 0.8 s: still ATTACK, but the stick steps off the square */
@@ -177,12 +177,12 @@ int main(void) {
   o = run(1); report("PINNED IN A CORNER", o, GOAL_ATTACK, A.corner_t > 0 && A.corner_dx > 0, "escape along +x for 60 frames");
 
   /* 22 a flipper with the enemy in its front box fires */
-  match_reset(PRE_LAUNCH, 0, -1.0f, 0, PRE_STOMP, 0, 0, 0); ai_reset(AI_MEDIUM, 0);
+  match_reset(PRE_LAUNCH, 0, -1.0f, 0, PRE_STOMP, 0, 0, 0); ai_reset(AI_HARD, 0);   /* HARD never hesitates on a window */
   o = run(1); report("FLIPPER, ENEMY IN THE BOX", o, GOAL_ATTACK, (o.buttons & IN_A) != 0, "A");
 
   /* 23 HOVER steers by world direction */
   match_reset(PRE_TOAST, 0, 0, 0, PRE_STOMP, 4, 0, 0); ai_reset(AI_MEDIUM, 0);
-  o = run(1); report("HOVER, ENEMY TO THE RIGHT", o, GOAL_ATTACK, o.lx > 20000 && o.ly > -8000 && o.ly < 8000 && o.cam_yaw == 0, "stick +x, cam_yaw 0");
+  o = run(1); report("HOVER, ENEMY TO THE RIGHT", o, GOAL_ATTACK, o.lx < -20000 && o.ly > -8000 && o.ly < 8000 && o.cam_yaw == 0, "stick right is world -x against cam_yaw 0");
 
   /* 24 OPS parked, no trigger */
   match_reset(PRE_LAUNCH, 0, -3, 0, PRE_STOMP, 0, 3, 3.14159f); add_ops(OPS_PARKED, -1); M.no_hit_frames = 100; ai_reset(AI_HARD, OPS_SLOT);

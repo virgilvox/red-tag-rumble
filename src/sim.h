@@ -85,6 +85,8 @@ typedef struct {
   float ops_dmg;                            /* damage dealt to OPS in the last 300 frames */
   int16_t hit_cd2[MAX_BOTS];                /* the secondary weapon's per victim cooldown */
   int16_t haz_t[MAX_HAZ];                   /* per hazard contact or cooldown counter */
+  float drive_yaw; uint8_t strafe_held;     /* HOVER and MELTY: the camera yaw latched when the stick left the dead zone */
+  int16_t skirt_t;                          /* HOVER: frames since a bot pressed on the skirt; the cushion is pinched and the drive is weak */
 } bot_t;
 
 typedef struct { float x, z, y, vx, vz, vy, spin; int16_t life; uint8_t kind, colour, pickup, owner, bounced, panel; } debris_t;   /* panel: PN_* for DB_PANEL */
@@ -148,6 +150,13 @@ typedef struct {
 #define STOP_HUGE   6
 #define STOP_CLASH  8
 #define STOP_KO     6
+/* the band edges in damage after armour (5.1), mirrored by hit_band in juice.h: no single weapon
+ * hit may take more than HIT_CAP of the victim's max HP (a flip KO is the only bigger moment), so
+ * the bands sit under that cap: tap 1 to 5, hit 6 to 10, heavy 11 to 17, huge 18 and up */
+#define BAND_HIT_MIN    6.0f
+#define BAND_HEAVY_MIN 11.0f
+#define BAND_HUGE_MIN  18.0f
+#define HIT_CAP         0.20f
 /* count-out and deck count frames (2.7, 6.2) */
 #define COUNTOUT_FRAMES 600
 #define DECK_FRAMES     600

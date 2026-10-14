@@ -29,7 +29,7 @@ void save_defaults(save_t *s) {
   s->magic = SAVE_MAGIC; s->version = SAVE_VERSION;
   s->split = SPLIT_AUTO; s->one_camera = ONECAM_AUTO; s->fight_len = FL_75; s->comeback = SET_AUTO;
   s->shake = 2; s->hitstop = 1; s->stinger_big = 1; s->sfx = 8; s->music = 6; s->colourblind = 0; s->rumble = 1;
-  s->ai_level = AI_MEDIUM; s->rules_seen = 0;
+  s->ai_level = AI_EASY; s->rules_seen = 0;      /* the practice bot starts gentle on a fresh cabinet (8.4); the garage toggle raises it */
   for (int i = 0; i < 4; i++) { s->scheme[i] = SCHEME_ARCADE; build_preset(&s->fav_build[i], i); s->fav_build[i].paint = (uint8_t)i; }
   s->crc = save_crc(s);
 }
