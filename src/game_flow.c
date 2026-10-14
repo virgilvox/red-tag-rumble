@@ -590,7 +590,7 @@ static void boot_update(void) {
 static void title_select(int p) {
   audio_play(SFX_MENU_OK);
   switch (G.title_row) {
-    case TR_FIGHT: go_lobby(); break;
+    case TR_FIGHT: go_lobby(); join_seat(p); break;   /* the pad that picked FIGHT is seated already, so its first Start goes */
     case TR_SOLO: {
       go_lobby();
       join_seat(p);
