@@ -1567,6 +1567,171 @@ static int sc_panel_location(char *msg, int n) {
         left_after2, right_after2, fb_clean, shed_left, fourth.flags, fourth.dmg, third.dmg);
 }
 
+/* -- the LIFTER (HOLD the key, drive into them, let go to tip) --------------------------------------------
+ * The lifter is a BOX on FOUR WHEEL with ALU, driving at 0.8 with the key held from the start into a still
+ * bot. lift_in runs one approach and reports the first contact, the grab and what came after */
+static const build_t LIFT_BUILD = { CH_BOX, DR_FOUR, WP_LIFTER, WP_NONE, AR_ALU, 0, 0 };
+typedef struct { int contact, grab, drop, launch, land, f_end; float hp_grab, hp_end, y_max, land_dmg; int inverted, rolled, clash, under_by_v, deflect; } lift_t;
+static int lift_touching(void) { const bot_t *a = &SM.bots[0], *v = &SM.bots[1]; return a->touch_bot || v->ride_by || a->ride_by || v->riding || a->riding || v->lifted_by; }
+/* place the lifter 3.5 u to the victim's -x facing +x, the victim at (0, z) with heading vh; drive in at thr holding the key.
+ * let_go: the carry frame at which the key is let go (0 never); carry_thr: the throttle while carrying; max frames */
+static lift_t lift_in(const build_t *vb, int arena, float z, float vh, float thr, int let_go, float carry_thr, int max) {
+  lift_t r; memset(&r, 0, sizeof r); r.contact = r.grab = r.drop = r.launch = r.land = -1;
+  sc_init(arena, &LIFT_BUILD, vb, 0);
+  sc_place(0, -3.5f, z, HALF_PI); sc_place(1, 0, z, vh);
+  int let = 0;
+  for (int f = 0; f < max; f++) {
+    const bot_t *a = &SM.bots[0], *v = &SM.bots[1];
+    if (let_go && r.grab >= 0 && a->carry_t >= let_go) let = 1;
+    sc_pad(0, r.grab >= 0 ? carry_thr : thr, 0, let ? 0 : IN_A); sc_pad(1, 0, 0, 0);
+    float air_p = v->b.pitch, air_r = v->b.roll;
+    sc_step();
+    if (g_verbose && v->airborne && !v->lifted_by) printf("  air f %d y %.2f pitch %.1f roll %.1f vy %.2f\n", f, v->b.y, v->b.pitch * 57.3f, v->b.roll * 57.3f, v->b.vy);
+    (void)air_p; (void)air_r;
+    if (r.contact < 0 && lift_touching()) r.contact = f;
+    for (int k = 0; k < SNEV; k++) {
+      const event_t *e = &SEV[k];
+      if (e->type == EV_LIFT && r.grab < 0) { r.grab = f; r.hp_grab = v->hp; }
+      if (e->type == EV_LIFT_DROP && r.drop < 0) r.drop = f;
+      if (e->type == EV_LAUNCH && e->b == 1 && r.launch < 0) r.launch = f;
+      if (e->type == EV_LAND && e->b == 1 && r.land < 0 && (r.launch >= 0 || r.drop >= 0)) { r.land_dmg += e->dmg; if (e->zone != LAND_BOUNCE) r.land = f; }
+      if (g_verbose && e->b == 1 && (e->type == EV_LAND || e->type == EV_LAUNCH)) printf("  f %d ev %d zone %d dmg %.2f pitch %.2f roll %.2f\n", f, e->type, e->zone, e->dmg, v->b.pitch * 57.3f, v->b.roll * 57.3f);
+      if (e->type == EV_SELFRIGHT && e->a == 1 && e->zone == 1) r.rolled = 1;
+      if (e->type == EV_WEDGE_CLASH) r.clash++;
+      if (e->type == EV_UNDERRIDE && e->a == 1) r.under_by_v++;
+      if (e->type == EV_HIT && (e->flags & EVF_DEFLECT)) r.deflect++;
+    }
+    if (v->lifted_by && v->b.y - a->floor_y > r.y_max) r.y_max = v->b.y - a->floor_y;
+    if (r.land >= 0 && f > r.land + 2) { r.f_end = f; break; }
+    r.f_end = f;
+  }
+  r.hp_end = SM.bots[1].hp; r.inverted = SM.bots[1].inverted;
+  return r;
+}
+
+static int sc_lift_head_on(char *msg, int n) {
+  build_t la; build_preset(&la, PRE_LAUNCH);
+  lift_t r = lift_in(&la, AR_BAY, 0, -HALF_PI, 0.8f, 0, 0.0f, 240);
+  float grab_dmg = r.grab >= 0 ? (100.0f - r.hp_grab) / (1.0f - reduction_of(1)) : 0;
+  lift_t s = lift_in(&la, AR_BAY, 0, -HALF_PI, 0.8f, 0, 0.0f, 240);
+  SC_OK(r.contact >= 0 && r.grab >= 0 && r.grab - r.contact <= 60 && grab_dmg > 5.9f && grab_dmg < 6.1f && r.y_max > 0.78f && s.grab == r.grab,
+        "contact at %d, EV_LIFT at %d (%d after, <= 60), the grab %.1f raw (6), the victim up to floor + %.2f (0.8), again at %d (same)", r.contact, r.grab, r.grab - r.contact, grab_dmg, r.y_max, s.grab);
+}
+static int sc_lift_side(char *msg, int n) {
+  build_t la; build_preset(&la, PRE_LAUNCH);
+  lift_t r = lift_in(&la, AR_BAY, 0, 0, 0.8f, 0, 0.0f, 240);
+  lift_t q = lift_in(&la, AR_BAY, 0, 3.14159265f, 0.8f, 0, 0.0f, 240);
+  SC_OK(r.contact >= 0 && r.grab >= 0 && r.grab - r.contact <= 60 && q.grab >= 0 && q.grab - q.contact <= 60,
+        "one side: contact %d, EV_LIFT %d (%d after); the other: contact %d, EV_LIFT %d (%d after, <= 60)", r.contact, r.grab, r.grab - r.contact, q.contact, q.grab, q.grab - q.contact);
+}
+static int sc_lift_rear(char *msg, int n) {
+  build_t la; build_preset(&la, PRE_LAUNCH);
+  lift_t r = lift_in(&la, AR_BAY, 0, HALF_PI, 0.8f, 0, 0.0f, 240);
+  SC_OK(r.contact >= 0 && r.grab >= 0 && r.grab - r.contact <= 60, "contact %d, EV_LIFT %d (%d after, <= 60)", r.contact, r.grab, r.grab - r.contact);
+}
+static int sc_lift_wedge_front(char *msg, int n) {
+  build_t ro; build_preset(&ro, PRE_ROLL_OUT);
+  lift_t r = lift_in(&ro, AR_BAY, 0, -HALF_PI, 0.8f, 0, 0.0f, 240);
+  build_t pl = { CH_BOX, DR_FOUR, WP_WEDGE, WP_NONE, AR_ALU, 0, 0 };     /* a WEDGE plate on a BOX */
+  lift_t p = lift_in(&pl, AR_BAY, 0, -HALF_PI, 0.8f, 0, 0.0f, 240);
+  lift_t s = lift_in(&ro, AR_BAY, 0, 0, 0.8f, 0, 0.0f, 240);              /* the same ROLL OUT side on is grabbed */
+  SC_OK(r.contact >= 0 && r.grab < 0 && (r.clash > 0 || r.under_by_v > 0 || r.deflect > 0) && p.grab < 0 && (p.clash > 0 || p.under_by_v > 0) && s.grab >= 0,
+        "ROLL OUT front: contact %d, no grab %d, %d clashes, %d underrides by the wedge; a WEDGE plate: no grab %d, %d clashes; ROLL OUT side on: grabbed at %d",
+        r.contact, r.grab < 0, r.clash, r.under_by_v, p.grab < 0, p.clash, s.grab);
+}
+/* grab from behind, carry 30 frames (full lift), let go: standing, then driving forward at 0.8 */
+static int sc_lift_tip_inverts(char *msg, int n) {
+  build_t lb_, bx, sh = { CH_SHELL, DR_FOUR, WP_NONE, WP_NONE, AR_ALU, 0, 0 }, ho; build_preset(&lb_, PRE_STOMP); build_preset(&bx, PRE_LAUNCH); build_preset(&ho, PRE_TOAST);
+  lift_t L = lift_in(&lb_, AR_BAY, 0, HALF_PI, 0.8f, 30, 0.0f, 400);
+  lift_t B = lift_in(&bx, AR_BAY, 0, HALF_PI, 0.8f, 30, 0.0f, 400);
+  lift_t Bd = lift_in(&bx, AR_BAY, 0, HALF_PI, 0.8f, 30, 0.8f, 400);
+  lift_t S0 = lift_in(&sh, AR_BAY, 0, HALF_PI, 0.8f, 30, 0.0f, 400);
+  lift_t S1 = lift_in(&sh, AR_BAY, 0, HALF_PI, 0.8f, 30, 0.8f, 400);
+  lift_t H = lift_in(&ho, AR_BAY, 0, HALF_PI, 0.8f, 30, 0.8f, 400);
+  int ok = L.launch >= 0 && L.inverted && B.launch >= 0 && B.inverted && Bd.inverted && S0.launch >= 0 && S1.launch >= 0 && S0.inverted != S1.inverted &&
+           ((S0.inverted && !S1.rolled) || (!S0.inverted && S0.rolled)) && ((S1.inverted && !S1.rolled) || (!S1.inverted && S1.rolled)) && H.launch >= 0 && !H.inverted &&
+           L.land_dmg >= 1.0f && L.land_dmg <= 5.0f && B.land_dmg >= 1.0f && B.land_dmg <= 5.0f;
+  SC_OK(ok, "LUNCHBOX launched %d inverted %d (1) landing %.1f; BOX inverted %d (1) landing %.1f, driving %d (1); SHELL standing inverted %d rolled up %d, driving inverted %d rolled up %d (one of each by the 150 rule); HOVER launched %d inverted %d (0)",
+        L.launch >= 0, L.inverted, L.land_dmg, B.inverted, B.land_dmg, Bd.inverted, S0.inverted, S0.rolled, S1.inverted, S1.rolled, H.launch >= 0, H.inverted);
+}
+static int sc_lift_gentle_drop(char *msg, int n) {
+  build_t la; build_preset(&la, PRE_LAUNCH);
+  lift_t r = lift_in(&la, AR_BAY, 0, HALF_PI, 0.8f, 10, 0.0f, 300);
+  lift_t t = lift_in(&la, AR_BAY, 0, HALF_PI, 0.8f, 0, 0.0f, 400);        /* never let go: the 3 s limit puts it down */
+  SC_OK(r.grab >= 0 && r.drop >= 0 && r.launch < 0 && r.land >= 0 && r.hp_end == r.hp_grab && !r.inverted && t.drop >= 0 && t.drop - t.grab >= 180 && t.drop - t.grab <= 182 && t.hp_end == t.hp_grab && !t.inverted,
+        "let go at 10: EV_LIFT_DROP %d frames after, no launch %d, landed %d, hp %.1f to %.1f (no damage), upright %d; held on: dropped %d after the grab (180), hp %.1f to %.1f, upright %d",
+        r.drop - r.grab, r.launch < 0, r.land >= 0, r.hp_grab, r.hp_end, !r.inverted, t.drop - t.grab, t.hp_grab, t.hp_end, !t.inverted);
+}
+/* THE BAY's pit (2 x 2 at the centre) open: grab a LAUNCH from behind 3 u short of it, carry it over, let go at full lift */
+static int sc_lift_carry_to_pit(char *msg, int n) {
+  build_t la; build_preset(&la, PRE_LAUNCH);
+  match_setup_t s; memset(&s, 0, sizeof s);
+  s.mode = MODE_DEATHMATCH; s.arena = AR_BAY; s.players = 2; s.fight_len_s = 90; s.seed = 7;
+  s.builds[0] = LIFT_BUILD; s.builds[1] = la; s.is_ai[0] = s.is_ai[1] = 1; s.hazards_off = 0; s.hitstop_off = 1; s.no_ops = 1;
+  sim_init(&SM, &s);
+  const arena_def_t *ar = sim_arena(&SM); int pit = -1;
+  for (int i = 0; i < ar->nhaz; i++) if (ar->haz[i].type == HZ_PIT) pit = i;
+  if (pit < 0) SC_OK(0, "no pit in THE BAY");
+  float px = ar->haz[pit].x, pz = ar->haz[pit].z;
+  SM.haz[pit].aux = 0; SM.haz_clock = 0;                   /* the pit opens now, for 5 s */
+  sc_place(0, px - 5.0f, pz, HALF_PI); sc_place(1, px - 3.6f, pz, HALF_PI);
+  int grab = -1, drop = -1, fell = -1, let = 0; float vx_drop = 0;
+  for (int f = 0; f < 280; f++) {
+    const bot_t *a = &SM.bots[0], *v = &SM.bots[1];
+    if (grab >= 0 && v->lifted_by && v->b.x > px - 0.3f) let = 1;
+    sc_pad(0, let ? 0 : 0.8f, 0, let ? 0 : IN_A); sc_pad(1, 0, 0, 0);
+    sc_step();
+    for (int k = 0; k < SNEV; k++) {
+      if (SEV[k].type == EV_LIFT && grab < 0) grab = f;
+      if (SEV[k].type == EV_LIFT_DROP && drop < 0) { drop = f; vx_drop = SEV[k].x; }
+      if (SEV[k].type == EV_FALL && SEV[k].a == 1 && SEV[k].zone == FALL_PIT && fell < 0) fell = f;
+    }
+    (void)a;
+  }
+  SC_OK(grab >= 0 && drop >= 0 && fell >= 0 && fell > drop && SM.bots[0].pit_state == 0 && SM.bots[1].pit_state == 2,
+        "grabbed at %d, let go over the pit at %d (x %.2f, pit centre %.2f, a drop, not a tip), EV_FALL (pit) at %d, the victim in %d, the lifter out %d",
+        grab, drop, vx_drop, px, fell, SM.bots[1].pit_state == 2, SM.bots[0].pit_state == 0);
+}
+/* a BOX on TREADS (push over 1.3x the lifter's) grabbed from behind drives away from the frame of the grab */
+static int sc_lift_escape(char *msg, int n) {
+  build_t tr = { CH_BOX, DR_TREAD, WP_NONE, WP_NONE, AR_ALU, 0, 0 };
+  float ratio = build_push(&tr) / build_push(&LIFT_BUILD);
+  sc_init(AR_BAY, &LIFT_BUILD, &tr, 0);
+  sc_place(0, -3.5f, 0, HALF_PI); sc_place(1, 0, 0, HALF_PI);
+  int grab = -1, drop = -1, push0 = -1, stop_drop = -1;
+  for (int f = 0; f < 400 && drop < 0; f++) {
+    int pushing = grab >= 0;
+    /* first 30 frames of push, a 1 frame pause (the count starts again), then push until it escapes */
+    if (pushing && push0 < 0) push0 = f;
+    int pause = push0 >= 0 && f == push0 + 30 && stop_drop < 0;
+    if (pause) { push0 = f + 1; stop_drop = f; }
+    sc_pad(0, grab < 0 ? 0.8f : 0, 0, IN_A); sc_pad(1, pushing && !pause ? 1.0f : 0, 0, 0);
+    sc_step();
+    for (int k = 0; k < SNEV; k++) { if (SEV[k].type == EV_LIFT && grab < 0) grab = f; if (SEV[k].type == EV_LIFT_DROP && drop < 0) drop = f; }
+  }
+  SC_OK(ratio > 1.3f && grab >= 0 && drop >= 0 && stop_drop >= 0 && drop - push0 + 1 == 45,
+        "push ratio %.2f (> 1.3), grabbed at %d, still held after 30 frames of push and a 1 frame pause %d, then put down on the %dth frame of the second push (45)", ratio, grab, stop_drop >= 0, drop - push0 + 1);
+}
+/* let go early (a gentle drop) and keep driving in with the key held: the same victim is grabbed again 120 frames after the release */
+static int sc_lift_cooldown(char *msg, int n) {
+  build_t la; build_preset(&la, PRE_LAUNCH);
+  sc_init(AR_BAY, &LIFT_BUILD, &la, 0);
+  sc_place(0, -3.5f, 0, HALF_PI); sc_place(1, 0, 0, HALF_PI);
+  int grab = -1, drop = -1, grab2 = -1, gap = 0;
+  for (int f = 0; f < 600 && grab2 < 0; f++) {
+    int off = grab >= 0 && SM.bots[0].carry_t >= 10 && drop < 0;
+    sc_pad(0, 0.8f, 0, off ? 0 : IN_A); sc_pad(1, 0, 0, 0);
+    sc_step();
+    for (int k = 0; k < SNEV; k++) {
+      if (SEV[k].type == EV_LIFT) { if (grab < 0) grab = f; else if (drop >= 0 && grab2 < 0) grab2 = f; }
+      if (SEV[k].type == EV_LIFT_DROP && drop < 0) drop = f;
+    }
+    if (drop >= 0 && grab2 < 0 && lift_touching() && f - drop < 120) gap++;
+  }
+  SC_OK(grab >= 0 && drop >= 0 && grab2 >= 0 && grab2 - drop >= 120 && grab2 - drop <= 150 && gap > 30,
+        "grab %d, put down %d, grabbed again %d frames later (120 to 150), touching for %d of the 120 frames between", grab, drop, grab2 - drop, gap);
+}
+
 static const scenario_t SCENARIOS[] = {
   { "ghost-sim", sc_ghost_sim },
   { "mound-contact", sc_mound_contact },
@@ -1593,6 +1758,15 @@ static const scenario_t SCENARIOS[] = {
   { "saw-grind", sc_saw_grind },
   { "flame-burn", sc_flame_burn },
   { "panel-location", sc_panel_location },
+  { "lift-head-on", sc_lift_head_on },
+  { "lift-side", sc_lift_side },
+  { "lift-rear", sc_lift_rear },
+  { "lift-wedge-front", sc_lift_wedge_front },
+  { "lift-tip-inverts", sc_lift_tip_inverts },
+  { "lift-gentle-drop", sc_lift_gentle_drop },
+  { "lift-carry-to-pit", sc_lift_carry_to_pit },
+  { "lift-escape", sc_lift_escape },
+  { "lift-cooldown", sc_lift_cooldown },
 };
 
 static int scenarios(const char *which) {

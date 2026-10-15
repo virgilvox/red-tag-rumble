@@ -139,8 +139,25 @@ static const weapon_def_t WEAPONS[WP_COUNT] __attribute__((unused)) = {
 #define WP_MELTY_SELF         3.0f    /* the frame takes the knock of every edge hit it lands */
 #endif
 #define WP_CRUSHER_HOLD_DPS   6.0f
-#define WP_LIFTER_FRAMES      36
-#define WP_LIFTER_MAX_HOLD    180
+#define WP_LIFTER_FRAMES      36      /* OPS's forks: up or down in 36 frames on its key */
+#define WP_LIFTER_MAX_HOLD    180     /* the carry limit, 3 s, then a gentle drop */
+/* the LIFTER: hold the key and the forks stay down as a lip and live; a bot that touches them is grabbed and
+ * the forks rise over WP_LIFTER_RISE frames to floor + HOLD_Y + RAISE_Y x lift; letting go at full lift (over
+ * TIP_LIFT, carried TIP_HOLD frames) tips it over the forks, before that it is put down */
+#define WP_LIFTER_RISE        24
+#define WP_LIFTER_HOLD_Y      0.3f
+#define WP_LIFTER_RAISE_Y     0.5f
+#define WP_LIFTER_TIP_LIFT    0.85f
+#define WP_LIFTER_TIP_HOLD    18
+#define WP_LIFTER_GRAB_DMG    6.0f
+#define WP_LIFTER_LIFT_CD     120     /* per victim, from the release */
+#define WP_LIFTER_ESCAPE      45      /* frames the victim must out push the holder by 1.3x, running */
+#ifndef WP_LIFTER_TIP_VY
+#define WP_LIFTER_TIP_VY      4.5f    /* the tip's throw: up, and forward on top of the holder's own speed */
+#endif
+#ifndef WP_LIFTER_TIP_FWD
+#define WP_LIFTER_TIP_FWD     2.0f
+#endif
 
 /* -- the body and contact tables (DEEP-plan 6, deep-physics 3) ------
  * Ground clearance by drive (the ride height the renderer draws); a HOVER skirt is drawn at 0.22 but is

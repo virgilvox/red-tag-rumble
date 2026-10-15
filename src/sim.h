@@ -101,6 +101,11 @@ typedef struct {
   /* DEEP 2.2: HUD readiness, written every step, never read by the sim */
   float ram_closing; int16_t hit_flash_t, spent_t; uint8_t weapon_ready, can_self_right, self_right_key, last_hit_reason;
   /* DEEP sim internals */ float load, ride_lift, e_prev; int16_t slide_cd, scrape_t, scrape_cd, bind_t, carry_ride_t, limp_t, crush_t, ride_cd[MAX_BOTS]; uint8_t wheel_fric, ride_full, bounced, tipping, wheel_lost, track_lost, spin_armed, grind_on, flame_on, ride_kind, touch_bot;
+  /* the LIFTER (the holder's fork_armed and lift_esc_t; the victim's lift_edge, lift_from and soft_land): fork_armed is
+   * the weapon key held with the forks working (low and live until a bot touches them), the renderer and the HUD read it;
+   * lift_esc_t counts the victim's escape frames; lift_edge is the victim's edge on the forks (PN_*); lift_from is the
+   * holder plus one from the release until the landing (it never lands on the forks); soft_land zeroes a drop's damage */
+  uint8_t fork_armed, lift_edge, lift_from, soft_land; int16_t lift_esc_t;
 } bot_t;
 
 typedef struct { float x, z, y, vx, vz, vy, spin; int16_t life; uint8_t kind, colour, pickup, owner, bounced, panel; } debris_t;   /* panel: PN_* for DB_PANEL */
