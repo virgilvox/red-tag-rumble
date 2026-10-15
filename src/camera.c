@@ -22,6 +22,7 @@ typedef struct {
   float punch_x, punch_z, punch_t;
   float yaw;                   /* the chase yaw written into pad_state_t.cam_yaw */
   float lift;                  /* 0..1: another bot sits between the camera and the bot, the camera rises and pulls in */
+  float plift;                 /* the same rise for a bot pitched on a wedge or tumbling in the air (DEEP-plan 7.8) */
   int init;
 } chase_t;
 
@@ -131,7 +132,7 @@ void cam_set_match(const match_t *m, int one_camera_setting, int split_setting, 
   one_cam_allowed = one_camera_setting == ONECAM_ALWAYS ? 1 : one_camera_setting == ONECAM_OFF ? 0 : (a && a->one_camera_default && cur_players == 2);
   one_cam_active = one_camera_setting == ONECAM_ALWAYS;
   cut_frames = 0; engage_frames = release_frames = 0;
-  for (int i = 0; i < 4; i++) { ch[i].init = 0; ch[i].shake_amp = 0; ch[i].punch_t = 1; ch[i].nudge = 0; ch[i].lift = 0; }
+  for (int i = 0; i < 4; i++) { ch[i].init = 0; ch[i].shake_amp = 0; ch[i].punch_t = 1; ch[i].nudge = 0; ch[i].lift = 0; ch[i].plift = 0; }
   shared_init = 0;
   ko_victim = ko_victor = -1;
 }
@@ -317,9 +318,13 @@ static void chase_update(int vp, int seat, const match_t *m, float dt) {
   float k = 1 - expf(-dt / tau), kl = 1 - expf(-dt / 0.06f);
   int blocked = c->init && view_blocked(m, slot, c->px, c->pz, lx, lz);
   c->lift += ((blocked ? 1.0f : 0.0f) - c->lift) * k;
-  float follow = 3.5f - 1.1f * c->lift;
+  /* a ridden or flying bot's pitch lifts the camera too, so a wedge under it never clips the lens; the pitch
+   * is read nowhere else */
+  float ptarget = (b->ride_by || b->airborne) ? 0.6f * fabsf(b->b.pitch) : 0; if (ptarget > 0.8f) ptarget = 0.8f;
+  c->plift += (ptarget - c->plift) * k;
+  float follow = 3.5f - 1.1f * (c->lift + c->plift);
   float tx = bx - rfx * follow, tz = bz - rfz * follow;
-  float ty = chase_base(b, tx, tz) + 2.2f + 1.2f * c->lift;        /* 2.2 over the terrain, not over the arena floor */
+  float ty = chase_base(b, tx, tz) + 2.2f + 1.2f * (c->lift + c->plift);        /* 2.2 over the terrain, not over the arena floor */
   /* carried on a lifter (OPS or a LIFTER bot): the camera sits off the lifter's side, 3 u out and 2.8 up, on
    * the side nearer the arena centre, so the player sees themselves on the forks instead of the inside of
    * the lifter's body */

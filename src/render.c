@@ -11,7 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-#ifdef RTR_FAKE_SIM
+#if defined(RTR_FAKE_SIM) || defined(RTR_TRACE)
 #include "wasmcart.h"
 #endif
 
@@ -43,6 +43,11 @@ static int camera_cell(t3_camera *c, const arena_def_t *a) {
   return arena_cell(a, p.x, p.z);
 }
 
+/* the draw counters of the last viewport (DEEP-plan 7.2): an RTR_TRACE build logs them once a second
+ * per viewport with the scene's object count, so every change to the models reports its cost */
+static unsigned last_calls, last_tris;
+int world_draw_stats(unsigned *calls, unsigned *tris) { if (calls) *calls = last_calls; if (tris) *tris = last_tris; return 1; }
+
 int render_frame(const match_view_t *v) {
   if (G.render_half) { half_phase ^= 1; if (half_phase) return 0; }
   const arena_def_t *a = world_arena();
@@ -63,12 +68,22 @@ int render_frame(const match_view_t *v) {
     rect_t r = rect_scale(&v->vp[i], RTR_W, RTR_H);
     if (r.w <= 0 || r.h <= 0) continue;
     world_set_cell_visibility(v->cell[i] >= 0 ? v->cell[i] : camera_cell(cam, a), a);
+    world_garage_light(v->seat_of[i]);
     fx_face(i);
     cam->aspect = (float)r.w / (float)r.h;
     t3_camera_update_projection_matrix(cam);
     t3_renderer_set_viewport(RTR_R, r.x, r.y, r.w, r.h);   /* pixels, y from the top */
     t3_renderer_set_scissor(RTR_R, r.x, r.y, r.w, r.h);
     t3_renderer_render(RTR_R, world_scene(), cam);
+    const t3_render_info *ri = t3_renderer_info(RTR_R);
+    if (ri) { last_calls = ri->calls; last_tris = ri->triangles; }
+#ifdef RTR_TRACE
+    if (G.frame % 60 == 0 && ri) {
+      char m[96];
+      snprintf(m, sizeof m, "[draw] f=%u v=%d calls=%u tris=%u objs=%d", G.frame, i, ri->calls, ri->triangles, world_object_count());
+      wc_log(m, (unsigned)strlen(m));
+    }
+#endif
   }
   t3_renderer_set_scissor_test(RTR_R, false);
   t3_renderer_set_viewport(RTR_R, 0, 0, RTR_W, RTR_H);

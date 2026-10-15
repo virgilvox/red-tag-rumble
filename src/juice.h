@@ -60,6 +60,49 @@ static inline int hit_band(float dmg) { return dmg < BAND_HIT_MIN ? BAND_TAP : d
 #define J_SMOKE_LIFE          72
 #define J_SMOKE_RISE          0.8f
 #define J_FIRE_RATE_30        8
+/* smoke and fire by the fraction of max HP (graphics 4.5): grey from 0.40, char and fire from 0.20,
+ * out of the most damaged side; the KO frame smokes in a column for 3 s, burns for 180 frames, then embers */
+#define J_SMOKE_FRAC_GREY     0.40f
+#define J_SMOKE_FRAC_CHAR     0.20f
+#define J_SMOKE_RATE_40       4
+#define J_SMOKE_RATE_20       7
+#define J_FIRE_RATE_20        10
+#define J_KO_SMOKE_RATE       12
+#define J_KO_SMOKE_S          3.0f
+#define J_KO_FIRE_S           3.0f
+#define J_KO_EMBER_RATE       1
+/* the impact star (graphics 4.4): crossed bone streaks at the contact for 2 frames (3 on a KO, at 1.4 size),
+ * the warm disc behind it at half its old size; the heavy band ticks the victim's viewport white */
+#define J_STAR_FRAMES         2
+#define J_STAR_KO_FRAMES      3
+#define J_STAR_SIZE           1.1f   /* times the band's flash */
+#define J_STAR_KO_SIZE        1.4f
+#define J_BAND_HEAVY_WHITE_A  16
+#define J_BAND_KO_WHITE_FRAMES 2
+/* the launch trail (graphics 4.9) */
+#define J_TRAIL_CUBES         8
+#define J_TRAIL_LIFE          0.3f
+#define J_TRAIL_FREE_FRAMES   8
+#define J_STREAK_FRAMES       8
+/* where the sparks of a hit come from and go, per weapon (graphics 4.4): y is the contact height over the
+ * victim's floor when the sim does not give one; the cone axis is along the attacker's forward (along),
+ * the weapon's tangent (tangent, spinners), or back off the hit normal (the rest), plus up; cone is the
+ * half angle in degrees; speed multiplies J_SPARK_SPEED_*. Indexed by WP_*, then EVW_MELTY, EVW_HAZARD */
+typedef struct { float y, along, tangent, up, cone, speed; } spark_spray_t;
+static const spark_spray_t SPRAY[WP_COUNT + 2] __attribute__((unused)) = {
+  /* NONE */     { 0.25f, 0.0f, 0.0f, 0.7f, 50.0f, 1.0f },
+  /* WEDGE */    { 0.08f, 1.0f, 0.0f, 0.3f, 35.0f, 1.0f },   /* a low fan forward along the plate, sparks skid on the floor */
+  /* SPIKE */    { 0.30f, 1.0f, 0.0f, 0.2f, 20.0f, 1.3f },   /* a tight jet along the rod */
+  /* LIFTER */   { 0.10f, 0.0f, 0.0f, 0.6f, 60.0f, 0.5f },
+  /* SAW */      { 0.35f, 0.0f, 1.0f, 0.9f, 25.0f, 1.2f },   /* a rooster tail up the disc tangent */
+  /* FLAME */    { 0.30f, 1.0f, 0.0f, 0.5f, 40.0f, 0.4f },
+  /* HAMMER */   { 0.45f, 0.0f, 0.0f, 0.1f, 80.0f, 1.1f },   /* a flat radial fan from under the head */
+  /* FLIPPER */  { 0.15f, 1.0f, 0.0f, 0.8f, 45.0f, 0.8f },
+  /* DRUM */     { 0.30f, 0.6f, 0.0f, 1.0f, 40.0f, 1.3f },   /* up and over the drum */
+  /* HORIZ */    { 0.40f, 0.0f, 1.0f, 0.2f, 20.0f, 1.5f },   /* a long tangent streak, the signature spinner spray */
+  /* CRUSHER */  { 0.30f, 0.0f, 0.0f, 0.5f, 60.0f, 0.4f },
+  /* MELTY */    { 0.25f, 0.0f, 1.0f, 0.3f, 25.0f, 1.4f },
+  /* hazard */   { 0.15f, 0.0f, 0.0f, 0.8f, 60.0f, 1.0f } };
 #define J_FIRE_LIFE           24
 #define J_FIRE_RISE           1.5f
 #define J_DEBRIS_CAP          24
@@ -81,9 +124,7 @@ static inline int hit_band(float dmg) { return dmg < BAND_HIT_MIN ? BAND_TAP : d
 #define J_MINIKO_TIMESCALE    0.4f
 #define J_MINIKO_FRAMES       36
 #define J_TAPE_CUT_FRAMES     24     /* 12 in, hold 1, 12 out at 0.4 s */
-#define J_SPIN_RING_A         160    /* times spin */
-#define J_SPIN_BLUR_A         50
-#define J_SPIN_BLUR_DEG       15
+#define J_SPIN_RING_A         90     /* the floor danger ring under a spinner, times spin; its echo ring is a third of it (graphics 4.8) */
 #define J_HAZARD_TELL_HZ      2.0f
 #define J_HAZARD_SHAKE        0.08f
 #define J_OPS_SHAKE           0.06f

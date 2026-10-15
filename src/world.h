@@ -61,6 +61,18 @@ void world_crowd(int frame, float level);
 int  world_bot_pos(int slot, float *x, float *y, float *z);
 /* build one arena root from a definition (world_init does this for ARENAS[0..5]) */
 void world_build_arena(int idx, const arena_def_t *def);
+/* a heavy or huge hit landed on slot at the world point (x, y, z) from the direction (nx, nz) (attacker to
+ * victim): a scratch decal on the panel that took it, the weapon's strike hold and the hanging plate kick
+ * (graphics 3.4, 4.1, 4.3); weapon is the event's WP_* or EVW_*, panel its PN_* */
+void world_bot_hit(int slot, float x, float y, float z, float nx, float nz, int weapon, int panel, int band);
+/* a decal on bot slot in its local frame: kind DECAL_*, the point on the panel plane and its normal, size in u */
+void world_bot_decal(int slot, int kind, float lx, float ly, float lz, float nx, float ny, float nz, float size);
+enum { DECAL_SCORCH, DECAL_SCRATCH, DECAL_BOLT_HOLE, DECAL_CRACK, DECAL_KINDS };
+/* the garage's amber fill light in front of turntable table (render_frame calls it per viewport) */
+void world_garage_light(int table);
+/* the draw counters of the last viewport render_frame drew and the scene's object count, for the [draw] log */
+int  world_draw_stats(unsigned *calls, unsigned *tris);
+int  world_object_count(void);
 /* the attached arena definition, or NULL in the garage */
 const arena_def_t *world_arena(void);
 
