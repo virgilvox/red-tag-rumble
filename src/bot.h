@@ -7,7 +7,9 @@
 #define RTR_BOT_H
 #include "sim.h"
 
-void  bot_body_from_build(body_t *b, const build_t *build);   /* mass, inertia, hl, hw, shape; position untouched */
+void  bot_body_from_build(body_t *b, const build_t *build);   /* mass, inertia, hl, hw, shape, clr, hgt, lips; position untouched */
+/* the wedge kind (parts.h WK_*) on a build's front given its lifter position, WK_NONE for a plain face */
+int   bot_wedge_kind(const build_t *build, float lift);
 float bot_hp_max(const build_t *build);
 /* the rebuild hint (3.1), by priority: flipped 3 or more, lost to a spinner on
  * NONE or PLYWOOD, pushed into a hazard twice, counted out, under 14 tags, else a
