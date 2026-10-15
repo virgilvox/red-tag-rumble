@@ -52,5 +52,11 @@ if [ -f src/content.h ]; then
   done < src/content.h
 fi
 
+# weapon how-to lines fit the controls card and the garage flavour slot: under 44 characters
+if [ -f src/content.h ]; then
+  long="$(awk '/WEAPON_HOWTO\[\] = \{/{f=1} f||/MELTY_HOWTO/{ while (match($0, /"[^"]*"/)) { s=substr($0, RSTART+1, RLENGTH-2); if (length(s) >= 44) print s " (" length(s) ")"; $0=substr($0, RSTART+RLENGTH) } } /^};/{f=0}' src/content.h)"
+  if [ -n "$long" ]; then echo "src/content.h: how-to lines of 44 or more: $long"; fail=1; fi
+fi
+
 if [ $fail = 0 ]; then echo "lint: zero findings over ${files[*]}"; fi
 exit $fail

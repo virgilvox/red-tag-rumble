@@ -173,10 +173,11 @@ static void stinger_draw(int viewport, const rect_t *vp, int compact, float dt) 
   int a = (int)(255 * (in < out ? in : out));
   int dx = (int)(-20 * (1 - hud_ease_out(in)));
   int h = compact ? 48 : 72;
-  /* the bar crosses the viewport at 35 percent of its height (10.5): above the bot the chase camera parks
-   * at about 55 percent, so a FIGHT or BIG HIT never hides what it announces; the char reads through a little */
-  int y = vp->y + (int)(vp->h * 0.35f) - h / 2;
-  if (y + h > vp->y + vp->h - (compact ? 56 : 72) - 8) y = vp->y + vp->h / 2 - h / 2;
+  /* the bar sits low, under the bot the chase camera parks at about 55 percent and over the coach chip's slot:
+   * at 35 percent (10.5) it covered a flipped bot at the top of its arc and the far bot, which is what an
+   * AIRBORNE or a BIG HIT announces. In a quadrant (no coach) it sits right on the strip */
+  int strip_h = compact ? 56 : 72;
+  int y = compact ? vp->y + vp->h - strip_h - 12 - h : vp->y + vp->h - strip_h - 12 - 64 - 8 - h;
   int font = compact ? F_STINGER_Q : fit_font(F_STINGER, st->s, vp->w - 48);
   hud_set_alpha(a);
   hud_rect(vp->x + dx + 6, y + 6, vp->w, h, st->c, 255);
@@ -1096,10 +1097,10 @@ void countout(const rect_t *vp, const bot_t *b) {
   snprintf(s, sizeof s, "%d", count_number(b));
   int compact = vp->h <= 360;
   int cx = vp->x + vp->w / 2, cy = vp->y + vp->h / 2;
-  /* F_TITLE at the viewport centre; in a quadrant F_H1 under the stinger slot so the two never collide */
+  /* F_TITLE at the viewport centre; in a quadrant F_H1 near the top, clear of the stinger slot over the strip */
   int font = compact ? F_H1 : F_TITLE;
   int fh = hud_font_h(font);
-  int y = compact ? vp->y + 196 : cy - fh / 2 - 30;
+  int y = compact ? vp->y + 64 : cy - fh / 2 - 30;
   int seat = b->seat <= 3 ? b->seat : -1, pad = key_seat_pad(seat);
   const char *fmt; int which; uint32_t ink;
   self_right_prompt(b, seat, &fmt, &which, &ink);

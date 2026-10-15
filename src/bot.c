@@ -29,14 +29,14 @@ void bot_body_from_build(body_t *b, const build_t *build) {
 }
 
 /* the wedge on a build's front, the lowest lip wins: the WEDGE chassis, a WEDGE plate, lowered LIFTER forks,
- * the LOWBOY nose; WK_NONE when the front is a plain face (MELTY has skids, not a lip) */
+ * the LOWBOY nose; LIP_NONE when the front is a plain face (MELTY has skids, not a lip) */
 int bot_wedge_kind(const build_t *build, float lift) {
-  if (build->drive == DR_MELTY) return WK_NONE;
-  if (build->chassis == CH_WEDGE) return WK_CHASSIS;
-  if (build->weapon == WP_WEDGE) return WK_PLATE;
-  if (build->weapon == WP_LIFTER && lift < 0.3f) return WK_FORKS;
-  if (build->chassis == CH_LOWBOY) return WK_NOSE;
-  return WK_NONE;
+  if (build->drive == DR_MELTY) return LIP_NONE;
+  if (build->chassis == CH_WEDGE) return LIP_CHASSIS;
+  if (build->weapon == WP_WEDGE) return LIP_PLATE;
+  if (build->weapon == WP_LIFTER && lift < 0.3f) return LIP_FORKS;
+  if (build->chassis == CH_LOWBOY) return LIP_NOSE;
+  return LIP_NONE;
 }
 
 float bot_hp_max(const build_t *build) { return (float)CHASSIS[build->chassis].hp; }

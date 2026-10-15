@@ -711,7 +711,7 @@ static const float PILE_X[][2] = { { -4.5f, 0 }, { 4.5f, 0 }, { 4, -5 }, { -6, -
 static const float PILE_L[][2] = { { -9.5f, -6.2f }, { -8.5f, 4.5f }, { 0, 6.2f }, { 10.0f, 6.0f }, { 10.0f, -6.0f }, { 0, -6.2f } };
 static const float DOCK_X[][2] = { { -3.5f, 6.8f }, { 3.5f, 6.8f }, { 0, 3.5f }, { 0, 0.5f }, { -4, -1.5f }, { -6, -2.5f }, { -6, -6.5f }, { 5.8f, -6.5f }, { 6, -2.5f }, { 4.5f, -1.5f } };
 static const float DOCK_L[][2] = { { -8.2f, -3.5f }, { -8.2f, 4.0f }, { -2, 4.5f }, { 8.4f, 4.2f }, { 8.4f, -3.5f }, { 0, -3.5f } };
-static const float SHOP_X[][2] = { { -3.5f, -3.5f }, { -1.5f, -1.6f }, { -1.5f, 1.6f }, { 0, 1.2f }, { 1.5f, 1.6f }, { 1.5f, -1.6f }, { 4, -4 }, { 5, -8.8f }, { 0, -9.0f }, { -4, -8.8f }, { -4, -4 }, { -9.0f, -2.5f }, { -9.0f, 0 }, { -9.0f, 2.5f }, { -5, 5 }, { -2.5f, 9.0f }, { 0, 9.0f }, { -4, 6 }, { -1, 1 }, { 4, -4 }, { 9.0f, -2.5f }, { 9.0f, 0 }, { 9.0f, -2.5f }, { 4, -4 } };
+static const float SHOP_X[][2] = { { -3.5f, -3.5f }, { -1.5f, -1.6f }, { -1.5f, 1.6f }, { 0, 1.2f }, { 1.5f, 1.6f }, { 0, 0.6f }, { 0, -1.2f }, { 1.5f, -1.6f }, { 4, -4 }, { 5, -8.8f }, { 0, -9.0f }, { -4, -8.8f }, { -4, -4 }, { -9.0f, -2.5f }, { -9.0f, 0 }, { -9.0f, 2.5f }, { -5, 5 }, { -2.5f, 9.0f }, { 0, 9.0f }, { -4, 6 }, { -1, 1 }, { 4, -4 }, { 9.0f, -2.5f }, { 9.0f, 0 }, { 9.0f, -2.5f }, { 4, -4 } };
 static const float SHOP_L[][2] = { { -6, -6 }, { 0, 0 }, { 6, -6 }, { 0, 0 }, { -6, 6 }, { 0, 0 } };
 static const float ROOF_X[][2] = { { 0, -6.6f }, { 1, -2 }, { -3.5f, -1.5f }, { 0, 0 }, { 6.8f, 0.5f }, { 4, -3 } };
 static const float ROOF_L[][2] = { { 7.5f, -5.5f }, { -2, -7.2f }, { -6, -7.4f }, { -7.5f, -5 }, { -7.5f, 7.0f }, { 1.5f, 7.6f }, { 6.2f, 7.6f }, { 7.2f, 7.2f }, { 7.2f, -2 } };
@@ -746,6 +746,7 @@ static int make_drive(int ar, const char *path) {
     if (k % 3 == 0) {
       float err = rtr_wrap_pi(rtr_atan2(dx, dz) - b->b.h);
       float turn = rtr_clamp(err * 2.2f, -1, 1), thr = fabsf(err) < 0.6f ? 1.0f : fabsf(err) < 1.4f ? 0.45f : 0.0f;
+      thr *= rtr_clamp(d / 2.0f, 0.5f, 1.0f);   /* ease off into a waypoint: grip limited drive slides wide at full throttle */
       if (back > 0) { turn = 1.0f; thr = -0.75f; }
       lx = (int16_t)(-rtr_clamp(floorf(turn * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);   /* a positive heading error is a left turn: stick left */
       ly = (int16_t)(-rtr_clamp(floorf(thr * 8.0f + 0.5f) / 8.0f, -1, 1) * 32767.0f);
@@ -769,6 +770,9 @@ static int make_drive(int ar, const char *path) {
   fprintf(f, "  { \"from\": 60,  \"to\": 62,  \"pad\": 0, \"buttons\": [\"A\"] },\n");
   fprintf(f, "  { \"from\": 90,  \"to\": 92,  \"pad\": 0, \"buttons\": [\"A\"] },\n");
   fprintf(f, "  { \"from\": 110, \"to\": 112, \"pad\": 0, \"buttons\": [\"START\"] },\n");
+  /* seat 1 starts on LAUNCH: Y taps step CHOP, STOMP, TOAST, SPIN, RANDOM (a 36 frame slot machine that eats
+   * input), then ROLL OUT, the build drive_setup records */
+  for (int i = 0; i < 6; i++) fprintf(f, "  { \"from\": %d, \"to\": %d, \"pad\": 0, \"buttons\": [\"Y\"] },\n", i < 5 ? 140 + i * 10 : 220, i < 5 ? 142 + i * 10 : 222);
   fprintf(f, "  { \"from\": 230, \"to\": 300, \"pad\": 0, \"buttons\": [\"A\"] },\n");
   fprintf(f, "  { \"from\": 308, \"to\": 310, \"pad\": 0, \"buttons\": [\"A\"] },\n");
   for (int i = 0; i < ar; i++) fprintf(f, "  { \"from\": %d, \"to\": %d, \"pad\": 0, \"buttons\": [\"RIGHT\"] },\n", 330 + i * 12, 332 + i * 12);

@@ -65,6 +65,7 @@ void save_defaults(save_t *s);
 uint32_t save_crc(const save_t *s);
 void save_commit(void);      /* recompute the crc after a change; the host picks the region up after the frame */
 int  save_valid(const save_t *s);
+int  save_upgrade(save_t *s);   /* a valid version 1 save becomes version 2 with coach_done 0; 0 if it is not one */
 
 /* -- pads and seats ---------------------------------------------- */
 /* one per physical pad, written by main.c every frame before game_update */

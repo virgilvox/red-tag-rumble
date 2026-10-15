@@ -1,12 +1,11 @@
 [
-  { "from": 30,   "to": 32,   "pad": 0, "buttons": ["A"] },
-  { "from": 60,   "to": 62,   "pad": 0, "buttons": ["A"] },
-  { "from": 90,   "to": 92,   "pad": 0, "buttons": ["A"] },
-  { "from": 110,  "to": 112,  "pad": 0, "buttons": ["START"] },
-  { "from": 140,  "to": 142,  "pad": 0, "buttons": ["Y"] },
-  { "from": 170,  "to": 172,  "pad": 0, "buttons": ["Y"] },
-  { "from": 240,  "to": 242,  "pad": 0, "buttons": ["START"] },
-  { "from": 300,  "to": 302,  "pad": 0, "buttons": ["A"] },
-  { "from": 700,  "to": 1500, "pad": 0, "buttons": ["A"] },
-  { "from": 760,  "to": 1500, "pad": 0, "buttons": ["UP", "A"] }
+  { "from": 30, "to": 32, "pad": 0, "buttons": ["A"] },
+  { "from": 60, "to": 62, "pad": 0, "buttons": ["A"] },
+  { "from": 90, "to": 92, "pad": 0, "buttons": ["A"] },
+  { "from": 110, "to": 112, "pad": 0, "buttons": ["START"] },
+  { "from": 140, "to": 142, "pad": 0, "buttons": ["Y"] },
+  { "from": 240, "to": 242, "pad": 0, "buttons": ["START"] },
+  { "from": 300, "to": 302, "pad": 0, "buttons": ["A"] },
+  { "from": 700, "to": 1500, "pad": 0, "buttons": ["A"] },
+  { "from": 760, "to": 1500, "pad": 0, "buttons": ["UP", "A"] }
 ]

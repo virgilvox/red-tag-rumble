@@ -56,7 +56,11 @@
 #define TIP_SWING   4.0f
 #define CLOSING_MIN 0.4f
 #define CLOSING_MAX 1.3f
-#define SPINNER_HIT_CD 30
+/* one spinner blow per pair per 0.75 s: at 30 frames a spinner held on a slow bot landed two hits a second, a
+ * metronome rather than a blow (the integration feel gate); robin 20 moves CHOP from 55 to 53 percent */
+#ifndef SPINNER_HIT_CD
+#define SPINNER_HIT_CD 45
+#endif
 /* spinner energy (deep-physics 3.6): the share of the stored energy a hit takes, 0.35 plus 0.08 per u/s of
  * tooth speed plus closing speed, between 0.35 and 0.80; the knock a full bite gives (HORIZ 6, DRUM and
  * MELTY 4); a disc glancing off a wedge hops up the slope (1.5 u/s is 9 frames in the air) */
@@ -237,7 +241,7 @@ static int same_band(const bot_t *a, const bot_t *b) {
 
 static void ride_end(match_t *m, int v, int reason);    /* the wedge, below */
 static void ride_clear(match_t *m, int v);
-static int bot_kind(const bot_t *b) { return b->is_ops ? WK_NONE : bot_wedge_kind(&b->build, b->lift); }
+static int bot_kind(const bot_t *b) { return b->is_ops ? LIP_NONE : bot_wedge_kind(&b->build, b->lift); }
 
 /* -- shapes and collision primitives (4.5) ------------------------ */
 typedef struct { float x, z, h, hl, hw; uint8_t circle; } shape_t;
@@ -371,9 +375,6 @@ static void edge_normal(const bot_t *v, int edge, float *nx, float *nz) {
 }
 /* a body's half extent along a unit axis (the circle's radius) */
 static float body_extent(const bot_t *b, float ax, float az) { shape_t s; shape_of(b, &s); return extent_along(&s, ax, az); }
-/* overlap test only, no contact (hitboxes) */
-static int overlaps(const shape_t *a, const shape_t *b, contact_t *c) { contact_t t; return collide(a, b, c ? c : &t); }
-
 /* the deepest point of a shape past a wall plane with inward normal n and inner offset off
  * (points satisfy dot(p, n) >= off inside the arena); returns the penetration, 0 if none */
 static float wall_pen(const shape_t *s, float nx, float nz, float off, float *cx, float *cz) {
@@ -570,6 +571,9 @@ typedef struct {
 /* the one damage path (4.7, 3.10, 3.12): the panel's armour (none where it is gone, and 1.25x the exposed
  * internals), RED TAG, teammates, HIT_CAP, tallies, stun, the pool, the event, the hit stop. Returns the
  * damage applied */
+#ifndef PRACTICE_PULL
+#define PRACTICE_PULL 0.5f
+#endif
 static float apply_hit(match_t *m, hit_t *h) {
   bot_t *a = h->att >= 0 ? &m->bots[h->att] : 0, *v = &m->bots[h->vic];
   if (!v->alive) return 0;
@@ -586,6 +590,7 @@ static float apply_hit(match_t *m, hit_t *h) {
    * down zones still make the biggest number on screen, a flip KO is the only bigger moment.
    * OPS's punish shove and the hazards are outside the rule */
   if (a && !a->is_ops && !v->is_ops && v->hp_max > 0 && dmg > v->hp_max * HIT_CAP) dmg = v->hp_max * HIT_CAP;
+  if (a && a->pull > 0 && !v->is_ai && !v->is_ops) dmg *= a->pull;   /* the EASY practice bot pulls its punches on a person: half the capped hit */
   v->hp -= dmg;
   if (v->is_ops && v->hp < 1) v->hp = 1;          /* OPS floors at 1 and is never KO'd (7) */
   int weapon = h->weapon;
@@ -1503,7 +1508,7 @@ static void ram_check(match_t *m, int i, int j, const contact_t *c) {
   if (dotp(fx, fz, c->nx, c->nz) < 0.866f) return;
   float closing = dotp(a->b.vx - v->b.vx, a->b.vz - v->b.vz, c->nx, c->nz);
   if (closing <= RAM_MIN_CLOSING) return;
-  int w = bot_kind(a) == WK_CHASSIS || bot_kind(a) == WK_PLATE ? WP_WEDGE : WP_NONE;
+  int w = bot_kind(a) == LIP_CHASSIS || bot_kind(a) == LIP_PLATE ? WP_WEDGE : WP_NONE;
   if (!v->alive) {                                /* a corpse: the shove and the sparks, no damage (DEEP-plan 3) */
     a->hit_cd[j] = 30;
     knock(v, fx * 2.0f, fz * 2.0f);
@@ -1515,7 +1520,7 @@ static void ram_check(match_t *m, int i, int j, const contact_t *c) {
   float zone = contact_zone(v, WP_WEDGE, c->cx, c->cz, &flags, &reason), loc = 1.0f;
   int wheel = wheel_station(v, c->cx, c->cz, edge);
   if (wheel) { loc = 1.2f; flags |= EVF_WHEEL; if (reason != HIT_WHY_EXPOSED) reason = HIT_WHY_WHEEL; }
-  if (bot_kind(v) == WK_CHASSIS || bot_kind(v) == WK_PLATE) { if (edge == PN_FRONT && !v->inverted && reason == HIT_WHY_FRONT) reason = HIT_WHY_WEDGE; }
+  if (bot_kind(v) == LIP_CHASSIS || bot_kind(v) == LIP_PLATE) { if (edge == PN_FRONT && !v->inverted && reason == HIT_WHY_FRONT) reason = HIT_WHY_WEDGE; }
   float J = 4.0f * (0.5f + raw * zone * loc * (1.0f - ARMOURS[v->build.armour].reduction) / 30.0f);
   hit_t h = { 0 };
   h.att = i; h.vic = j; h.weapon = w; h.raw = raw * zone * loc; h.stun = 15; h.cx = c->cx; h.cz = c->cz; h.cy = v->b.y + v->b.clr + v->b.hgt * 0.5f;
@@ -1775,7 +1780,7 @@ static void ride_start(match_t *m, int a, int v, int edge, int kind, float cl, f
   V->ride_by = (uint8_t)(a + 1); V->ride_edge = (uint8_t)edge; V->ride_t = 0; V->ride_up = 0; V->ride_s = 0; V->ride_cl_peak = cl;
   V->ride_full = 0; V->carry_ride_t = 0; V->ride_kind = (uint8_t)kind; V->ride_lift = 0;
   A->riding = (uint8_t)(v + 1);
-  int w = A->build.weapon == WP_LIFTER && kind == WK_FORKS ? WP_LIFTER : WP_WEDGE;
+  int w = A->build.weapon == WP_LIFTER && kind == LIP_FORKS ? WP_LIFTER : WP_WEDGE;
   ev_full(m, EV_UNDERRIDE, a, v, edge, cx, cz, V->b.y + 0.05f, cl, 0, 0, edge, w, 0, 0, cl, 0);
   /* the ram lands once, on entry, as today (9 + 9 by closing speed, stun 10, RAM_CD), for a ramming build (a
    * WEDGE chassis or plate, or a bare front); nothing per frame. A LOWBOY nose or a lifter's forks get under
@@ -1845,7 +1850,7 @@ static void ride_step(match_t *m, int v) {
   if (V->lifted_by) { ride_end(m, v, V->lifted_by == OPS_SLOT + 1 ? RIDE_OPS : RIDE_BACKED_OFF); return; }
   if (V->falling || V->pit_state == 2) { ride_end(m, v, RIDE_CARRIED_OFF); return; }
   if (!V->alive || !A->alive || A->airborne || A->inverted || A->lifted_by || A->clamped_by || V->clamped_by || V->airborne) { ride_end(m, v, RIDE_SLIP); return; }
-  int kind = V->ride_kind < WK_COUNT ? V->ride_kind : WK_PLATE;
+  int kind = V->ride_kind < LIP_COUNT ? V->ride_kind : LIP_PLATE;
   float S = WEDGE_KIND[kind].len;
   float en_x, en_z; edge_normal(V, V->ride_edge, &en_x, &en_z);
   float nx = -en_x, nz = -en_z, tx = -nz, tz = nx;                  /* n from the attacker into the victim */
@@ -1866,7 +1871,7 @@ static void ride_step(match_t *m, int v) {
     if (V->build.chassis == CH_SHELL && V->ride_up >= 0.5f) { V->b.vx += tx * lat_side * 2.0f; V->b.vz += tz * lat_side * 2.0f; ride_end(m, v, RIDE_SLIP); return; }
     if (V->ride_up >= 1.0f) {
       /* the top of the slope: tip it over, or carry it (a pancake nose or forks lift too little to tip) */
-      if ((kind == WK_CHASSIS || kind == WK_PLATE) && V->ride_cl_peak >= v_tip_of(V)) { V->ride_lift = WEDGE_KIND[kind].lift; ride_tip(m, v); return; }
+      if ((kind == LIP_CHASSIS || kind == LIP_PLATE) && V->ride_cl_peak >= v_tip_of(V)) { V->ride_lift = WEDGE_KIND[kind].lift; ride_tip(m, v); return; }
       V->ride_full = 1; V->carry_ride_t = 0;
     }
   } else { V->ride_s = S; V->ride_up = 1.0f; }
@@ -1920,7 +1925,7 @@ static int wedge_classify(match_t *m, int i, int j, const contact_t *c) {
     float cl = dotp(A->b.vx - V->b.vx, A->b.vz - V->b.vz, nx, nz);
     float afx, afz; fwd_of(A->b.h, &afx, &afz);
     int kind = bot_kind(A);
-    float min_cl = kind == WK_NOSE ? RAM_MIN_CLOSING : 0.5f;         /* a pancake nose gets under only at speed */
+    float min_cl = kind == LIP_NOSE ? RAM_MIN_CLOSING : 0.5f;         /* a pancake nose gets under only at speed */
     int pushing = A->dig_t > 0 && A->drive_t > 0.2f;                  /* DIG IN: the plate scrapes in from rest */
     if (!(cl >= min_cl || pushing) || dotp(afx, afz, nx, nz) < COS35) continue;
     (void)ea;
@@ -2704,8 +2709,9 @@ static void hill_step(match_t *m) {
       int sc[4]; memcpy(sc, m->score, sizeof sc);
       float dealt = b->dealt, biggest = b->biggest, aggro = b->aggro, control = b->control, air = b->airtime; int fi = b->frames_inverted; uint8_t fl = b->flips, ta = b->taunts;
       uint8_t rtu = b->red_tag_used, pk = b->pickups, nv = b->not_vacuum_said, fll = b->flips_landed, hh = b->hazard_hits, wh = b->wall_hits, cl = b->clashes;
-      float sd = b->spinner_dealt, bd2 = b->burn_dealt, ht = b->hazard_taken;
+      float sd = b->spinner_dealt, bd2 = b->burn_dealt, ht = b->hazard_taken, pull = b->pull;
       bot_setup(b, &bd, seat, is_ai, team, sp[0], sp[1], sp[2]);
+      b->pull = pull;
       b->scheme = (uint8_t)scheme; b->hp = 60; b->dealt = dealt; b->biggest = biggest; b->aggro = aggro; b->control = control; b->airtime = air; b->frames_inverted = (int16_t)fi; b->flips = fl; b->taunts = ta;
       /* once per match stays once per match across a respawn (2.8, 2.9) */
       b->red_tag_used = rtu; b->pickups = pk; b->not_vacuum_said = nv; b->flips_landed = fll; b->hazard_hits = hh; b->wall_hits = wh; b->clashes = cl;
@@ -2935,6 +2941,11 @@ void sim_init(match_t *m, const match_setup_t *s) {
     m->bots[i].b.y = m->bots[i].b.py = m->bots[i].floor_y;
     nb = i + 1;
   }
+  /* an EASY AI in a match with a person hits that person for PRACTICE_PULL of the damage: a first fight against
+   * the practice bot's hammer lasts about a minute instead of five 20 point hits. AI against AI (the robin,
+   * the attract) is untouched */
+  { int human = 0; for (int i = 0; i < players; i++) if (!s->is_ai[i]) human = 1;
+    for (int i = 0; i < players; i++) m->bots[i].pull = human && s->is_ai[i] && s->ai_level[i] == AI_EASY ? PRACTICE_PULL : 0; }
   /* OPS parks in its taped zone facing the arena centre; bots[4] whatever the player count */
   if (!s->no_ops) {
     float zx = ar->ops_zone[0], zz = ar->ops_zone[1];

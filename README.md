@@ -12,7 +12,7 @@ A red tag on a project means fourteen days and then it is free for the taking or
 2. Lobby. Any pad joins with A, B, X, Y or Start (a Start that joins also goes). Pick a mode, X flips your stick scheme between ARCADE and TANK, A marks READY, and Start readies you and goes to the garage. Y plays HOW IT WORKS. FILL WITH BOT puts AI seats in the empty chairs, each with a different bot; an unseated pad steps it with its stick, a seated pad (the keyboard) holds Y with Left or Right. On a cabinet's first evening HOW IT WORKS plays itself once before the lobby; any button skips it.
 3. Garage. One panel per seat around a turntable with your bot on it. Spend the tags, lock in with A, or press Start to lock and go.
 4. Arena vote. Six cards; the stick picks, A votes, majority wins, ties go random. The vote closes 2 s after everyone has voted, or at 8 s.
-5. Countdown, then the fight. Each seat gets its own camera: halves for two, quadrants for four, two plus a big map for three, one full view for solo. One approach is one hit and no single hit takes more than a fifth of a bot, so a fight runs about 35 to 60 s; the music is a 156 bpm industrial track that brings in a rising riff for the last 20 s or when a bot is under 30 HP.
+5. Countdown, then the fight. Each seat gets its own camera: halves for two, quadrants for four, two plus a big map for three, one full view for solo. One approach is one hit and no single hit takes more than a fifth of a bot, so a fight runs about 35 to 60 s (the EASY practice bot hits a person for half); the music is a 156 bpm industrial track that brings in a rising riff for the last 20 s or when a bot is under 30 HP.
 6. KO or TIME. A KO goes slow motion on a shared camera; TIME goes to the judges (damage, aggression, control).
 7. Results and the rematch vote: REBUILD, SAME BOTS (the same bots on the same arena, straight to the countdown), NEW ARENA (the vote opens on the next card) or LOBBY. The evening tally and the hall of fame persist in the cabinet's save. A table that says nothing for 40 s after a fight ends goes back to the lobby, and an empty lobby back to the title, so an abandoned cabinet returns to the attract on its own.
 
@@ -24,7 +24,7 @@ Twenty tags. Five rows: CHASSIS, DRIVE, WEAPON, ARMOUR, PAINT, plus a 2ND WEAPON
 
 - A locks the bot on the press. B releases it.
 - Start locks the bot too, and starts: once every human is locked the AI seats lock as they stand and the tape snaps to the arena vote.
-- A tap of Y cycles the presets: ROLL OUT, LAUNCH, CHOP, STOMP, TOAST, SPIN and RANDOM. Holding Y for 0.4 s shows the controls card over your panel instead. Holding Y with Up, Down, Left and Right steps the table's shared settings: the 3 player match card (FIGHT LENGTH, ONE CAMERA, COMEBACK) and the practice bot's EASY, MEDIUM, HARD. An unseated pad steps them with its stick alone.
+- A tap of Y cycles the presets: ROLL OUT, LAUNCH, CHOP, STOMP, TOAST, SPIN and RANDOM. On a fresh cabinet seat 1 starts on LAUNCH (one button, and it reads at once), seat 2 on ROLL OUT, seat 3 on CHOP and seat 4 on STOMP. Holding Y for 0.4 s shows the controls card over your panel instead. Holding Y with Up, Down, Left and Right steps the table's shared settings: the 3 player match card (FIGHT LENGTH, ONE CAMERA, COMEBACK) and the practice bot's EASY, MEDIUM, HARD. An unseated pad steps them with its stick alone.
 - X rolls a RANDOM BOT on a slot machine.
 - RT (or R, the W key) test-fires the weapon on the turntable. The right stick scrubs the turntable (optional; a pad without one loses nothing).
 - WALKER legs add 4 tags to the budget and LEG TRACKS add 2. Over budget, the bar shakes, A and Start play the deny sound and a line at the bottom says why.
@@ -72,13 +72,33 @@ The weapon widget in your strip is a ring with the weapon key on it and one word
 | HAMMER, CRUSHER | TAP, SWING or CLAMP, HOLD n S, then the reload |
 | LIFTER | HOLD, LIFT, CARRY n.n S |
 | FLAME | HOLD, EMPTY, REFILL |
-| WEDGE, NONE | RAM; the ring fills with your closing speed, DRIVE AT THEM when they are close and ahead, HIT, then the ram's cooldown |
+| WEDGE, NONE | RAM; the ring fills with your closing speed, DRIVE AT THEM when they are close and ahead, HIT, then the ram's cooldown. The weapon key is DIG IN: a short shove with the lip pressed to the floor |
 
 INVERTED replaces the word when the weapon does not work upside down, and the prompt under the count says what will right you: the brake key for a HAMMER or FLIPPER, the three DRUM steps, KEEP MOVING for a build that drives upside down. BOOST with its key sits beside the boost bar (NO BOOST on TREADS and LEG TRACKS for the first 3 s), and BRAKE flashes when you brake at speed.
 
 A hit you land shows its number in your seat colour with a ring and a live tick on your HP bar; a hit you take is rust, with a rust edge on your view. A weak hit says why under the number: FRONT ARMOUR, WEDGE, SPINNING DOWN, SHELL, ARMOUR, WALL, STRIPPED, WHEEL, or EXPOSED in live when you caught them lifted or flipped. On a cabinet's first evenings a live chevron hangs over the enemy's weakest side (a dented panel, else the side facing you), and Y (S) shows it any time. The first fight of a fresh save runs a three line coach for the first human seat: drive at the arrow, use your weapon, hit the side.
 
 ![A hit in halves](docs/fight.png)
+
+## Weapons
+
+Damage comes from the physics, not a dice roll: where the weapon meets the bot, how fast, and which plate takes it. Every bot has five armour plates (front, back, left, right, top) and each one wears down by itself: dented, bent, hanging, then gone. A gone plate shows the wiring and the battery behind it and takes a quarter more damage with no armour at all, so hitting the same side again is how you win. No single hit takes more than a fifth of a bot.
+
+| Weapon | Key | How to use it | What it does |
+|---|---|---|---|
+| WEDGE | passive, Z digs in | drive into their front or back (any side of a HOVER) at speed | a ram of 9 to 18; the lip slides under them, their nose rides up the plate and they lose grip, and a tall bot hit fast tips over. The sides of a wheeled or tracked bot are blocked. Two wedges head on just clash |
+| FLIPPER | tap Z when they are on the plate | get your nose under them, then fire | throws them; nearer the hinge flies higher, and a tall bot lands upside down. A LOWBOY only flips while it is moving. 1.8 s reload |
+| HAMMER | tap Z when they are in front | it winds up for a quarter second (the tell), then swings over the top | up to 20 into the top plate, most at the end of the arc, so it hits low bots hardest; the handle up close is weak and a miss costs you 4. 1.2 s reload |
+| HORIZONTAL | hold Z for 2 s | let it reach full spin, then hit their side | up to 22, more against a bot driving into you; every hit spends spin (SPENT), nothing bites under half spin, a wall kills it and a wedge front glances off. One blow per 0.75 s |
+| DRUM | hold Z for 1.5 s | as the horizontal, at their front or side | up to 17 and pops them up; hits the floor to right itself |
+| SPIKE | tap Z close | a straight jab | 15 on the way out, a third of that on the way back; skids off a wedge. 1 s reload |
+| SAW | tap Z to switch on | hold it against a plate | 4 a tick while it grinds, and it wears that plate away |
+| FLAME | hold Z | stay inside the 1.5 u cone | 2 every half second and a 3 s burn on a bot without armour; 4 s of fuel, then a refill |
+| LIFTER | hold Z | get the forks under, then lift and carry | carries them toward a hazard; the forks get under like a wedge |
+| CRUSHER | tap Z close | clamp and hold | 15 on the close, then 6 a second into the top for 2 s; 3 or 4 players only |
+| MELTY (a drive) | hold Z | the whole bot spins; drive through them | 12 a hit and 3 to you |
+
+ROLL OUT is the wedge on treads, LAUNCH the flipper on a box, CHOP a horizontal spinner on a low chassis, STOMP the hammer on legs, TOAST a flame on a hover and SPIN a melty.
 
 ## Modes
 
@@ -130,7 +150,7 @@ WAV=build/out.wav node tools/shot.mjs ...                      # also write the 
 SAVE_OUT=build/s.sav node tools/shot.mjs ...                   # write the save region at the end
 SAVE_IN=build/s.sav node tools/shot.mjs ...                    # boot with that save
 build/balance --robin 20                                       # every preset pair on every arena, the AI driving
-node tools/serve.mjs 8794 & node tools/play.mjs 'http://127.0.0.1:8794/?v=1' build/play   # a real Chrome, keyboard only
+node tools/serve.mjs 8797 & node tools/play.mjs 'http://127.0.0.1:8797/?v=1' build/play   # three fights in a real Chrome, keyboard only
 ```
 
 `HANDOFF.md` lists every script, tool and check.

@@ -123,6 +123,13 @@ static void composite(uint8_t *out) {
 /* the bracket card lives in draw.c (the fight layer), which this native twin does not link */
 void bracket_card(const rect_t *r) { (void)r; }
 
+/* game_flow.c is not linked: the menus' few calls into it answer as an idle evening would */
+float game_boot_progress(void) { return 1.0f; }
+const char *game_boot_step_name(void) { return ""; }
+int game_garage_total(void) { return 0; }
+int game_match_card_row(void) { return 0; }
+int game_rules_auto(void) { return 0; }
+
 int main(int argc, char **argv) {
   const char *out_dir = argc > 1 ? argv[1] : "build/shots";
   const char *only = argc > 2 && argv[2][0] ? argv[2] : 0;

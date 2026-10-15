@@ -74,7 +74,8 @@ void fx_init(void) {
     for (int k = 0; k < 4; k++) {
       float ang = k * PI / 4 + 0.2f, cs = cosf(ang), sn = sinf(ang), along = u * cs + v * sn, across = -u * sn + v * cs;
       float w = (k & 1) ? 0.05f : 0.08f, len = (k & 1) ? 0.7f : 1.0f;
-      float t = (1 - fabsf(across) / w) * (1 - fabsf(along) / len); if (t > a) a = t;
+      float ta = 1 - fabsf(across) / w, tl = 1 - fabsf(along) / len;   /* both clamped: two negatives made the corners solid */
+      float t = (ta > 0 ? ta : 0) * (tl > 0 ? tl : 0); if (t > a) a = t;
     }
     float core = 1 - sqrtf(u * u + v * v) / 0.25f; if (core > a) a = core;
     if (a < 0) a = 0; if (a > 1) a = 1;

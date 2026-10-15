@@ -248,7 +248,6 @@ void game_attract_start(void) {
 void game_attract_stop(void) {
   if (!G.attract) return;
   G.attract = 0; G.sim_on = 0; M.nbots = 0; M.nev = 0;
-  for (int i = 0; i < 4; i++) audio_whine(i, 0, 0);
   hide_bots(0);
 }
 
@@ -485,6 +484,7 @@ static void go_countdown(void) {
   G.controls_card_seat = -1; G.controls_card_t = 0; card_pad = -1;
   G.countdown_n = 3; G.sim_on = 0; G.timescale = 1;
   audio_play(SFX_COUNT);
+  audio_crowd_react(CROWD_HUSH);
   audio_music(MUSIC_OFF);
 }
 
@@ -493,6 +493,7 @@ static void go_fight(void) {
   G.sim_on = 1; G.timescale = 1; G.paused = 0;
   stinger_all(ST_FIGHT[0], C_HAZARD);
   audio_play(SFX_HORN);
+  audio_crowd_react(CROWD_ROAR);
   audio_music(MUSIC_ARENA);
   audio_crowd(0.6f);
   char line[512];
@@ -610,7 +611,6 @@ static void go_results(void) {
   results_frame = G.frame;
   G.sim_on = 0; G.timescale = 1; G.paused = 0; G.miniko_frames = 0;
   audio_slowmo(0); audio_duck(1); audio_tension(0);
-  for (int i = 0; i < 4; i++) audio_whine(i, 0, 0);
   game_record_results();
   audio_music(MUSIC_GARAGE);
   /* the winner's bot on its turntable in the results viewport (10.21) */
@@ -1241,19 +1241,15 @@ static void pause_update(float dt) {
   }
   if (quit_held) {
     G.reset_hold += dt;
-    if (G.reset_hold >= 1.0f) { G.paused = 0; G.reset_hold = 0; audio_duck(1); for (int i = 0; i < 4; i++) audio_whine(i, 0, 0); go_lobby(); }
+    if (G.reset_hold >= 1.0f) { G.paused = 0; G.reset_hold = 0; audio_duck(1); go_lobby(); }
   } else G.reset_hold = 0;
 }
 
-static int is_spinner(const bot_t *b) { return b->build.drive == DR_MELTY || b->build.weapon == WP_HORIZ || b->build.weapon == WP_DRUM; }
-
+/* the weapon, drive and damage loops are the band's (audio_fight_update from main.c); this keeps the music's tension and the clock */
 static void fight_audio(void) {
   int tense = 0;
-  for (int i = 0; i < 4; i++) {
-    if (i >= M.players || i >= M.nbots) { audio_whine(i, 0, 0); continue; }
+  for (int i = 0; i < M.players && i < M.nbots && i < 4; i++) {
     const bot_t *b = &M.bots[i];
-    float lv = b->alive && is_spinner(b) ? b->spin : 0;
-    audio_whine(i, lv * 0.8f, 0.3f + lv * 0.9f);
     if (b->alive && !b->is_ai && b->hp <= 30 && b->hp > 0) tense = 1;
   }
   /* the riser riff also comes in for the last 20 s of a timed fight */

@@ -5,6 +5,7 @@
 #include "game.h"
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>
 
 game_t G;
 match_t M;
@@ -24,17 +25,32 @@ uint32_t save_crc(const save_t *s) {
   return ~c;
 }
 
+/* the preset each seat starts on in a fresh evening: seat 1 gets the flipper, whose one button reads at once
+ * (DEEP-plan 1); ROLL OUT, CHOP and STOMP follow */
+static const uint8_t FIRST_PRESET[4] = { PRE_LAUNCH, PRE_ROLL_OUT, PRE_CHOP, PRE_STOMP };
+
 void save_defaults(save_t *s) {
   memset(s, 0, sizeof *s);
   s->magic = SAVE_MAGIC; s->version = SAVE_VERSION;
   s->split = SPLIT_AUTO; s->one_camera = ONECAM_AUTO; s->fight_len = FL_75; s->comeback = SET_AUTO;
   s->shake = 2; s->hitstop = 1; s->stinger_big = 1; s->sfx = 8; s->music = 6; s->colourblind = 0; s->rumble = 1;
   s->ai_level = AI_EASY; s->rules_seen = 0;      /* the practice bot starts gentle on a fresh cabinet (8.4); the garage toggle raises it */
-  for (int i = 0; i < 4; i++) { s->scheme[i] = SCHEME_ARCADE; build_preset(&s->fav_build[i], i); s->fav_build[i].paint = (uint8_t)i; }
+  for (int i = 0; i < 4; i++) { s->scheme[i] = SCHEME_ARCADE; build_preset(&s->fav_build[i], FIRST_PRESET[i]); s->fav_build[i].paint = (uint8_t)i; }
   s->crc = save_crc(s);
 }
 
 int save_valid(const save_t *s) { return s->magic == SAVE_MAGIC && s->version == SAVE_VERSION && s->crc == save_crc(s); }
+
+/* a version 1 save is the same size with scheme and fav_build one byte earlier (no coach_done); everything from
+ * best_evening_wins on sits where it did. Move that run up a byte, zero the coach and reseal it. */
+int save_upgrade(save_t *s) {
+  if (s->magic != SAVE_MAGIC || s->version != 1 || s->crc != save_crc(s)) return 0;
+  uint8_t *p = (uint8_t *)s;
+  size_t from = offsetof(save_t, coach_done), n = offsetof(save_t, best_evening_wins) - offsetof(save_t, scheme);
+  memmove(p + from + 1, p + from, n);
+  s->coach_done = 0; s->version = SAVE_VERSION; s->crc = save_crc(s);
+  return 1;
+}
 
 void save_commit(void) { SAVE.magic = SAVE_MAGIC; SAVE.version = SAVE_VERSION; SAVE.crc = save_crc(&SAVE); }
 
@@ -49,7 +65,7 @@ int game_seat_join(int pad) {
     memset(s, 0, sizeof *s);
     s->kind = SEAT_HUMAN; s->pad = (int8_t)pad; s->vote = -1; s->rematch = -1; s->slot = -1; s->hazard_pick = -1;
     s->scheme = SAVE.scheme[i];
-    build_preset(&s->build, i); s->build.paint = (uint8_t)i; s->preset = (uint8_t)i;
+    build_preset(&s->build, FIRST_PRESET[i]); s->build.paint = (uint8_t)i; s->preset = FIRST_PRESET[i];
     bot_name(s->name, &s->build);
     PADS[pad].seat = i;
     return i;

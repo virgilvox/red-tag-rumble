@@ -100,6 +100,7 @@ for (let f = 0; f <= last; f++) {
     if (s.ry !== undefined) p.rightY = s.ry;
     if (s.lt !== undefined) p.leftTrigger = s.lt;
     if (s.rt !== undefined) p.rightTrigger = s.rt;
+    if (s.name !== undefined) p.name = s.name;
   }
   const t0 = timing ? performance.now() : 0;
   const fr = host.runFrame(pads);
