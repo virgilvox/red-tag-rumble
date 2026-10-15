@@ -19,6 +19,7 @@
 #include "content.h"
 #include "parts.h"
 #include "juice.h"
+#include "keys.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -30,6 +31,8 @@ static float lobby_empty_t, lobby_auto_t;
 static float garage_shake_t[4];
 static int   garage_last_cost[4] = { -1, -1, -1, -1 };
 static uint32_t garage_last_deny[4];    /* seat_t.deny_frame last seen: a refused lock shakes the tag bar again */
+static int   garage_last_weapon[4] = { -1, -1, -1, -1 };   /* weapon, 2ND and MELTY packed: a change shows the howto for 2 s */
+static float garage_weapon_t[4];
 static float vote_fx[4], vote_fy[4];
 static int   vote_init;
 static float settings_cursor_y = -1, pause_cursor_y = -1, match_cursor_y = -1;
@@ -42,6 +45,8 @@ static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v;
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 /* the y that centres a font's line box in a box */
 static int text_cy(int font, int by, int bh) { int fh = hud_font_h(font); return by + (bh - fh) / 2 - fh / 8; }
+/* H2 that steps down to H3 when a line would not fit a width */
+static int fit_font_menus(int font, const char *s, int w) { return hud_text_w(font, s) <= w ? font : F_H3; }
 /* a 1 Hz pulse 0..1 */
 static float pulse(float t, float hz) { return 0.5f + 0.5f * sinf(t * hz * 6.2831853f); }
 
@@ -55,11 +60,30 @@ static void hole(int x, int y, int w, int h) {
   }
 }
 
-/* a keycap followed by its label in F_MONO_S; returns the width used */
-static int key_hint(int x, int y, const char *key, const char *label, uint32_t ink) {
-  int w = hud_keycap(x, y, key, C_BONE, C_TAPE);
-  if (label && *label) { hud_text(F_MONO_S, x + w + 8, y + 4, label, ink, 255, AL_LEFT); w += 8 + hud_text_w(F_MONO_S, label); }
-  return w;
+/* a keycap with the name that button has on this pad (keys.c: Z on a keyboard, A on a pad, both when the
+ * host names nothing) followed by its label in F_MONO_S; returns the width used */
+static int key_hint(int x, int y, int pad, int which, const char *label, uint32_t ink) { return key_hint_pad(x, y, pad, which, label, ink); }
+static int key_hint_w(int pad, int which, const char *label) { return key_cap_w(pad, which) + (label && *label ? 8 + hud_text_w(F_MONO_S, label) : 0); }
+
+/* the pad a shared screen's hints are named for: the title's owner, else the first human seat's, else pad 0
+ * (the station keyboard) */
+static int menu_pad(void) {
+  if (G.phase == PH_TITLE && G.title_owner_t > 0 && G.title_owner >= 0 && G.title_owner < 4) return G.title_owner;
+  for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_HUMAN && G.seats[i].pad >= 0) return G.seats[i].pad;
+  return 0;
+}
+
+/* a weapon's one line (deep-controls 4.9), MELTY BRAIN's for a melty build */
+static const char *howto_of(const build_t *b, int second) {
+  if (!second && b->drive == DR_MELTY) return MELTY_HOWTO;
+  int w = second ? b->weapon2 : b->weapon;
+  return WEAPON_HOWTO[w < WP_COUNT ? w : WP_NONE];
+}
+/* the howto's first word or words: everything before the first full stop (TAP, HOLD, PASSIVE, TAP TO TOGGLE) */
+static void howto_head(char *out, int n, const char *howto) {
+  int k = 0;
+  while (howto[k] && howto[k] != '.' && k < n - 1) { out[k] = howto[k]; k++; }
+  out[k] = 0;
 }
 
 /* a GANTRY chip: char fill with a 6 px shadow */
@@ -169,9 +193,11 @@ void attract_overlay(void) {
   hud_rect(1256 - nw, 32, nw, 28, C_CHAR, 210);
   hud_text(F_MONO_S, 1244, 38, line, C_ASH, 255, AL_RIGHT);
   int tip = (int)(G.phase_t / 8) % LEN(ATTRACT_TIPS);
-  int tw = hud_text_w(F_MONO, ATTRACT_TIPS[tip]) + 32;
-  hud_rect(880 - tw / 2, 596, tw, 36, C_CHAR, 220);     /* clear of the BEST EVENING line at 668 */
-  hud_text(F_MONO, 880, 602, ATTRACT_TIPS[tip], C_BONE, 255, AL_CENTER);
+  int which = tip == 0 ? KN_A : tip == 1 ? KN_B : -1;   /* the two tips that name a key (content.h) */
+  int tw = which >= 0 ? key_text_w(F_MONO, ATTRACT_TIPS[tip], 0, which) : hud_text_w(F_MONO, ATTRACT_TIPS[tip]);
+  hud_rect(880 - tw / 2 - 16, 596, tw + 32, 36, C_CHAR, 220);     /* clear of the BEST EVENING line at 668 */
+  if (which >= 0) key_text(F_MONO, 880 - tw / 2, 602, ATTRACT_TIPS[tip], 0, which, C_BONE, 255);
+  else hud_text(F_MONO, 880, 602, ATTRACT_TIPS[tip], C_BONE, 255, AL_CENTER);
 }
 
 void title_screen(float dt) {
@@ -198,9 +224,9 @@ void title_screen(float dt) {
     if (TITLE_HINTS[i][0]) hud_text(F_MONO_S, 452, y + 13, TITLE_HINTS[i], on ? C_TAPE : C_ASH, 255, AL_RIGHT);
   }
   /* A or Start selects a row (title_update reads nothing else) */
-  int kx = 80;
-  kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
-  key_hint(kx, 660, "START", S_KEY_SELECT, C_ASH);
+  int kx = 80, pad = menu_pad();
+  kx += key_cap(kx, 660, pad, KN_A, C_BONE, C_TAPE) + 6;
+  key_hint(kx, 660, pad, KN_START, S_KEY_SELECT, C_ASH);
   if (SAVE.best_evening_wins > 0) {
     char buf[48];
     snprintf(buf, sizeof buf, S_BEST_EVENING, (int)SAVE.best_evening_wins, SAVE.best_seat + 1);
@@ -231,9 +257,9 @@ static void lobby_seat_card(int i, float t, float dt) {
     hud_text(F_H2, x + w / 2, y + 62, S_PRESS_A_TO_JOIN_1, C_BONE, a, AL_CENTER);
     hud_text(F_H2, x + w / 2, y + 104, S_PRESS_A_TO_JOIN_2, C_BONE, a, AL_CENTER);
     hud_text(F_MONO_S, x + 16, y + 172, S_FILL_WITH_BOT, C_ASH, 255, AL_LEFT);
-    hud_text(F_MONO_S, x + 16, y + 194, S_FILL_HINT, C_SMOKE, 255, AL_LEFT);   /* how a seated pad (the keyboard) steps it */
+    key_text(F_MONO_S, x + 16, y + 196, S_FILL_HINT, menu_pad(), KN_Y, C_SMOKE, 255);   /* how a seated pad (the keyboard) steps it */
     int fill = G.fill_with_bot;
-    stepper(x + w - 64, y + 194, F_MONO, VAL_OFF_ON[fill ? 1 : 0], C_BONE, fill, !fill, 0);
+    stepper(x + w - 64, y + 166, F_MONO, VAL_OFF_ON[fill ? 1 : 0], C_BONE, fill, !fill, 0);
     return;
   }
   int ai = s->kind == SEAT_AI;
@@ -244,8 +270,8 @@ static void lobby_seat_card(int i, float t, float dt) {
     int bx = x + w - 48, by = y + 4;
     float idle = PADS[s->pad].idle;
     if (s->leave_hold > 0) {
-      hud_keycap(bx, by, "B", C_BONE, C_TAPE);
-      hud_ring(bx + 12, by + 12, 15, 3, clampf(s->leave_hold, 0, 1), sc, 255);
+      int bw = key_cap(bx, by, s->pad, KN_B, C_BONE, C_TAPE);
+      hud_ring(bx + bw / 2, by + 12, 15, 3, clampf(s->leave_hold, 0, 1), sc, 255);
     } else if (idle > 50) {
       char n[4]; snprintf(n, sizeof n, "%d", clampi((int)(60 - idle) + 1, 0, 10));
       hud_text(F_H3, x + w - 16, y + 2, n, C_RUST, 255, AL_RIGHT);
@@ -258,10 +284,13 @@ static void lobby_seat_card(int i, float t, float dt) {
   /* name, preset and tags, wins, scheme, ready */
   char name[24]; bot_name(name, &s->build);
   hud_text(F_H3, x + 16, y + 154, name, C_BONE, 255, AL_LEFT);
-  char line[48];
-  snprintf(line, sizeof line, "%s  ", preset_label(&s->build));
+  char line[64], head[24];
+  howto_head(head, sizeof head, howto_of(&s->build, 0));
+  snprintf(line, sizeof line, "%s . %s  ", preset_label(&s->build), head);     /* the preset and how its weapon works (4.9) */
   char tags[16]; snprintf(tags, sizeof tags, S_TAGS_N, build_cost(&s->build));
-  strncat(line, tags, sizeof line - strlen(line) - 1);
+  /* the tag count only when it clears the scheme cap below it (a pad that named nothing has two caps) */
+  int capw = ai ? 0 : key_hint_w(s->pad, KN_X, s->scheme == SCHEME_TANK ? S_TANK : S_ARCADE);
+  if (16 + hud_text_w(F_MONO_S, line) + hud_text_w(F_MONO_S, tags) < w - 16 - capw - 8) strncat(line, tags, sizeof line - strlen(line) - 1);
   hud_text(F_MONO_S, x + 16, y + 182, line, C_ASH, 255, AL_LEFT);
   for (int k = 0; k < s->wins && k < 12; k++) hud_rect(x + 16 + k * 14, y + 202, 10, 10, C_BONE, 255);
   if (ai) {
@@ -270,15 +299,15 @@ static void lobby_seat_card(int i, float t, float dt) {
     /* the control scheme is toggled by X, so the X cap carries the value; TANK says it wants two sticks */
     int tank = s->scheme == SCHEME_TANK;
     const char *sv = tank ? S_TANK : S_ARCADE;
-    int sw = hud_text_w(F_MONO_S, "X") + 14 + 8 + hud_text_w(F_MONO_S, sv);
-    key_hint(x + w - 16 - sw, y + 194, "X", sv, C_BONE);
+    int sw = key_hint_w(s->pad, KN_X, sv);
+    key_hint(x + w - 16 - sw, y + 194, s->pad, KN_X, sv, C_BONE);
     if (tank) hud_text(F_MONO_S, x + w - 16, y + 182, S_TANK_NOTE, C_ASH, 255, AL_RIGHT);   /* beside the tags line, inside the card */
   }
   if (s->ready) {
     hud_text(F_MONO_S, x + 16, y + 198, S_READY, C_LIVE, 255, AL_LEFT);
     hud_rect(x, y + h - 4, w, 4, C_LIVE, 255);
   } else if (!ai) {
-    key_hint(x + 16, y + 194, "A", S_READY, C_ASH);         /* A marks READY; Start goes */
+    key_hint(x + 16, y + 194, s->pad, KN_A, S_READY, C_ASH);         /* A marks READY; Start goes */
   }
 }
 
@@ -311,9 +340,9 @@ void lobby_screen(float dt) {
   /* seat cards */
   for (int i = 0; i < 4; i++) lobby_seat_card(i, t, dt);
   /* the leave hint and HOW IT WORKS */
-  int hx = 32;
-  hx += key_hint(hx, 452, "B", S_HOLD_B_LEAVE, C_ASH) + 24;
-  key_hint(hx, 452, "Y", S_LOBBY_RULES, C_ASH);
+  int hx = 32, mp = menu_pad();
+  hx += key_hint(hx, 452, mp, KN_B, S_HOLD_B_LEAVE, C_ASH) + 24;
+  key_hint(hx, 452, mp, KN_Y, S_LOBBY_RULES, C_ASH);
   /* the three steppers */
   {
     const char *lab[3] = { S_ONE_CAMERA, S_SPLIT, S_COMEBACK };
@@ -330,10 +359,10 @@ void lobby_screen(float dt) {
   int any_ready = 0;
   for (int i = 0; i < 4; i++) if (G.seats[i].kind != SEAT_EMPTY && G.seats[i].ready) any_ready = 1;
   if (any_ready) lobby_auto_t += dt; else lobby_auto_t = 0;
-  int sw = hud_text_w(F_MONO_S, "START") + 14 + 8 + hud_text_w(F_MONO, S_GO_TO_GARAGE);
+  int sw = key_cap_w(mp, KN_START) + 8 + hud_text_w(F_MONO, S_GO_TO_GARAGE);
   int sx = 640 - sw / 2;
   /* Start from any seat readies it and goes, so the cap is live as soon as someone sits down */
-  int kw = hud_keycap(sx, 584, "START", seated > 0 ? C_HAZARD : C_BONE, C_TAPE);
+  int kw = key_cap(sx, 584, mp, KN_START, seated > 0 ? C_HAZARD : C_BONE, C_TAPE);
   hud_text(F_MONO, sx + kw + 8, 586, S_GO_TO_GARAGE, seated > 0 ? C_BONE : C_SMOKE, 255, AL_LEFT);
   if (any_ready) {
     char buf[24];
@@ -511,6 +540,19 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
   int rows = row_visible_count(&s->build);
   int row = clampi(s->row, 0, rows - 1);
   uint32_t fl_ink; const char *fl = flavour_line(s, flbuf, sizeof flbuf, &fl_ink);
+  /* the flavour slot says how the weapon works (deep-controls 4.9): on the WEAPON and 2ND rows it alternates
+   * the joke and the howto every 2 s; on the other rows the howto shows for 2 s after every weapon change */
+  {
+    int wkey = s->build.weapon | s->build.weapon2 << 4 | (s->build.drive == DR_MELTY) << 8;
+    if (wkey != garage_last_weapon[seat]) { garage_weapon_t[seat] = garage_last_weapon[seat] < 0 ? 9 : 0; garage_last_weapon[seat] = wkey; }
+    garage_weapon_t[seat] += dt;
+    int plain = fl_ink == C_BONE && s->slot_machine_t <= 0;
+    int on_weapon = row == ROW_WEAPON || row == ROW_WEAPON2;
+    if (plain && ((on_weapon && (((int)(G.phase_t * 0.5f)) & 1)) || (!on_weapon && garage_weapon_t[seat] < 2.0f))) {
+      fl = howto_of(&s->build, row == ROW_WEAPON2 && s->build.weapon2 != WP_NONE); fl_ink = C_LIVE;
+    }
+  }
+  int kpad = ai ? -1 : s->pad;
   if (!compact) {
     /* header: chip, name, preset label; the hint line; the tag bar */
     hud_seat_chip(x + 16, y + 6, 28, 28, seat, F_H3, ai);
@@ -559,18 +601,21 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
     hud_text(F_MONO, x + 32, fy, fl, fl_ink, 255, AL_LEFT);
     bars_block(x + 32, rows > 5 ? y + 588 : y + 580, 140, 26, s);
     int hy = y + 672;
-    if (ai) hud_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, C_ASH, 255, AL_LEFT);   /* how the table sets EASY MEDIUM HARD */
+    if (ai) key_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, menu_pad(), KN_Y, C_ASH, 255);   /* how the table sets EASY MEDIUM HARD */
     if (s->locked) {
-      if (!ai) key_hint(x + 16, hy, "B", S_RELEASE, C_ASH);
+      if (!ai) key_hint(x + 16, hy, kpad, KN_B, S_RELEASE, C_ASH);
       hud_text(F_MONO_S, x + 624, hy + 4, S_LOCKED, C_LIVE, 255, AL_RIGHT);
     } else if (!ai) {
+      /* the footer names this seat's keys; the preset and test fire hints sit right of the bars, where the
+       * footer line has no room for a keyboard's names, let alone both (4.1) */
       int kx = x + 16;
-      kx += key_hint(kx, hy, "A", S_LOCK_IN, C_ASH) + 16;
-      kx += key_hint(kx, hy, "START", S_START_FIGHT, C_ASH) + 16;
-      kx += key_hint(kx, hy, "X", S_RANDOM_BOT, C_ASH) + 16;
-      int yx = kx;
-      key_hint(kx, hy, "Y", S_PRESET_HOLD_CONTROLS, C_ASH);
-      if (s->y_hold > 0) hud_ring(yx + 12, hy + 12, 18, 3, clampf(s->y_hold / 0.4f, 0, 1), sc, 255);
+      kx += key_hint(kx, hy, kpad, KN_A, S_LOCK_IN, C_ASH) + 16;
+      kx += key_hint(kx, hy, kpad, KN_START, S_START_FIGHT, C_ASH) + 16;
+      key_hint(kx, hy, kpad, KN_X, S_RANDOM_BOT, C_ASH);
+      int yw = key_hint_w(kpad, KN_Y, S_PRESET_HOLD_CONTROLS), yx = x + 624 - yw, yy = rows > 5 ? y + 610 : y + 604;
+      key_hint(yx, yy, kpad, KN_Y, S_PRESET_HOLD_CONTROLS, C_ASH);
+      if (s->y_hold > 0) hud_ring(yx + 12, yy + 12, 18, 3, clampf(s->y_hold / 0.4f, 0, 1), sc, 255);
+      if (row == ROW_WEAPON || row == ROW_WEAPON2) { int tw = key_hint_w(kpad, KN_R, S_TEST_FIRE); key_hint(x + 624 - tw, yy + 32, kpad, KN_R, S_TEST_FIRE, C_ASH); }
     }
   } else {
     /* quadrant: header 24 px with the chip and name, the tag bar from x 300 */
@@ -619,18 +664,20 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
     else if (!ai && build_helpless_flipped(&s->build) && (((int)(G.phase_t * 0.5f)) & 1)) hud_text_wrap(F_MONO_S, x + 330, fy, 300, S_WARN_NO_SELF_RIGHT, C_RUST, 255, 17);
     else hud_text_wrap(F_MONO_S, x + 330, fy, 300, fl, fl_ink, 255, 17);
     int hy = y + 306;
-    if (ai) hud_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, C_ASH, 255, AL_LEFT);
+    if (ai) key_text(F_MONO_S, x + 16, hy + 4, S_AI_TOGGLE_HINT, menu_pad(), KN_Y, C_ASH, 255);
     if (s->locked) {
-      if (!ai) key_hint(x + 16, hy, "B", S_RELEASE, C_ASH);
+      if (!ai) key_hint(x + 16, hy, kpad, KN_B, S_RELEASE, C_ASH);
       hud_text(F_MONO_S, x + 624, hy + 4, S_LOCKED, C_LIVE, 255, AL_RIGHT);
     } else if (!ai) {
       int kx = x + 16;
-      kx += key_hint(kx, hy, "A", S_LOCK, C_ASH) + 12;
-      kx += key_hint(kx, hy, "START", S_START_FIGHT, C_ASH) + 12;
-      kx += key_hint(kx, hy, "X", S_RANDOM, C_ASH) + 12;
+      kx += key_hint(kx, hy, kpad, KN_A, S_LOCK, C_ASH) + 12;
+      kx += key_hint(kx, hy, kpad, KN_START, S_START_FIGHT, C_ASH) + 12;
+      kx += key_hint(kx, hy, kpad, KN_X, S_RANDOM, C_ASH) + 12;
       int yx = kx;
-      key_hint(kx, hy, "Y", S_PRESET, C_ASH);
+      key_hint(kx, hy, kpad, KN_Y, S_PRESET, C_ASH);
       if (s->y_hold > 0) hud_ring(yx + 12, hy + 12, 18, 3, clampf(s->y_hold / 0.4f, 0, 1), sc, 255);
+      /* test fire under the turntable on the weapon rows */
+      if (row == ROW_WEAPON || row == ROW_WEAPON2) key_hint(x + 16, y + 270, kpad, KN_R, S_TEST_FIRE, C_ASH);
     }
   }
   if (s->locked) hud_frame(x, y, w, h, 3, C_LIVE, 255);
@@ -679,7 +726,7 @@ void garage_match_card_dt(const rect_t *r, float dt) {
       tx += 18;
     }
   }
-  hud_text(F_MONO_S, x + 40, y + 260, S_GARAGE_HINT_1, C_ASH, 255, AL_LEFT);
+  key_text(F_MONO_S, x + 40, y + 258, S_GARAGE_HINT_1, menu_pad(), KN_Y, C_ASH, 255);
   hud_text(F_MONO_S, x + 40, y + 280, S_GARAGE_HINT_2, C_ASH, 255, AL_LEFT);
   hud_dirty(x, y, r->w, r->h);
 }
@@ -884,7 +931,11 @@ void vote_screen(float dt) {
     hud_tween(&vote_fx[s], tx, 20, dt); hud_tween(&vote_fy[s], ty, 20, dt);
     hud_frame((int)vote_fx[s], (int)vote_fy[s], 384 + 8 + s * 6, 232 + 8 + s * 6, 3, seat_colour(s), 255);
   }
-  hud_text(F_MONO, 32, 650, S_VOTE_RULE, C_ASH, 255, AL_LEFT);
+  {
+    int vp = menu_pad(), vx = 32;
+    vx += key_text(F_MONO, vx, 650, S_VOTE_RULE_1, vp, KN_STICK, C_ASH, 255) + 14;
+    key_text(F_MONO, vx, 650, S_VOTE_RULE_2, vp, KN_A, C_ASH, 255);
+  }
   /* the bottom tape with the seconds */
   hud_rect(0, 696, 1280, 24, C_CHAR, 255);
   int tw = (int)(1280 * clampf((float)frames_left / VOTE_FRAMES, 0, 1));
@@ -990,10 +1041,10 @@ void settings_screen(float dt) {
       hud_text(F_MONO, 952, y + 10, v, f && on ? C_TAPE : C_BONE, 255, AL_RIGHT);
     } else if (k == 12) {
       if (f) focus_row_text(312, y, 656, SETTINGS_ROWS[k], "", on, 0, 0, 0); else menu_row(312, y, 656, SETTINGS_ROWS[k], "", 0, 1, 0, 0, 0);
-      int kw = hud_text_w(F_MONO_S, "A") + 14;
+      int kw = key_cap_w(menu_pad(), KN_A);
       int kx = 952 - hud_text_w(F_MONO_S, S_HOLD_A_2S) - 8 - kw;
       hud_text(F_MONO_S, 952, y + 12, S_HOLD_A_2S, f && on ? C_TAPE : C_ASH, 255, AL_RIGHT);
-      hud_keycap(kx, y + 8, "A", f && on ? C_TAPE : C_BONE, f && on ? C_HAZARD : C_TAPE);
+      key_cap(kx, y + 8, menu_pad(), KN_A, f && on ? C_TAPE : C_BONE, f && on ? C_HAZARD : C_TAPE);
       if (G.reset_hold > 0) hud_ring(kx + kw / 2, y + 20, 18, 3, clampf(G.reset_hold / 2, 0, 1), C_RUST, 255);
     } else {
       if (f) focus_row_text(312, y, 656, SETTINGS_ROWS[k], v, on, is_choice, idx > 0, idx < max);
@@ -1001,7 +1052,7 @@ void settings_screen(float dt) {
     }
   }
   if (G.settings_saved_t > 0 && G.settings_saved_t < 1) hud_text(F_MONO_S, 968, 580, S_SAVED, C_ASH, 255, AL_RIGHT);
-  key_hint(312, 576, "B", S_KEY_BACK, C_ASH);
+  key_hint(312, 576, menu_pad(), KN_B, S_KEY_BACK, C_ASH);
   hud_dirty(0, 0, 1280, 720);
 }
 
@@ -1067,22 +1118,63 @@ void hall_screen(float dt) {
   hud_text(F_MONO_L, x, y, buf, C_BONE, 255, AL_LEFT);
   /* wipe and back */
   int hy = 96 + 480 - 44;
-  key_hint(x, hy, "A", S_KEY_BACK, C_ASH);
-  int bw2 = hud_text_w(F_MONO_S, "B") + 14;
+  int hp = menu_pad();
+  key_hint(x, hy, hp, KN_A, S_KEY_BACK, C_ASH);
+  int bw2 = key_cap_w(hp, KN_B);
   int bx = 1080 - 32 - hud_text_w(F_MONO_S, S_HOLD_B_WIPE) - 8 - bw2;
-  hud_keycap(bx, hy, "B", C_BONE, C_TAPE);
+  key_cap(bx, hy, hp, KN_B, C_BONE, C_TAPE);
   hud_text(F_MONO_S, bx + bw2 + 8, hy + 4, S_HOLD_B_WIPE, C_ASH, 255, AL_LEFT);
   if (G.hall_wipe_hold > 0) hud_ring(bx + bw2 / 2, hy + 12, 18, 3, clampf(G.hall_wipe_hold / 3, 0, 1), C_RUST, 255);
   hud_dirty(0, 0, 1280, 720);
 }
 
-/* -- controls card (10.24)  -- */
-static void callout(int x, int y, int k, int compact) {
+/* -- controls card (10.24, deep-controls 4.8)  -- */
+/* the callout's second line names the input on this pad: the pad's letters, the keyboard's keys, or both */
+static const char *const *card_subs(int pad) {
+  switch (keys_kind(pad)) { case KIND_PAD: return CARD_SUB_PAD; case KIND_KEYBOARD: return CARD_SUB_KEYS; default: return CARD_SUB_BOTH; }
+}
+static void callout(int x, int y, int k, int compact, int pad) {
   int w = compact ? 112 : 120, h = compact ? 40 : 44;
   hud_rect(x + 4, y + 4, w, h, C_SHADOW, 255);
   hud_rect(x, y, w, h, C_HAZARD, 255);
   hud_text(F_MONO_S, x + w / 2, y + 4, CARD_CALLOUT[k], C_TAPE, 255, AL_CENTER);
-  hud_text(F_MONO_S, x + w / 2, y + h - 20, CARD_CALLOUT_SUB[k], C_TAPE, 255, AL_CENTER);
+  const char *sub = card_subs(pad)[k];
+  char fit[24]; snprintf(fit, sizeof fit, "%s", sub);
+  while (hud_text_w(F_MONO_S, fit) > w - 6 && strlen(fit) > 1) fit[strlen(fit) - 1] = 0;
+  hud_text(F_MONO_S, x + w / 2, y + h - 20, fit, C_TAPE, 255, AL_CENTER);
+}
+
+/* the keyboard outline (4.8): a bone frame, Q W A S Z X staggered on the left, ENTER, the arrow cluster on
+ * the right. Fills tx, ty with the six callout targets: DRIVE, WEAPON, BRAKE, BOOST, TAUNT, PAUSE */
+static void key_box(int x, int y, int w, int h, const char *k, int sc_full) {
+  hud_rect(x, y, w, h, C_BONE, 255);
+  hud_frame(x, y, w, h, 1, C_STEEL, 255);
+  if (k && sc_full) hud_text(F_MONO_S, x + w / 2, y + h / 2 - 9, k, C_CHAR, 255, AL_CENTER);
+}
+static void keyboard_outline(int cx, int cy, float sc, int tx[6], int ty[6]) {
+  int bw = (int)(300 * sc), bh = (int)(110 * sc), x0 = cx - bw / 2, y0 = cy - bh / 2, k = (int)(24 * sc);
+  int full = sc >= 0.9f;
+  hud_frame(x0, y0, bw, bh, 2, C_BONE, 255);
+#define KX(u) (x0 + (int)((u) * sc))
+#define KY(u) (y0 + (int)((u) * sc))
+  key_box(KX(20), KY(12), k, k, "Q", full); key_box(KX(50), KY(12), k, k, "W", full);
+  key_box(KX(28), KY(42), k, k, "A", full); key_box(KX(58), KY(42), k, k, "S", full);
+  key_box(KX(36), KY(72), k, k, "Z", full); key_box(KX(66), KY(72), k, k, "X", full);
+  key_box(KX(120), KY(72), (int)(64 * sc), k, "ENTER", full);
+  key_box(KX(232), KY(42), k, k, 0, full); key_box(KX(204), KY(72), k, k, 0, full);
+  key_box(KX(232), KY(72), k, k, 0, full); key_box(KX(260), KY(72), k, k, 0, full);
+  /* the arrows on the cluster */
+  int a = (int)(5 * sc) + 1;
+  int ux = KX(232) + k / 2, uy = KY(42) + k / 2, dx = KX(232) + k / 2, dy = KY(72) + k / 2, lx = KX(204) + k / 2, ly = dy, rx = KX(260) + k / 2, ry = dy;
+  hud_tri(ux, uy - a, ux - a, uy + a, ux + a, uy + a, C_CHAR, 255);
+  hud_tri(dx, dy + a, dx - a, dy - a, dx + a, dy - a, C_CHAR, 255);
+  hud_tri(lx - a, ly, lx + a, ly - a, lx + a, ly + a, C_CHAR, 255);
+  hud_tri(rx + a, ry, rx - a, ry - a, rx - a, ry + a, C_CHAR, 255);
+  /* the callout lines end on a key's edge, never over its letter */
+  int T_[6][2] = { { KX(284) + 3, KY(84) }, { KX(48), KY(96) + 3 }, { KX(78), KY(96) + 3 }, { KX(20) - 3, KY(24) }, { KX(28) - 3, KY(54) }, { KX(152), KY(96) + 3 } };
+  for (int i = 0; i < 6; i++) { tx[i] = T_[i][0]; ty[i] = T_[i][1]; }
+#undef KX
+#undef KY
 }
 
 /* the bone pad outline: body, two sticks, the face cluster, start, the bumpers */
@@ -1120,43 +1212,65 @@ static void pad_outline(int cx, int cy, float sc) {
   hud_rect(cx - (int)(16 * sc), cy - (int)(4 * sc), (int)(32 * sc), (int)(8 * sc), C_BONE, 255);
 }
 
+/* the controls card that matches the bindings: a pad outline for a pad, a keyboard for the keyboard, the pad
+ * with both names for a pad the host named nothing; seat -1 is the rules flash, named for pad 0. The full
+ * card adds the brake line and the seat's weapon in one line, so it answers how this bot attacks */
 void controls_card(const rect_t *r, int compact, int seat) {
   int x = r->x, y = r->y, w = r->w, h = r->h;
+  int pad = seat >= 0 ? key_seat_pad(seat) : 0;
+  int kb = keys_kind(pad) == KIND_KEYBOARD;
   hud_rect(x + 6, y + 6, w, h, C_SHADOW, 255);
   hud_rect(x, y, w, h, C_CHAR, 255);
   hud_frame(x, y, w, h, 2, seat >= 0 ? seat_colour(seat) : C_STEEL_HI, 255);
   if (!compact) {
-    int cx = x + 320, cy = y + 150;
-    pad_outline(cx, cy, 1.0f);
-    /* six callouts joined by rust lines: DRIVE, WEAPON, BRAKE, BOOST, TAUNT, PAUSE */
-    int px[6] = { x + 40, x + 300, x + 480, x + 40, x + 250, x + 150 };
-    int py[6] = { y + 110, y + 236, y + 60, y + 24, y + 24, y + 236 };
-    int tx[6] = { cx - 80, cx + 80, cx + 104, cx - 110, cx + 56, cx };
-    int ty[6] = { cy - 10, cy + 14, cy - 10, cy - 72, cy - 10, cy };
-    int ax[6] = { px[0] + 120, px[1] + 60, px[2], px[3] + 120, px[4] + 60, px[5] + 120 };
-    int ay[6] = { py[0] + 22, py[1], py[2] + 22, py[3] + 22, py[4] + 44, py[5] };
+    int cx = x + 320, cy = y + 140;
+    int px[6], py[6], tx[6], ty[6], ax[6], ay[6];
+    if (kb) {
+      keyboard_outline(cx, cy, 1.0f, tx, ty);
+      /* DRIVE right of the arrows, the five keys' callouts round the left and the bottom */
+      int qx[6] = { x + 500, x + 24, x + 170, x + 24, x + 24, x + 316 }, qy[6] = { y + 72, y + 228, y + 228, y + 20, y + 124, y + 228 };
+      for (int k = 0; k < 6; k++) { px[k] = qx[k]; py[k] = qy[k]; }
+      for (int k = 0; k < 6; k++) { ax[k] = px[k] + 60; ay[k] = py[k] + (py[k] > cy ? 0 : 44); }
+      ax[0] = px[0]; ay[0] = py[0] + 22; ax[3] = px[3] + 120; ay[3] = py[3] + 22; ax[4] = px[4] + 120; ay[4] = py[4] + 22;
+    } else {
+      pad_outline(cx, cy + 10, 1.0f);
+      int qx[6] = { x + 40, x + 300, x + 480, x + 40, x + 250, x + 150 }, qy[6] = { y + 110, y + 228, y + 60, y + 24, y + 24, y + 228 };
+      int sx[6] = { cx - 80, cx + 80, cx + 104, cx - 110, cx + 56, cx }, sy[6] = { cy, cy + 24, cy, cy - 62, cy, cy + 10 };
+      for (int k = 0; k < 6; k++) { px[k] = qx[k]; py[k] = qy[k]; tx[k] = sx[k]; ty[k] = sy[k]; }
+      int bx[6] = { px[0] + 120, px[1] + 60, px[2], px[3] + 120, px[4] + 60, px[5] + 120 }, by[6] = { py[0] + 22, py[1], py[2] + 22, py[3] + 22, py[4] + 44, py[5] };
+      for (int k = 0; k < 6; k++) { ax[k] = bx[k]; ay[k] = by[k]; }
+    }
     for (int k = 0; k < 6; k++) {
       hud_line(ax[k], ay[k], tx[k], ty[k], 2, C_RUST, 255);
       hud_circle(tx[k], ty[k], 4, C_RUST, 255);
     }
-    for (int k = 0; k < 6; k++) callout(px[k], py[k], k, 0);
-    hud_text(F_MONO_S, x + w / 2, y + 300, CARD_LINE, C_BONE, 255, AL_CENTER);
-    if (seat == 0) hud_text(F_MONO_S, x + w / 2, y + 326, CARD_KEYS, C_ASH, 255, AL_CENTER);
+    for (int k = 0; k < 6; k++) callout(px[k], py[k], k, 0, pad);
+    int lw = key_text_w(F_MONO_S, CARD_LINE, pad, KN_B);
+    key_text(F_MONO_S, x + w / 2 - lw / 2, y + 284, CARD_LINE, pad, KN_B, C_BONE, 255);
+    int ly = y + 310;
+    if (kb) { hud_text(F_MONO_S, x + w / 2, ly, CARD_KB_LINE, C_ASH, 255, AL_CENTER); ly += 22; }
+    if (seat >= 0 && G.seats[seat].kind != SEAT_EMPTY) {
+      const build_t *b = &G.seats[seat].build;
+      char line[64]; snprintf(line, sizeof line, "%s%s", S_WEAPON_LINE, howto_of(b, 0));
+      hud_text(F_MONO_S, x + w / 2, ly, line, C_LIVE, 255, AL_CENTER);
+    }
   } else {
-    /* four callouts in a 2 x 2 grid round a small pad, no lines */
-    pad_outline(x + w / 2, y + h / 2 - 6, 0.5f);
-    callout(x + 12, y + 12, 0, 1);
-    callout(x + w - 124, y + 12, 1, 1);
-    callout(x + w - 124, y + h - 54, 2, 1);
-    callout(x + 12, y + h - 54, 3, 1);
+    /* four callouts in a 2 x 2 grid round a small pad or keyboard, no lines */
+    if (kb) { int tx[6], ty[6]; keyboard_outline(x + w / 2, y + h / 2 - 6, 0.5f, tx, ty); }
+    else pad_outline(x + w / 2, y + h / 2 - 6, 0.5f);
+    callout(x + 12, y + 12, 0, 1, pad);
+    callout(x + w - 124, y + 12, 1, 1, pad);
+    callout(x + w - 124, y + h - 54, 2, 1, pad);
+    callout(x + 12, y + h - 54, 3, 1, pad);
   }
   hud_dirty(x, y, w + 6, h + 6);
 }
 
 /* -- rules flash (10.25)  -- */
-static void keycap_press(int x, int y, const char *k, int pressed) {
-  if (pressed) hud_keycap(x, y + 2, k, C_HAZARD, C_TAPE);
-  else hud_keycap(x, y, k, C_BONE, C_TAPE);
+/* the rules flash names pad 0's keys (the station keyboard, or the pad that is first) */
+static void keycap_press(int x, int y, int which, int pressed) {
+  if (pressed) key_cap(x, y + 2, 0, which, C_HAZARD, C_TAPE);
+  else key_cap(x, y, 0, which, C_BONE, C_TAPE);
 }
 
 /* a plain bot square seen from above: body, a seat band, wheels */
@@ -1198,7 +1312,7 @@ static void flash_picture(int step, float lt, int cx, int cy) {
     }
     case 1: { /* HOLD TO SPIN: an A keycap presses, the ring fills over 2 s, then sparks on a second square */
       int pressed = lt > 0.2f && lt < 2.1f;
-      keycap_press(cx - 230, cy - 12, "A", pressed);
+      keycap_press(cx - 250, cy - 12, KN_A, pressed);
       float spin = clampf((lt - 0.2f) / 2.0f, 0, 1);
       hud_rect(cx - 110, cy - 60, 120, 120, C_SLAB_HI, 255);
       hud_frame(cx - 110, cy - 60, 120, 120, 2, C_STEEL_HI, 255);
@@ -1254,9 +1368,10 @@ static void flash_picture(int step, float lt, int cx, int cy) {
         int font = n > 7 ? F_TITLE : n > 5 ? F_H1 : F_H2;
         int fh = hud_font_h(font);
         hud_text_sh(font, cx, cy - fh / 2 - fh / 8, s, C_RUST, 255, AL_CENTER);
-        hud_text(F_MONO, cx, cy + 70, S_RIGHT_YOURSELF, C_BONE, 255, AL_CENTER);
+        int rw = key_text_w(F_MONO, S_RIGHT_YOURSELF, 0, KN_B);
+        key_text(F_MONO, cx - rw / 2, cy + 70, S_RIGHT_YOURSELF, 0, KN_B, C_BONE, 255);
       }
-      keycap_press(cx + 150, cy - 12, "B", lt > 1.7f && lt < 2.1f);
+      keycap_press(cx + 150, cy - 12, KN_B, lt > 1.7f && lt < 2.1f);
       if (lt >= 2.0f) hud_text(F_H3, cx, cy - 12, ST_INVERTED[0], C_SMOKE, 0, AL_CENTER);
       break;
     }
@@ -1303,7 +1418,7 @@ static void flash_picture(int step, float lt, int cx, int cy) {
     }
     default: {
       rect_t cr = { cx - 320, cy - 180, 640, 360 };
-      controls_card(&cr, 0, 0);
+      controls_card(&cr, 0, -1);     /* pad 0's kind: the keyboard card on a keyboard */
       break;
     }
   }
@@ -1318,7 +1433,8 @@ void flash_card(int step, float t) {
   snprintf(buf, sizeof buf, S_N_OF_M, step + 1, 7);
   hud_eyebrow(230, 104, S_HOW_IT_WORKS, C_ASH, AL_LEFT);
   hud_text(F_MONO_S, 1050, 104, buf, C_ASH, 255, AL_RIGHT);
-  hud_text_sh(F_H2, 640, 96, FLASH_CAPTION[step], C_BONE, 255, AL_CENTER);
+  char cap[40]; key_format(cap, sizeof cap, FLASH_CAPTION[step], 0, KN_B);
+  hud_text_sh(fit_font_menus(F_H2, cap, 640), 640, 96, cap, C_BONE, 255, AL_CENTER);
   hud_clip(192, 146, 896, 360);
   flash_picture(step, t, 640, 326);
   hud_clip_clear();
@@ -1334,9 +1450,9 @@ void flash_card(int step, float t) {
     hud_text(F_MONO_S, kx, 516, S_KEY_ANY, C_BONE, 255, AL_LEFT);
     hud_text(F_MONO_S, kx + hud_text_w(F_MONO_S, S_KEY_ANY) + 8, 516, S_KEY_SKIP, C_ASH, 255, AL_LEFT);
   } else {
-    kx += key_hint(kx, 512, "A", S_KEY_NEXT, C_ASH) + 24;
-    kx += hud_keycap(kx, 512, "B", C_BONE, C_TAPE) + 6;
-    key_hint(kx, 512, "START", S_KEY_SKIP, C_ASH);
+    kx += key_hint(kx, 512, 0, KN_A, S_KEY_NEXT, C_ASH) + 24;
+    kx += key_cap(kx, 512, 0, KN_B, C_BONE, C_TAPE) + 6;
+    key_hint(kx, 512, 0, KN_START, S_KEY_SKIP, C_ASH);
   }
   hud_dirty(0, 0, 1280, 720);
 }

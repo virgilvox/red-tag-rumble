@@ -34,8 +34,14 @@
 #define JUDGES_SKIP_AT  210         /* A skips to results once the winner chip is up (card t > 2.4 s) */
 #define RESULTS_FRAMES  360         /* 6 s, then the rematch menu */
 #define BOOT_STEPS      7           /* the six arenas and the garage, one scene compiled per boot frame (10.1) */
-#define FIRST_CARD_S    2.0f        /* the controls card over a pad's first seat of the evening (10.24): 2 s, over the turntable, not the rows */
+#define FIRST_CARD_S    3.0f        /* the controls card over a pad's first seat of the evening (10.24): 3 s, over the turntable, not the rows */
 #define RIG_COMBO       (IN_SELECT | IN_L3 | IN_R3)
+/* the attack coach (deep-controls 4.3): each beat's give up time and the done tick, in frames */
+#define COACH_1_MAX     720
+#define COACH_2_MAX     900
+#define COACH_3_MAX     1200
+#define COACH_TICK      18
+#define COACH_FRONT     120
 
 static const int MODE_MIN_PLAYERS[MODE_COUNT] = { 1, 2, 3, 2, 4, 3 };
 
@@ -61,6 +67,10 @@ static int   rematch_touched;                   /* a human moved or voted on the
 static int   rematch_deadline;                  /* frame the rematch menu decides at (20 s, or 10 s after a late first touch) */
 static uint32_t results_frame;                  /* render frame the results opened at: the silent table clock starts here */
 static int   rules_auto;                        /* the rules flash offered itself (first evening): any button skips */
+/* the attack coach: the seat and slot it teaches, the beat (0 off), frames in the beat, the done tick, the
+ * FRONT line, and the beat 1 counters (frames driving, frames with the enemy in view) */
+static struct { int seat, slot, beat, kind, t, tick, front, drive_n, seen_n; float fuel0; } coach;
+static void coach_start(void);
 
 /* -- TOURNAMENT (2.2) ---------------------------------------------
  * Seats stay seats; a tournament match is a 1v1 between two of them in match slots 0
@@ -488,6 +498,7 @@ static void go_fight(void) {
   char line[512];
   sim_setup_line(&SETUP, (int)G.frame - 1, line, sizeof line);   /* the shot frame of the first step */
   logf_(line);
+  coach_start();
 }
 
 static void go_results(void);
@@ -1098,6 +1109,98 @@ static void vote_update(float dt) {
   if (G.phase_frames - vote_decide_frame >= VOTE_SHOW + (vote_tie ? VOTE_TIE_FLICK : 0)) go_countdown();
 }
 
+/* -- the attack coach (deep-controls 4.3) -------------------------
+ * Three beats, once per save: the first fight after a fresh save (SAVE.matches 0 at the horn), the first
+ * human seat only, never KO BY FLIP and never 3 or 4 players (quadrants have no room). Each beat ends on its
+ * done condition with a 0.3 s live tick and a low MENU OK, or gives up at its time limit; it is the game's,
+ * so no button dismisses it. The pause holds it, a KO ends it; after beat 3 coach_done is saved. */
+static int coach_kind(const build_t *b) {
+  if (b->drive == DR_MELTY || b->weapon == WP_HORIZ || b->weapon == WP_DRUM) return COACH_SPIN;
+  switch (b->weapon) {
+    case WP_SAW: return COACH_SAW;
+    case WP_FLIPPER: case WP_HAMMER: case WP_SPIKE: case WP_CRUSHER: return COACH_TAP;
+    case WP_LIFTER: return COACH_LIFT;
+    case WP_FLAME: return COACH_FLAME;
+    default: return COACH_RAM;
+  }
+}
+
+static void coach_start(void) {
+  memset(&coach, 0, sizeof coach); coach.seat = -1; coach.slot = -1;
+  if (SAVE.coach_done || SAVE.matches != 0 || G.attract || M.mode == MODE_KO_FLIP || G.players > 2) return;
+  for (int i = 0; i < M.nbots && i < 4; i++) {
+    const bot_t *b = &M.bots[i];
+    if (b->is_ops || b->hp_max <= 0 || b->seat > 3 || G.seats[b->seat].kind != SEAT_HUMAN) continue;
+    if (coach.slot < 0 || b->seat < coach.seat) { coach.slot = i; coach.seat = b->seat; }
+  }
+  if (coach.slot < 0) return;
+  coach.beat = 1; coach.kind = coach_kind(&M.bots[coach.slot].build);
+  coach.fuel0 = M.bots[coach.slot].fuel;
+}
+
+static void coach_finish(void) {
+  if (coach.beat == 3 || coach.beat == 4) { SAVE.coach_done = 1; save_commit(); }
+  coach.beat = 0;
+}
+
+/* a beat is done: the tick shows 0.3 s, then the next beat */
+static void coach_done_beat(void) { if (coach.tick == 0) { coach.tick = COACH_TICK; audio_play_var(SFX_MENU_OK, SFXV_LOW); } }
+
+static void coach_next(void) {
+  coach.beat++; coach.t = 0; coach.tick = 0;
+  if (coach.beat > 3) { coach.beat = 3; coach_finish(); }
+}
+
+static void coach_update(void) {
+  if (coach.beat <= 0 || coach.slot < 0 || coach.slot >= M.nbots) return;
+  const bot_t *b = &M.bots[coach.slot];
+  if (M.over || !b->alive) { coach_finish(); return; }
+  if (coach.front > 0) { if (--coach.front == 0) { coach_finish(); } return; }
+  if (coach.tick > 0) { if (--coach.tick == 0) { if (coach.beat >= 3) coach_finish(); else coach_next(); } return; }
+  coach.t++;
+  switch (coach.beat) {
+    case 1: {
+      float ex, ey;
+      if (b->drive_t > 0.5f || b->drive_t < -0.5f) coach.drive_n++;
+      if (!cam_enemy_offscreen(coach.seat, &ex, &ey)) coach.seen_n++;
+      if (coach.drive_n >= 60 && coach.seen_n >= 30) coach_done_beat();
+      else if (coach.t >= COACH_1_MAX) coach_next();
+      break; }
+    case 2: {
+      int done = 0;
+      switch (coach.kind) {
+        case COACH_SPIN: done = b->spin > SPINNER_HIT_MIN; break;
+        case COACH_SAW: done = b->saw_on; break;
+        case COACH_TAP: done = b->active > 0 || b->windup > 0 || b->clamp > 0; break;
+        case COACH_LIFT: done = b->lift > 0.3f; break;
+        case COACH_FLAME: done = b->fuel < coach.fuel0 - 1.0f; break;
+        default: done = hud_ram_closing(b, NULL, NULL) > RAM_MIN_CLOSING; break;
+      }
+      if (done) coach_done_beat();
+      else if (coach.t >= COACH_2_MAX) coach_next();
+      break; }
+    default:
+      if (coach.t >= COACH_3_MAX) coach_finish();
+      break;
+  }
+}
+
+/* beat 3 ends on this seat's first landed hit: a side or rear one ticks, a front one says FRONT. TRY THE SIDE */
+static void coach_hit(const event_t *e) {
+  if (coach.beat != 3 || coach.tick > 0 || coach.front > 0 || e->a != coach.slot || e->dmg <= 0) return;
+  if (e->zone >= 10) { coach.tick = COACH_TICK; audio_play_var(SFX_MENU_OK, SFXV_LOW); coach.beat = 4; }
+  else { coach.front = COACH_FRONT; audio_play_var(SFX_MENU_BACK, SFXV_LOW); }
+}
+
+int game_coach(coach_t *out) {
+  if (coach.beat <= 0 || coach.slot < 0 || G.phase != PH_FIGHT) return 0;
+  if (out) {
+    out->seat = coach.seat; out->beat = coach.beat > 3 ? 3 : coach.beat; out->kind = coach.kind;
+    out->tick_t = coach.tick / 60.0f; out->front_t = coach.front / 60.0f;
+  }
+  return 1;
+}
+
 /* -- fight, KO, judges (2.3, 2.10) ------------------------------- */
 static void pause_open(int seat) {
   G.paused = 1; G.pauser = seat; G.pause_row = 0; G.reset_hold = 0; G.timescale = 0;
@@ -1197,6 +1300,7 @@ static void fight_update(float dt) {
     if (ops_gunner >= 0 && G.seats[ops_gunner].pad >= 0) M.ops_in_gun = PADS[(int)G.seats[ops_gunner].pad].cur;
   }
   fight_audio();
+  coach_update();
   if (M.over) {
     if (M.win_how == WIN_JUDGES) go_judges(); else go_ko();
   }
@@ -1381,7 +1485,9 @@ void game_on_event(const event_t *e) {
     case EV_TAUNT: if (e->a < MAX_BOTS) taunt_frame[e->a] = M.frame; break;
     case EV_HIT:
       if (e->b < MAX_BOTS && e->dmg >= 30 && taunt_frame[e->b] && M.frame - taunt_frame[e->b] <= 60) taunted_hit[e->b] = 1;
+      coach_hit(e);
       break;
+    case EV_RAM: coach_hit(e); break;
     case EV_STUCK: {
       char m[64]; snprintf(m, sizeof m, "[stuck] f=%d bot %d at %.2f %.2f", M.frame, e->a, e->x, e->z);
       logf_(m);

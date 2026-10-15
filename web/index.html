@@ -106,6 +106,9 @@ const BTN = { A: 1, B: 2, X: 4, Y: 8, L: 16, R: 32, START: 64, SELECT: 128, UP: 
 const KEYS = { ArrowUp: BTN.UP, ArrowDown: BTN.DOWN, ArrowLeft: BTN.LEFT, ArrowRight: BTN.RIGHT,
   KeyZ: BTN.A, KeyX: BTN.B, KeyA: BTN.X, KeyS: BTN.Y, Enter: BTN.START, ShiftRight: BTN.SELECT, KeyQ: BTN.L, KeyW: BTN.R };
 let keyBits = 0;
+/* once a mapped key has been pressed, pad 1 is the keyboard (no gamepad in slot 0): the cart asks the host for
+ * pad names (wc_pad_name) and prints Z, X, A, S, Q, W and ENTER on its keycaps instead of the pad letters */
+let keysUsed = false;
 
 let host = null, audio = null, nextTime = 0;
 const axis = (v) => Math.round((v || 0) * 32767);
@@ -129,6 +132,7 @@ function pads() {
   const res = out.map((p) => p || { connected: false, buttons: 0, leftX: 0, leftY: 0, rightX: 0, rightY: 0, leftTrigger: 0, rightTrigger: 0 });
   res[0].buttons |= keyBits;
   if (keyBits) res[0].connected = true;
+  if (keysUsed && !out[0]) res[0].name = 'Keyboard';
   return res;
 }
 
@@ -187,7 +191,7 @@ $('fs').addEventListener('click', () => $('stage').requestFullscreen?.());
 window.addEventListener('keydown', (e) => {
   if (!host) return;
   const b = KEYS[e.code];
-  if (b) { e.preventDefault(); keyBits |= b; }
+  if (b) { e.preventDefault(); keyBits |= b; keysUsed = true; }
 });
 window.addEventListener('keyup', (e) => {
   const b = KEYS[e.code];

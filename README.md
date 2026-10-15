@@ -36,6 +36,19 @@ The shared 60 s timer is the caution tape along the bottom (30 s on a rebuild). 
 
 W3C standard gamepad. The keyboard is pad 1: arrows, Z (A), X (B), A (X), S (Y), Enter (Start), right Shift (Select), Q and W (L and R). The d-pad drives the same axes as the left stick everywhere, so a keyboard needs no stick and no trigger.
 
+Every keycap on screen names the key for the pad that will press it. The host tells the cart which pad is a keyboard (`wc_pad_name`; the web page names pad 1 Keyboard once a key has been pressed): a keyboard reads Z, X, A, S, Q, W and ENTER, a pad its own letters, and a pad the host names nothing (the station until its core is checked) gets both, keyboard first (Z / A).
+
+| Keyboard | Pad | Fight | Menus |
+|---|---|---|---|
+| arrows | stick or d-pad | drive | move the cursor |
+| Z | A or RT | weapon | select, lock in, ready, vote |
+| X | B | brake; rights a HAMMER or FLIPPER | back, release, hold to leave |
+| A | X | taunt | RANDOM BOT, the stick scheme in the lobby |
+| S | Y | hold for the controls card | tap for a preset, HOW IT WORKS |
+| Q | L or LT | boost | |
+| W | R or RT | | test fire in the garage |
+| ENTER | START | pause | go |
+
 | Input | Fight |
 |---|---|
 | Left stick or d-pad | drive: throttle and steer (HOVER and MELTY: the direction to travel, relative to your camera) |
@@ -48,6 +61,22 @@ W3C standard gamepad. The keyboard is pad 1: arrows, Z (A), X (B), A (X), S (Y),
 | Start | pause in the fight; ready and go in the lobby; lock and go in the garage; confirm on the vote and rematch menus; skips the rules flash and the judges card; backs out of settings. Enter always does something. |
 
 TANK scheme puts the left side on the left stick and the right side on the right stick (the d-pad still drives both sides). Knocked out in a free-for-all? You get a hazard seat: the stick picks a hazard and A fires it.
+
+The weapon widget in your strip is a ring with the weapon key on it and one word for what pressing it does now:
+
+| Weapon | Words |
+|---|---|
+| HORIZONTAL, DRUM, MELTY | HOLD (under the rust tick at half spin nothing bites), SPIN UP, READY, SPENT after a hit or a wall |
+| SAW | TAP: ON, SPIN UP, ON |
+| FLIPPER, SPIKE | TAP, then the reload in seconds |
+| HAMMER, CRUSHER | TAP, SWING or CLAMP, HOLD n S, then the reload |
+| LIFTER | HOLD, LIFT, CARRY n.n S |
+| FLAME | HOLD, EMPTY, REFILL |
+| WEDGE, NONE | RAM; the ring fills with your closing speed, DRIVE AT THEM when they are close and ahead, HIT, then the ram's cooldown |
+
+INVERTED replaces the word when the weapon does not work upside down, and the prompt under the count says what will right you: the brake key for a HAMMER or FLIPPER, the three DRUM steps, KEEP MOVING for a build that drives upside down. BOOST with its key sits beside the boost bar (NO BOOST on TREADS and LEG TRACKS for the first 3 s), and BRAKE flashes when you brake at speed.
+
+A hit you land shows its number in your seat colour with a ring and a live tick on your HP bar; a hit you take is rust, with a rust edge on your view. A weak hit says why under the number: FRONT ARMOUR, WEDGE, SPINNING DOWN, SHELL, ARMOUR, WALL, STRIPPED, WHEEL, or EXPOSED in live when you caught them lifted or flipped. On a cabinet's first evenings a live chevron hangs over the enemy's weakest side (a dented panel, else the side facing you), and Y (S) shows it any time. The first fight of a fresh save runs a three line coach for the first human seat: drive at the arrow, use your weapon, hit the side.
 
 ![A hit in halves](docs/fight.png)
 

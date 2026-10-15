@@ -19,6 +19,7 @@
 #include "juice.h"
 #include "fx.h"
 #include "bot.h"
+#include "keys.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -209,10 +210,13 @@ void clock_chip(const match_t *m, int compact) {
 }
 
 /* -- tape seams, hazard tape, white, cut (10.5, 9.3) ------------- */
+/* the seams hold still: a scrolling seam changed a band in every row of the screen every frame, and the HUD
+ * upload sends a changed band at the width of everything else in it, so every strip, chip and marker went to
+ * the GPU every frame (deep-controls 7.15, the upload budget) */
 void tape_seams(int layout) {
   switch (layout) {
-    case LAY_HALVES: hud_tape(638, 0, 4, 720, G.tape_phase); break;
-    case LAY_QUADS: case LAY_THREE: hud_tape(638, 0, 4, 720, G.tape_phase); hud_tape(0, 358, 1280, 4, G.tape_phase); break;
+    case LAY_HALVES: hud_tape(638, 0, 4, 720, 0); break;
+    case LAY_QUADS: case LAY_THREE: hud_tape(638, 0, 4, 720, 0); hud_tape(0, 358, 1280, 4, 0); break;
     default: break;
   }
 }
@@ -253,8 +257,9 @@ static const bot_t *nearest_enemy(const bot_t *b) {
   return best;
 }
 
-/* a 24 px filled triangle in the enemy's seat colour on a 2 px char shadow at the viewport edge */
-static void chevron_at(const rect_t *vp, float ex, float ey, uint32_t c) {
+/* a 24 px filled triangle in the enemy's seat colour on a 2 px char shadow at the viewport edge, with the
+ * enemy's seat number in a chip behind it; the coach's first beat makes it 32 px and live (deep-controls 4.3) */
+static void chevron_at(const rect_t *vp, float ex, float ey, uint32_t c, int size, int seat) {
   /* the box the chevron rides is the viewport above its strip (72 px, 56 in quadrants) */
   float strip = vp->h <= 360 ? 56.0f : 72.0f, bh = vp->h - strip;
   float cx = vp->x + vp->w * 0.5f, cy = vp->y + bh * 0.5f;
@@ -262,15 +267,21 @@ static void chevron_at(const rect_t *vp, float ex, float ey, uint32_t c) {
   if (l < 1) return;
   dx /= l; dy /= l;
   /* the point on the box edge along (dx, dy), 24 px in */
-  float hx = vp->w * 0.5f - 24, hy = bh * 0.5f - 24;
+  float hs = size * 0.5f;
+  float hx = vp->w * 0.5f - 24 - (size - 24), hy = bh * 0.5f - 24 - (size - 24);
   float tx = fabsf(dx) > 1e-4f ? hx / fabsf(dx) : 1e9f, ty = fabsf(dy) > 1e-4f ? hy / fabsf(dy) : 1e9f;
   float t = tx < ty ? tx : ty;
   float px = cx + dx * t, py = cy + dy * t;
   float nx = -dy, ny = dx;
-  float tipx = px + dx * 12, tipy = py + dy * 12, bx = px - dx * 12, by = py - dy * 12;
-  hud_tri(tipx + 2, tipy + 2, bx + nx * 12 + 2, by + ny * 12 + 2, bx - nx * 12 + 2, by - ny * 12 + 2, C_CHAR, 255);
-  hud_tri(tipx, tipy, bx + nx * 12, by + ny * 12, bx - nx * 12, by - ny * 12, c, 255);
-  hud_dirty((int)px - 30, (int)py - 30, 60, 60);
+  float tipx = px + dx * hs, tipy = py + dy * hs, bx = px - dx * hs, by = py - dy * hs;
+  hud_tri(tipx + 2, tipy + 2, bx + nx * hs + 2, by + ny * hs + 2, bx - nx * hs + 2, by - ny * hs + 2, C_CHAR, 255);
+  hud_tri(tipx, tipy, bx + nx * hs, by + ny * hs, bx - nx * hs, by - ny * hs, c, 255);
+  if (seat >= 0) {
+    /* the enemy's seat chip just inside the chevron's base */
+    int chx = (int)(px - dx * (hs + 14)), chy = (int)(py - dy * (hs + 14));
+    hud_seat_chip(chx - 9, chy - 9, 18, 18, seat & 3, F_MONO_S, 0);
+  }
+  hud_dirty((int)px - 50, (int)py - 50, 100, 100);
 }
 
 void chevron(int viewport, const rect_t *vp, int seat) {
@@ -279,57 +290,35 @@ void chevron(int viewport, const rect_t *vp, int seat) {
   const bot_t *e = nearest_enemy(b);
   if (!e) return;
   uint32_t c = SEAT_RGB[bot_seat_colour_index(e)];
+  int size = 24, es = e->seat <= 3 ? e->seat : -1;
+  coach_t co;
+  if (game_coach(&co) && co.seat == seat && co.beat == 1 && co.tick_t <= 0) { size = 32; c = C_LIVE; }
   float ex, ey;
-  if (cam_enemy_offscreen(seat, &ex, &ey)) { chevron_at(vp, ex, ey, c); return; }
+  if (cam_enemy_offscreen(seat, &ex, &ey)) { chevron_at(vp, ex, ey, c, size, es); return; }
   if (!project(viewport, e->b.x, e->b.y + 0.3f, e->b.z, &ex, &ey)) {
     /* behind the camera: point along the plane direction, mirrored */
     float dx = e->b.x - b->b.x, dz = e->b.z - b->b.z;
     float h = b->b.h, fx = sinf(h), fz = cosf(h);
     float side = dx * fz - dz * fx;
-    chevron_at(vp, vp->x + vp->w * 0.5f + (side > 0 ? 400 : -400), vp->y + vp->h * 0.5f + 300, c);
+    chevron_at(vp, vp->x + vp->w * 0.5f + (side > 0 ? 400 : -400), vp->y + vp->h * 0.5f + 300, c, size, es);
     return;
   }
-  if (ex < vp->x || ex > vp->x + vp->w || ey < vp->y || ey > vp->y + vp->h - 72) chevron_at(vp, ex, ey, c);
+  if (ex < vp->x || ex > vp->x + vp->w || ey < vp->y || ey > vp->y + vp->h - 72) chevron_at(vp, ex, ey, c, size, es);
 }
 
 /* -- count-out (2.7, 10.4) --------------------------------------- */
 static int count_number(const bot_t *b) { int n = 10 - b->countout / 60; return n < 0 ? 0 : n; }
-static int can_self_right(const bot_t *b) { return WEAPONS[b->build.weapon].selfright != SR_NONE || b->build.drive == DR_MELTY; }
-
-void countout(const rect_t *vp, const bot_t *b) {
-  if (!b || b->countout <= 0 || !b->alive) return;
-  char s[4];
-  snprintf(s, sizeof s, "%d", count_number(b));
-  int compact = vp->h <= 360;
-  int cx = vp->x + vp->w / 2, cy = vp->y + vp->h / 2;
-  /* F_TITLE at the viewport centre; in a quadrant F_H1 under the stinger slot so the two never collide */
-  int font = compact ? F_H1 : F_TITLE;
-  int fh = hud_font_h(font);
-  int y = compact ? vp->y + 196 : cy - fh / 2 - 30;
-  /* the prompt tells the truth: B when the build can right itself, the OPS rescue in a 1v1, else only that
-   * the bot is inverted (one word with the strip; GET MOVING is for a bot that can move) */
-  const char *prompt = S_GET_MOVING;
-  if (b->inverted) prompt = can_self_right(b) ? S_RIGHT_YOURSELF : (sim_is_1v1(&M) && M.mode != MODE_KO_FLIP ? S_NO_SELF_RIGHT_OPS : S_NO_SELF_RIGHT);
-  /* a char plate behind the numeral and the prompt, like the clock's, so the count reads over tape and ramps */
-  int pw = hud_text_w(F_MONO, prompt) + 48, nw = hud_text_w(font, s) + 48; if (nw > pw) pw = nw;
-  int ph = fh + (compact ? 24 : 28);
-  hud_rect(cx - pw / 2, y - 4, pw, ph, C_CHAR, 200);
-  hud_text(font, cx + 4, y + 4, s, C_SHADOW, 200, AL_CENTER);
-  hud_text(font, cx, y, s, C_RUST, 255, AL_CENTER);
-  hud_text_sh(F_MONO, cx, y + fh - (compact ? 4 : 10), prompt, C_BONE, 255, AL_CENTER);
-  hud_dirty(cx - pw / 2 - 4, y - 4, pw + 8, ph + 8);
-}
-
 /* -- the per viewport strip (10.4) ------------------------------- */
 static void ghost_update(const bot_t *b, float dt) {
   ghost_t *g = &GHOST[bot_slot(b)];
   if (!g->seen) { g->seen = 1; g->ghost = g->last = b->hp; g->hold = 0; }
-  if (b->hp < g->last - 0.01f) { g->hold = 0.6f; if (g->ghost < g->last) g->ghost = g->last; }
+  /* a hit: the bar flashes bone for 2 frames, then the lost segment drains over J_BARS_ANIM_FRAMES (4.4) */
+  if (b->hp < g->last - 0.01f) { g->hold = (2.0f + J_BARS_ANIM_FRAMES) / 60.0f; if (g->ghost < g->last) g->ghost = g->last; }
   if (b->hp > g->ghost) g->ghost = b->hp;
   g->last = b->hp;
   if (g->hold > 0) {
     g->hold -= dt;
-    if (g->hold < 0.35f) {
+    if (g->hold < J_BARS_ANIM_FRAMES / 60.0f) {
       float rate = (g->ghost - b->hp) / (g->hold > 0.02f ? g->hold : 0.02f);
       g->ghost -= rate * dt;
       if (g->ghost < b->hp) g->ghost = b->hp;
@@ -356,6 +345,7 @@ static void hp_bar(int x, int y, int w, int h, const bot_t *b, int seat_idx) {
   hud_rect(x + 2, y + 2, w - 4, h - 4, C_STEEL, 255);                 /* lost segments stay as steel */
   int fw = (int)((w - 4) * f), gw = (int)((w - 4) * gf);
   if (gw > fw) hud_rect(x + 2 + fw, y + 2, gw - fw, h - 4, C_BONE, 255);   /* the ghost drain */
+  if (g->hold > J_BARS_ANIM_FRAMES / 60.0f) fill = C_BONE;              /* the 2 frame flash */
   if (fw > 0) hud_rect(x + 2, y + 2, fw, h - 4, fill, a);
   /* segment ticks every 25 HP */
   for (int k = 1; k < 4; k++) hud_rect(x + 2 + (w - 4) * k / 4 - 1, y + 2, 1, h - 4, C_CHAR, 120);
@@ -386,11 +376,14 @@ static void flips_count(int right_x, int y, int h, const bot_t *b, int label) {
   hud_glyph(right_x - nw - 22, y + h / 2 - 8, GL_FLIPPER, 1, C_ASH, 255);
   if (label) hud_text(F_MONO_S, right_x, y + h + 8, S_FLIPS_LABEL, C_ASH, 255, AL_RIGHT);
 }
+static float strip_pop(const bot_t *b);
 static void strip_hp(int x, int y, int w, int h, int num_right, int num_h, const bot_t *b, int seat_idx, int label) {
   if (M.mode == MODE_KO_FLIP) { flip_meter(x, y, w, h, b); flips_count(num_right, y - 2, num_h, b, label); return; }
   hp_bar(x, y, w, h, b, seat_idx);
   char hp[8]; snprintf(hp, sizeof hp, "%d", (int)ceilf(b->hp > 0 ? b->hp : 0));
-  hud_text(F_MONO_L, num_right, cy_text(F_MONO_L, y - 2, num_h), hp, C_BONE, 255, AL_RIGHT);
+  /* the number pops when a hit lands on this bot: rust and lifted 3 px for 10 frames */
+  float pop = strip_pop(b);
+  hud_text(F_MONO_L, num_right, cy_text(F_MONO_L, y - 2, num_h) - (pop > 0 ? 3 : 0), hp, pop > 0 ? C_RUST : C_BONE, 255, AL_RIGHT);
 }
 
 /* seat chip with the stun flicker, the red tag frame and the count badge */
@@ -412,7 +405,6 @@ static void strip_chip(int x, int y, int w, int h, const bot_t *b, int font) {
   }
 }
 
-static int is_spinner(const bot_t *b) { return b->build.drive == DR_MELTY || b->build.weapon == WP_HORIZ || b->build.weapon == WP_DRUM || b->build.weapon == WP_SAW; }
 static int weapon_glyph(int weapon, int melty) {
   if (melty) return GL_MELTY;
   switch (weapon) {
@@ -422,75 +414,541 @@ static int weapon_glyph(int weapon, int melty) {
   }
 }
 
-/* the status word, with the spin words derived here when the sim has none to say */
-static int status_of(const bot_t *b) {
+/* the status word under the HP bar: a ridden bot is WEDGED, a hit wheel or track LIMPING (the strip's own
+ * words, deep-controls 4.6), else the sim's word; the spin words belong to the weapon widget now */
+static int strip_status(const bot_t *b) {
+  if (b->ride_by) return SW_WEDGED;
   int sw = sim_status_word(b);
-  if (sw == SW_NONE && (b->build.drive == DR_MELTY || b->build.weapon == WP_HORIZ || b->build.weapon == WP_DRUM || b->build.weapon == WP_SAW)) {
-    if (b->spin >= 0.97f) sw = SW_FULL_SPIN; else if (b->spin > 0.05f) sw = SW_SPINNING_UP;
-  }
-  if (sw == SW_NONE && b->build.weapon == WP_FLAME && b->fuel <= 0 && b->hp_max > 0) sw = SW_EMPTY;
+  if (sw == SW_SPINNING_UP || sw == SW_FULL_SPIN || sw == SW_EMPTY) sw = SW_NONE;
+  if (sw == SW_NONE && (b->wheel_hit > 0 || b->tread_hit > 0)) sw = SW_LIMPING;
   return sw;
 }
 
-/* the ring colour carries the status in quadrants */
 static uint32_t status_colour(int sw, uint32_t seat) {
   switch (sw) {
     case SW_FULL_SPIN: case SW_SPINNING_UP: return C_LIVE;
-    case SW_STUNNED: case SW_INVERTED: case SW_BURNING: case SW_RED_TAG: case SW_LIFTED: case SW_CLAMPED: case SW_EMPTY: return C_RUST;
+    case SW_STUNNED: case SW_INVERTED: case SW_BURNING: case SW_RED_TAG: case SW_LIFTED: case SW_CLAMPED: case SW_EMPTY:
+    case SW_WEDGED: case SW_LIMPING: return C_RUST;
     default: return seat;
   }
 }
 
-/* the weapon gauge in a size x size box (10.4) */
-static void gauge(int x, int y, int size, const bot_t *b, uint32_t seat_c) {
+/* -- the weapon readiness widget (deep-controls 4.2) --------------
+ * A ring with the weapon glyph, the weapon key's cap and one state word, per weapon. It reads the sim's
+ * HUD fields (ram_closing, spent_t, hit_flash_t) when the sim writes them and derives the same thing here
+ * from spin, cooldown, lift, fuel and saw_on when it does not, so the widget is right on either side of the
+ * sim merge. Colours: steel base, the seat colour below the ready line, live at ready, rust for cooling and
+ * spent, hazard for a transient (wind up, spin up, refill). */
+#define HUD_DEALT_FRAMES   20      /* the attacker's live tick and the word HIT */
+#define HUD_TAKEN_FRAMES   18      /* the victim's rust viewport frame */
+#define HUD_RING_FRAMES    8       /* a hit marker ring grows 16 to 28 px */
+#define HUD_MARK_FRAMES    120     /* a reason word under the number, 2 s */
+#define HUD_PROMPT_FRAMES  90      /* the boost and brake prompts in the word slot, 1.5 s */
+#define HUD_PROMPT_GAP     1200    /* at most one of each per 20 s */
+
+/* draw side per slot state: the strip's feedback timers and the prompt clocks (frames, counted at 60 Hz) */
+typedef struct {
+  float dealt_t, taken_t, pop_t, weak_t, slipped_t, brake_chip_t, prompt_t, spent_t;
+  int prompt_kind;                 /* 0 none, 1 boost, 2 brake */
+  float boost_gap, brake_gap, toward_t;
+  float prev_speed, prev_spin; int16_t prev_selfright, prev_brake; uint8_t fuel_empty;
+  float gone_flash[PN_COUNT];
+} slotfx_t;
+static slotfx_t SFX_[MAX_BOTS];
+
+static int seat_slot_of(int seat) { const bot_t *b = seat_bot(seat); return b ? bot_slot(b) : -1; }
+
+/* the nearest live enemy's slot to a slot, or -1 (the same rule as nearest_enemy) */
+static const bot_t *nearest_enemy(const bot_t *b);
+
+float hud_ram_closing(const bot_t *b, int *aimed, float *dist) {
+  if (aimed) *aimed = 0;
+  if (dist) *dist = 1e9f;
+  const bot_t *e = nearest_enemy(b);
+  if (!e) return 0;
+  float dx = e->b.x - b->b.x, dz = e->b.z - b->b.z, l = sqrtf(dx * dx + dz * dz);
+  if (dist) *dist = l;
+  if (l < 1e-4f) return 0;
+  dx /= l; dz /= l;
+  float fx = sinf(b->b.h), fz = cosf(b->b.h);
+  if (b->inverted) return 0;
+  int on = fx * dx + fz * dz >= 0.866f;            /* ram_check's 30 degrees */
+  if (aimed) *aimed = on;
+  if (!on) return 0;
+  float c = (b->b.vx - e->b.vx) * dx + (b->b.vz - e->b.vz) * dz;
+  if (b->ram_closing > 0) c = b->ram_closing;     /* the sim's own number once it writes one */
+  return c > 0 ? c : 0;
+}
+
+/* the frames left on the ram's per victim cooldown: the longest over the enemies */
+static int ram_cooldown(const bot_t *b) {
+  int cd = 0;
+  for (int j = 0; j < M.nbots && j < MAX_BOTS; j++) if (&M.bots[j] != b && b->hit_cd[j] > cd) cd = b->hit_cd[j];
+  return cd;
+}
+
+typedef struct { float frac; uint32_t ring; int ring_a; int tick; int word; char text[24]; uint32_t word_c; int key; } wstate_t;
+
+static void secs_text(char *s, int n, int frames) { int t = (frames * 10 + 59) / 60; snprintf(s, (size_t)n, S_WW_SECONDS, t / 10, t % 10); }
+
+/* what the widget shows for a bot this frame */
+static void widget_state(const bot_t *b, uint32_t seat_c, wstate_t *w) {
+  int slot = bot_slot(b);
+  slotfx_t *fx = &SFX_[slot];
   int melty = b->build.drive == DR_MELTY;
   int wp = melty ? WP_NONE : b->build.weapon;
-  const weapon_def_t *w = &WEAPONS[wp];
-  int cx = x + size / 2, cy = y + size / 2, r = size / 2 - 2, t = size >= 44 ? 5 : 4;
-  int gl = weapon_glyph(wp, melty);
-  int sw = status_of(b);
-  uint32_t ring_c = status_colour(sw, seat_c);
-  if (melty || wp == WP_HORIZ || wp == WP_DRUM || wp == WP_SAW) {
-    float spin = clampf(b->spin, 0, 1);
-    hud_ring(cx, cy, r, t, 1, C_STEEL, 255);
-    int a = 255;
-    if (spin >= 0.97f) a = 170 + (int)(85 * (0.5f + 0.5f * sinf(T * 6.2831853f * 3)));
-    if (spin > 0.01f) hud_ring(cx, cy, r, t, spin, spin >= 0.97f ? C_LIVE : ring_c, a);
-    if (gl >= 0) hud_glyph(cx - 8, cy - 8, gl, 1, C_BONE, 255);
-  } else if (wp == WP_FLIPPER || wp == WP_FLAME) {
-    /* a vertical tank: FLIPPER refills with the cooldown, FLAME holds fuel */
-    int tw = size >= 44 ? 12 : 10, th = size - 4;
-    float f = wp == WP_FLAME ? clampf(b->fuel / WP_FLAME_FUEL, 0, 1) : (w->cooldown > 0 ? 1 - clampf((float)b->cooldown / w->cooldown, 0, 1) : 1);
-    hud_rect(x + 2, y + 2, tw, th, C_STEEL, 255);
-    int fh = (int)((th - 4) * f);
-    uint32_t tc = f <= 0.05f ? C_RUST : f >= 0.99f ? C_LIVE : seat_c;
-    hud_rect(x + 4, y + 2 + th - 2 - fh, tw - 4, fh, tc, 255);
-    if (gl >= 0) hud_glyph(x + tw + 6 + (size - tw - 6 - 16) / 2, cy - 8, gl, 1, C_BONE, 255);
-    if (b->cooldown > 0 && w->cooldown > 0) hud_ring(cx, cy, r, 2, (float)b->cooldown / w->cooldown, C_RUST, 200);
-  } else if (wp == WP_HAMMER || wp == WP_SPIKE || wp == WP_CRUSHER) {
-    /* the glyph with a short cooldown bar under it */
-    float f = w->cooldown > 0 ? 1 - clampf((float)b->cooldown / w->cooldown, 0, 1) : 1;
-    if (gl >= 0) hud_glyph(cx - 8, y + (size >= 44 ? 6 : 2), gl, 1, b->windup > 0 ? C_HAZARD : C_BONE, 255);
-    int bw = size - 8, by = y + size - (size >= 44 ? 14 : 12);
-    hud_rect(x + 4, by, bw, 6, C_STEEL, 255);
-    hud_rect(x + 4, by, (int)(bw * f), 6, f >= 0.99f ? C_LIVE : C_RUST, 255);
-    if (b->cooldown > 0 && w->cooldown > 0) hud_ring(cx, cy, r, 2, (float)b->cooldown / w->cooldown, C_RUST, 200);
+  const weapon_def_t *wd = &WEAPONS[wp];
+  int dealt = fx->dealt_t > 0 || b->hit_flash_t > 0;
+  memset(w, 0, sizeof *w);
+  w->ring = seat_c; w->ring_a = 255; w->word = -1; w->word_c = C_ASH; w->key = KN_A; w->tick = 0;
+  if (melty || wp == WP_HORIZ || wp == WP_DRUM) {
+    float s = clampf(b->spin, 0, 1);
+    w->frac = s; w->tick = 1;
+    int spent = b->spent_t > 0 || ((dealt || fx->spent_t > 0) && s < SPINNER_HIT_MIN);
+    if (spent) { w->ring = C_RUST; w->word = WW_SPENT; w->word_c = C_RUST; }
+    else if (dealt) { w->ring = C_LIVE; w->word = WW_HIT; w->word_c = C_LIVE; }
+    else if (s >= 0.95f) { w->ring = C_LIVE; w->word = WW_READY; w->word_c = C_LIVE; if (s >= 0.97f) w->ring_a = 170 + (int)(85 * (0.5f + 0.5f * sinf(T * 6.2831853f * 3))); }
+    else if (s >= SPINNER_HIT_MIN) { w->ring = C_HAZARD; w->word = WW_SPIN_UP; w->word_c = C_HAZARD; }
+    else { w->ring = C_ASH; w->word = WW_HOLD; w->word_c = C_ASH; }        /* under the bite line the ring is not armed yet */
+  } else if (wp == WP_SAW) {
+    float s = clampf(b->spin, 0, 1);
+    w->frac = s; w->tick = 1;
+    if (!b->saw_on) { w->word = WW_TAP_ON; w->word_c = C_ASH; w->ring = C_ASH; }
+    else if (s >= SPINNER_HIT_MIN) { w->word = dealt ? WW_HIT : WW_ON; w->word_c = C_LIVE; w->ring = C_LIVE; }
+    else { w->word = WW_SPIN_UP; w->word_c = C_HAZARD; w->ring = C_HAZARD; }
+  } else if (wp == WP_FLIPPER || wp == WP_SPIKE || wp == WP_HAMMER || wp == WP_CRUSHER) {
+    int cd = wd->cooldown > 0 ? wd->cooldown : 1;
+    if (wp == WP_HAMMER && (b->windup > 0 || b->active > 0)) { w->frac = 1; w->ring = C_HAZARD; w->word = WW_SWING; w->word_c = C_HAZARD; }
+    else if (wp == WP_CRUSHER && b->clamp > 0) { w->frac = 1; w->ring = C_HAZARD; w->word = WW_CLAMP; w->word_c = C_HAZARD; }
+    else if (wp == WP_CRUSHER && b->lock > 0) { w->frac = b->lock / 120.0f; w->ring = C_HAZARD; snprintf(w->text, sizeof w->text, S_WW_HOLD_N, (b->lock + 59) / 60); w->word_c = C_HAZARD; }
+    else if (b->active > 0) { w->frac = 1; w->ring = C_HAZARD; w->word = dealt ? WW_HIT : WW_TAP; w->word_c = C_HAZARD; }
+    else if (b->cooldown > 0) { w->frac = 1 - clampf((float)b->cooldown / cd, 0, 1); w->ring = C_RUST; secs_text(w->text, sizeof w->text, b->cooldown); w->word_c = C_RUST; }
+    else { w->frac = 1; w->ring = C_LIVE; w->word = dealt ? WW_HIT : WW_TAP; w->word_c = C_LIVE; }
   } else if (wp == WP_LIFTER) {
-    float lift = clampf(b->lift, 0, 1);
-    float ang = lift * 1.0f;
-    float bx = x + 6, by = y + size - 8, len = size - 12;
-    hud_tri(bx, by, bx + len, by, bx + len * cosf(ang), by - len * sinf(ang), seat_c, 220);
-    hud_line(bx, by, bx + len * cosf(ang), by - len * sinf(ang), 3, C_BONE, 255);
-    if (gl >= 0) hud_glyph(cx - 8, y + 2, gl, 1, C_BONE, 255);
+    float l = clampf(b->lift, 0, 1);
+    w->frac = l;
+    if (b->carry_t > 0) { int left = WP_LIFTER_MAX_HOLD - b->carry_t; if (left < 0) left = 0; int t = (left * 10 + 59) / 60; snprintf(w->text, sizeof w->text, S_WW_CARRY_N, t / 10, t % 10); w->ring = C_LIVE; w->word_c = C_LIVE; }
+    else if (l > 0.3f) { w->word = WW_LIFT; w->ring = C_LIVE; w->word_c = C_LIVE; }
+    else { w->word = WW_HOLD; w->word_c = C_ASH; }
+  } else if (wp == WP_FLAME) {
+    float f = clampf(b->fuel / WP_FLAME_FUEL, 0, 1);
+    w->frac = f;
+    if (b->fuel <= 0.5f) fx->fuel_empty = 1;
+    if (b->fuel >= WP_FLAME_FUEL - 0.5f) fx->fuel_empty = 0;
+    if (b->fuel <= 0.5f) { w->word = WW_EMPTY; w->ring = C_RUST; w->word_c = C_RUST; }
+    else if (fx->fuel_empty) { w->word = WW_REFILL; w->ring = C_HAZARD; w->word_c = C_HAZARD; }
+    else { w->word = WW_HOLD; w->ring = f < 0.1f ? C_RUST : seat_c; w->word_c = C_ASH; }
   } else {
-    /* WEDGE and NONE: nothing; a faint glyph for WEDGE so the slot is not blank */
-    if (gl >= 0) hud_glyph(cx - 8, cy - 8, gl, 1, C_SMOKE, 255);
+    /* WEDGE and NONE: the ram is the attack. The ring is the closing speed toward the nearest enemy along
+     * the nose over RAM_MIN_CLOSING; it unwinds rust through RAM_CD after a ram */
+    int aimed = 0; float dist = 1e9f;
+    float c = hud_ram_closing(b, &aimed, &dist);
+    int cd = ram_cooldown(b);
+    w->key = KN_STICK;
+    if (cd > 0) { w->frac = 1 - clampf((float)cd / RAM_CD, 0, 1); w->ring = C_RUST; secs_text(w->text, sizeof w->text, cd); w->word_c = C_RUST; if (dealt) { w->text[0] = 0; w->word = WW_HIT; w->word_c = C_LIVE; w->ring = C_LIVE; } }
+    else {
+      w->frac = clampf(c / RAM_MIN_CLOSING, 0, 1);
+      w->ring = w->frac >= 1 ? C_LIVE : seat_c;
+      if (dealt) { w->word = WW_HIT; w->word_c = C_LIVE; }
+      else if (aimed && dist < 3.0f) { w->word = WW_DRIVE_AT; w->word_c = C_HAZARD; }
+      else { w->word = WW_RAM; w->word_c = C_ASH; }
+    }
   }
-  /* the secondary weapon as a small glyph at the corner */
-  if (b->build.weapon2 != WP_NONE) {
+  /* upside down with a weapon that does not work that way up: the self right prompt takes over */
+  if (b->inverted && !wd->inv_operate && !melty) { w->ring = C_SMOKE; w->word = WW_INVERTED; w->text[0] = 0; w->word_c = C_SMOKE; }
+  if (w->text[0]) w->word = -1;
+}
+
+/* the cap for the widget: the seat's key when it fits, the small cap next, else a four way arrows cap (the
+ * drive on a pad that named nothing is ARROWS OR STICK, too wide for the slot) */
+static int widget_cap(int x, int y, int pad, int which, int small, int maxw) {
+  if (!small && key_cap_w(pad, which) <= maxw) return key_cap(x, y, pad, which, C_BONE, C_TAPE);
+  if (key_cap_small_w(pad, which) <= maxw) return key_cap_small(x, small ? y : y + 4, pad, which, C_BONE, C_TAPE);
+  int s = small ? 16 : 24, cx = x + s / 2, cy = y + s / 2, a = small ? 3 : 5;
+  hud_rect(x + 1, y + 1, s, s, C_SHADOW, 255);
+  hud_rect(x, y, s, s, C_BONE, 255);
+  hud_tri(cx, cy - a - 3, cx - a, cy - 3, cx + a, cy - 3, C_TAPE, 255);
+  hud_tri(cx, cy + a + 3, cx - a, cy + 3, cx + a, cy + 3, C_TAPE, 255);
+  hud_tri(cx - a - 3, cy, cx - 3, cy - a, cx - 3, cy + a, C_TAPE, 255);
+  hud_tri(cx + a + 3, cy, cx + 3, cy - a, cx + 3, cy + a, C_TAPE, 255);
+  return s;
+}
+
+/* the widget in a w x h box at (x, y): 170 x 56 in halves and full, 164 x 40 in quadrants */
+static void weapon_widget(int x, int y, int w, int h, const bot_t *b, int seat, uint32_t seat_c, int compact) {
+  int slot = bot_slot(b);
+  slotfx_t *fx = &SFX_[slot];
+  int melty = b->build.drive == DR_MELTY;
+  int wp = melty ? WP_NONE : b->build.weapon;
+  wstate_t st; widget_state(b, seat_c, &st);
+  hud_rect(x, y, w, h, C_GRIME, 230);
+  hud_frame(x, y, w, h, 1, C_STEEL, 255);
+  int d = compact ? 32 : 44, r = d / 2, t = compact ? 4 : 5;
+  int cx = x + 4 + r, cy = y + h / 2;
+  hud_ring(cx, cy, r, t, 1, C_STEEL, 255);
+  if (st.frac > 0.01f) hud_ring(cx, cy, r, t, clampf(st.frac, 0, 1), st.ring, st.ring_a);
+  if (st.tick) {
+    /* the bite line: a 2 px rust tick at SPINNER_HIT_MIN of the way round (the ring starts at 12 o'clock) */
+    float a = SPINNER_HIT_MIN * 6.2831853f;
+    float sx = sinf(a), sy = -cosf(a);
+    hud_line(cx + sx * (r - t - 2), cy + sy * (r - t - 2), cx + sx * (r + 2), cy + sy * (r + 2), 2, C_RUST, 255);
+  }
+  int gl = weapon_glyph(wp, melty);
+  if (gl < 0) gl = GL_BOT;
+  hud_glyph(cx - 8, cy - 8, gl, 1, st.ring == C_SMOKE ? C_SMOKE : C_BONE, 255);
+  /* the secondary weapon: a small glyph at the box's top right, live while its own state is ready */
+  if (b->build.weapon2 != WP_NONE && !compact) {
     int g2 = weapon_glyph(b->build.weapon2, 0);
-    if (g2 >= 0) hud_glyph(x + size - 12, y + size - 12, g2, 1, C_ASH, 255);
+    int ready2 = b->build.weapon2 == WP_SAW ? b->spin2 >= SPINNER_HIT_MIN : b->build.weapon2 == WP_FLAME ? b->fuel2 > 0 : b->cooldown2 == 0;
+    if (g2 >= 0) hud_glyph(x + w - 20, y + 4, g2, 1, ready2 ? C_LIVE : C_ASH, 255);
   }
+  /* the key and the word; a boost or brake prompt borrows the word slot for 1.5 s */
+  int pad = key_seat_pad(seat);
+  int rx = x + d + 10, rw = x + w - 4 - rx;
+  const char *word = st.text[0] ? st.text : st.word >= 0 ? WIDGET_WORD[st.word] : "";
+  uint32_t wc = st.word_c;
+  if (fx->prompt_t > 0 && fx->prompt_kind && st.word != WW_INVERTED) {
+    const char *fmt = fx->prompt_kind == 1 ? S_BOOST_PROMPT : S_BRAKE_PROMPT;
+    int which = fx->prompt_kind == 1 ? KN_L : KN_B;
+    int blink = ((int)(fx->prompt_t / 8)) & 1;
+    if (!compact) widget_cap(rx, y + 4, pad, st.key, 0, rw - (b->build.weapon2 != WP_NONE ? 20 : 0));
+    int ly = compact ? y + 21 : y + 32;
+    if (key_text_w(F_MONO_S, fmt, pad, which) <= rw) key_text(F_MONO_S, rx, ly, fmt, pad, which, blink ? C_BONE : C_HAZARD, 255);
+    else { char s[32]; key_format(s, sizeof s, fmt, pad, which); hud_text(F_MONO_S, rx, ly, s, C_HAZARD, 255, AL_LEFT); }
+    return;
+  }
+  if (compact) {
+    widget_cap(rx, y + 3, pad, st.key, 1, rw);
+    if (hud_text_w(F_MONO_S, word) <= rw) hud_text(F_MONO_S, rx, y + 21, word, wc, 255, AL_LEFT);
+    else { char s[24]; fit_text(s, sizeof s, F_MONO_S, word, rw); hud_text(F_MONO_S, rx, y + 21, s, wc, 255, AL_LEFT); }
+  } else {
+    widget_cap(rx, y + 4, pad, st.key, 0, rw - (b->build.weapon2 != WP_NONE ? 20 : 0));
+    hud_text(F_MONO_S, rx, y + 33, word, wc, 255, AL_LEFT);
+  }
+}
+
+/* the boost word, cap and bar (4.7) in the right column; NO BOOST in smoke for the first 3 s on a drive
+ * without one; three pips and a 16 px cap in quadrants */
+static void boost_block(int x, int y, int w, const bot_t *b, int seat, int compact, int room_for_word) {
+  int pad = key_seat_pad(seat);
+  float cdmax = b->red_tag_t > 0 ? 120.f : 240.f;
+  if (!DRIVES[b->build.drive].boost) {
+    if (M.frame < 180 && G.phase == PH_FIGHT) hud_text(F_MONO_S, x, compact ? y - 2 : y, WIDGET_WORD[WW_NO_BOOST], C_SMOKE, 255, AL_LEFT);
+    return;
+  }
+  int ready = b->boost <= 0 && b->boost_cd <= 0;
+  if (compact) {
+    float f = b->boost_cd > 0 && b->boost <= 0 ? 1 - clampf(b->boost_cd / cdmax, 0, 1) : 1;
+    for (int k = 0; k < 3; k++) hud_rect(x + k * 13, y, 9, 6, b->boost > 0 ? C_BONE : f >= (k + 1) / 3.f - 0.01f ? C_LIVE : C_STEEL, 255);
+    if (ready) key_cap_small(x, y + 10, pad, KN_L, C_BONE, C_TAPE);   /* under the pips: the column is 60 px */
+    return;
+  }
+  int bx = x, by = y + 22;
+  if (room_for_word) {
+    hud_text(F_MONO_S, x, y, WIDGET_WORD[WW_BOOST], b->boost > 0 ? C_LIVE : C_ASH, 255, AL_LEFT);
+    if (ready) key_cap_small(x + hud_text_w(F_MONO_S, WIDGET_WORD[WW_BOOST]) + 6, y + 1, pad, KN_L, C_BONE, C_TAPE);
+  }
+  if (b->boost_cd > 0 && b->boost <= 0) {
+    float f = 1 - clampf(b->boost_cd / cdmax, 0, 1);
+    hud_rect(bx, by, w, 8, C_STEEL, 255);
+    hud_rect(bx, by, (int)(w * f), 8, C_RUST, 255);
+  } else hud_rect(bx, by, w, 8, b->boost > 0 ? C_BONE : C_LIVE, 255);
+}
+
+/* the strip's top down bot outline: four edges by panel state (bone clean, hazard dented, rust gone),
+ * the side strip_panel_gone named flashing for a second */
+static void panel_icon(int x, int y, const bot_t *b) {
+  const slotfx_t *fx = &SFX_[bot_slot(b)];
+  int w = 12, h = 16;
+  hud_rect(x, y, w, h, C_SLAB, 255);
+  for (int p = PN_FRONT; p <= PN_RIGHT; p++) {
+    int s = b->panel_state[p];
+    uint32_t c = s >= 4 ? C_RUST : s >= 1 ? C_HAZARD : C_BONE;
+    int a = 255;
+    if (fx->gone_flash[p] > 0 && (((int)(fx->gone_flash[p] / 6)) & 1)) c = C_WHITE;
+    if (s >= 4 && c != C_WHITE) a = 255;
+    switch (p) {
+      case PN_FRONT: hud_rect(x, y, w, 3, c, a); break;
+      case PN_BACK: hud_rect(x, y + h - 2, w, 2, c, a); break;
+      case PN_LEFT: hud_rect(x, y, 2, h, c, a); break;
+      default: hud_rect(x + w - 2, y, 2, h, c, a); break;
+    }
+  }
+}
+
+/* -- hit feedback (deep-controls 4.4, graphics 7.2): the drain of DEEP-plan 5.2 calls these ----------- */
+typedef struct { float x, y, z, age; int band; uint32_t rgb; int live; } ring_t;
+#define RINGS_PER_VIEW 6
+static ring_t RINGS[4][RINGS_PER_VIEW];
+typedef struct { float x, y, z, age; int reason; int live; } mark_t;
+#define MARKS_PER_VIEW 4
+static mark_t MARKS[4][MARKS_PER_VIEW];
+
+void hit_marker_all(float x, float y, float z, int band, uint32_t rgb) {
+  for (int v = 0; v < 4; v++) {
+    ring_t *slot = &RINGS[v][0];
+    for (int k = 0; k < RINGS_PER_VIEW; k++) { if (!RINGS[v][k].live) { slot = &RINGS[v][k]; break; } if (RINGS[v][k].age > slot->age) slot = &RINGS[v][k]; }
+    slot->x = x; slot->y = y; slot->z = z; slot->age = 0; slot->band = band; slot->rgb = rgb; slot->live = 1;
+  }
+}
+
+static void rings_draw(int viewport, const rect_t *vp, float dt) {
+  hud_clip(vp->x, vp->y, vp->w, vp->h);
+  for (int k = 0; k < RINGS_PER_VIEW; k++) {
+    ring_t *r = &RINGS[viewport][k];
+    if (!r->live) continue;
+    r->age += dt * 60.f;
+    if (r->age >= HUD_RING_FRAMES + 4) { r->live = 0; continue; }
+    float sx, sy;
+    if (!project(viewport, r->x, r->y, r->z, &sx, &sy)) continue;
+    float f = clampf(r->age / HUD_RING_FRAMES, 0, 1);
+    int rad = 16 + (int)(12 * hud_ease_out(f));
+    int t = r->band >= BAND_HUGE ? 5 : r->band >= BAND_HEAVY ? 4 : 3;
+    uint32_t c = r->band >= BAND_HUGE ? C_RUST : r->band >= BAND_HEAVY ? C_HAZARD : C_BONE;
+    int a = r->age > HUD_RING_FRAMES ? (int)(255 * (HUD_RING_FRAMES + 4 - r->age) / 4) : 255;
+    hud_ring((int)sx, (int)sy, rad, t, 1, c, a);
+    /* the attacker's colour as a thin inner ring, so the dealer's own hits read as theirs */
+    if (r->rgb != C_BONE) hud_ring((int)sx, (int)sy, rad - t - 1, 1, 1, r->rgb, a);
+  }
+  hud_clip_clear();
+}
+
+void strip_taken(int seat, int band) {
+  int s = seat_slot_of(seat);
+  if (s < 0) return;
+  (void)band;
+  SFX_[s].taken_t = HUD_TAKEN_FRAMES; SFX_[s].pop_t = 10;
+}
+
+void strip_dealt(int seat) {
+  int s = seat_slot_of(seat);
+  if (s >= 0) SFX_[s].dealt_t = HUD_DEALT_FRAMES;
+}
+
+void strip_panel_gone(int seat, int panel) {
+  int s = seat_slot_of(seat);
+  if (s >= 0 && panel >= 0 && panel < PN_COUNT) SFX_[s].gone_flash[panel] = 60;
+}
+
+void hit_mark_add(int viewport, int reason, float x, float y, float z) {
+  if (viewport < 0 || viewport >= 4 || reason <= HIT_WHY_NONE || reason >= HIT_WHY_COUNT) return;
+  mark_t *slot = &MARKS[viewport][0];
+  for (int k = 0; k < MARKS_PER_VIEW; k++) { if (!MARKS[viewport][k].live) { slot = &MARKS[viewport][k]; break; } if (MARKS[viewport][k].age > slot->age) slot = &MARKS[viewport][k]; }
+  slot->x = x; slot->y = y; slot->z = z; slot->age = 0; slot->reason = reason; slot->live = 1;
+  /* a glancing word shows the weak side for 2 s after it (4.5) */
+  int seat = viewport < nviews ? view_seat[viewport] : -1;
+  int s = seat_slot_of(seat);
+  if (s >= 0) SFX_[s].weak_t = HUD_MARK_FRAMES;
+}
+
+/* the reason word rides under the number: rust, EXPOSED in live (4.4) */
+static void marks_draw(int viewport, const rect_t *vp, float dt) {
+  hud_clip(vp->x, vp->y, vp->w, vp->h);
+  for (int k = 0; k < MARKS_PER_VIEW; k++) {
+    mark_t *m = &MARKS[viewport][k];
+    if (!m->live) continue;
+    m->age += dt * 60.f;
+    if (m->age >= HUD_MARK_FRAMES) { m->live = 0; continue; }
+    float sx, sy;
+    if (!project(viewport, m->x, m->y, m->z, &sx, &sy)) continue;
+    int a = m->age > HUD_MARK_FRAMES - 18 ? (int)(255 * (HUD_MARK_FRAMES - m->age) / 18) : 255;
+    const char *w = HIT_WHY[m->reason];
+    uint32_t c = m->reason == HIT_WHY_EXPOSED ? C_LIVE : C_RUST;
+    int tw = hud_text_w(F_MONO_S, w) + 12;
+    int y = (int)sy + 22;
+    hud_rect((int)sx - tw / 2, y - 2, tw, 20, C_CHAR, a * 200 / 255);
+    hud_text(F_MONO_S, (int)sx, y, w, c, a, AL_CENTER);
+  }
+  hud_clip_clear();
+}
+
+/* the victim's viewport: a 12 px rust bar along its top and the strip's top rule thickened to 6 px rust,
+ * fading in three steps over 18 frames (the huge band's white stays on top). A whole frame round the view
+ * made every band of it full width and sent the whole view to the GPU on every step of the fade */
+static void taken_frame(const rect_t *vp, const bot_t *b) {
+  if (!b) return;
+  const slotfx_t *fx = &SFX_[bot_slot(b)];
+  if (fx->taken_t <= 0) return;
+  int step = (int)(3 * fx->taken_t / HUD_TAKEN_FRAMES + 0.999f);    /* 3, 2, 1 */
+  int a = step >= 3 ? 220 : step == 2 ? 140 : 70;
+  int strip = vp->h > 360 ? 72 : 56;
+  hud_rect(vp->x, vp->y, vp->w, 12, C_RUST, a);
+  hud_rect(vp->x, vp->y + vp->h - strip - 6, vp->w, 6, C_RUST, a);
+}
+
+/* -- the per slot clocks: spent, slipped, brake chip, the boost and brake prompts (4.6, 4.7) ---------- */
+static int near_drop(const bot_t *b, const arena_def_t *a) {
+  float hw = a->w * 0.5f, hd = a->d * 0.5f;
+  if ((a->open_mask & OPEN_PX) && hw - b->b.x < 2.0f) return 1;
+  if ((a->open_mask & OPEN_NX) && hw + b->b.x < 2.0f) return 1;
+  if ((a->open_mask & OPEN_PZ) && hd - b->b.z < 2.0f) return 1;
+  if ((a->open_mask & OPEN_NZ) && hd + b->b.z < 2.0f) return 1;
+  for (int k = 0; k < a->nhaz && k < MAX_HAZ; k++) {
+    const hazard_def_t *h = &a->haz[k];
+    if (h->type != HZ_PIT || !M.haz[k].tell) continue;
+    if (fabsf(b->b.x - h->x) <= h->w * 0.5f + 2.0f && fabsf(b->b.z - h->z) <= h->d * 0.5f + 2.0f) return 1;
+  }
+  return 0;
+}
+
+static void slots_tick(float dt, const arena_def_t *a) {
+  float f = dt * 60.f;
+  int live = G.phase == PH_FIGHT && !G.paused;
+  for (int i = 0; i < M.nbots && i < MAX_BOTS; i++) {
+    const bot_t *b = &M.bots[i];
+    slotfx_t *fx = &SFX_[i];
+    if (!bot_in_use(b)) { memset(fx, 0, sizeof *fx); continue; }
+    if (!live) continue;
+    float *timers[] = { &fx->dealt_t, &fx->taken_t, &fx->pop_t, &fx->weak_t, &fx->slipped_t, &fx->brake_chip_t, &fx->prompt_t, &fx->boost_gap, &fx->brake_gap, &fx->spent_t };
+    for (int k = 0; k < (int)(sizeof timers / sizeof timers[0]); k++) { *timers[k] -= f; if (*timers[k] < 0) *timers[k] = 0; }
+    for (int p = 0; p < PN_COUNT; p++) { fx->gone_flash[p] -= f; if (fx->gone_flash[p] < 0) fx->gone_flash[p] = 0; }
+    if (fx->prompt_t <= 0) fx->prompt_kind = 0;
+    float speed = sqrtf(b->b.vx * b->b.vx + b->b.vz * b->b.vz);
+    /* a DRUM's self right that failed (the 20 percent): SLIPPED for a second */
+    if (fx->prev_selfright > 0 && b->selfright == 0 && b->inverted) fx->slipped_t = 60;
+    /* a brake taken at speed: the BRAKE chip for 20 frames */
+    if (b->brake > fx->prev_brake && fx->prev_speed > 1.5f) fx->brake_chip_t = 20;
+    int human = b->seat <= 3 && G.seats[b->seat].kind == SEAT_HUMAN && !b->is_ai;
+    if (human && b->alive && !b->inverted) {
+      const bot_t *e = nearest_enemy(b);
+      if (e && DRIVES[b->build.drive].boost && b->boost <= 0 && b->boost_cd <= 0) {
+        float dx = e->b.x - b->b.x, dz = e->b.z - b->b.z, l = sqrtf(dx * dx + dz * dz);
+        int toward = l > 6.0f && b->drive_t > 0.5f && (sinf(b->b.h) * dx + cosf(b->b.h) * dz) > 0.8f * l;
+        fx->toward_t = toward ? fx->toward_t + f : 0;
+        if (fx->toward_t >= 90 && fx->boost_gap <= 0 && fx->prompt_t <= 0) { fx->prompt_kind = 1; fx->prompt_t = HUD_PROMPT_FRAMES; fx->boost_gap = HUD_PROMPT_GAP; fx->toward_t = 0; }
+      } else fx->toward_t = 0;
+      if (speed > 2.0f && fx->brake_gap <= 0 && fx->prompt_t <= 0 && near_drop(b, a)) { fx->prompt_kind = 2; fx->prompt_t = HUD_PROMPT_FRAMES; fx->brake_gap = HUD_PROMPT_GAP; }
+    }
+    /* a spinner that lost a quarter of its spin in one frame spent it on something (a hit, a wall, a clash) */
+    if (fx->prev_spin - b->spin > 0.25f) fx->spent_t = HUD_DEALT_FRAMES;
+    fx->prev_speed = speed; fx->prev_brake = b->brake; fx->prev_selfright = b->selfright; fx->prev_spin = b->spin;
+  }
+}
+
+/* -- the weak side indicator on the enemy (deep-controls 4.5) ------------------------------------------
+ * A 20 px live chevron 0.5 u off the enemy's weakest side (the most worn panel of the back and the two
+ * sides, never the front; the side that faces you on a tie), pulsing at 2 Hz. An exposed enemy (lifted,
+ * ridden, airborne, inverted against your hammer, drum or spike, or a spun down spinner) gets it in hazard,
+ * pointing at the underside or the disc, with EXPOSED on it for the first second. */
+static float exposed_t[MAX_BOTS]; static uint8_t was_exposed[MAX_BOTS];
+
+static int enemy_exposed(const bot_t *me, const bot_t *e, int *disc) {
+  *disc = 0;
+  int w = me->build.weapon;
+  if (e->lifted_by || e->ride_by || (e->b.y - e->floor_y) > 0.15f) return 1;
+  if (e->inverted && (w == WP_HAMMER || w == WP_DRUM || w == WP_SPIKE)) return 1;
+  if ((e->build.weapon == WP_HORIZ || e->build.weapon == WP_DRUM) && e->spin < 0.3f) { *disc = 1; return 1; }
+  return 0;
+}
+
+static int weak_side_wanted(int seat, const bot_t *b) {
+  if (seat < 0 || seat > 3 || G.seats[seat].kind != SEAT_HUMAN || !b || !b->alive) return 0;
+  int pad = G.seats[seat].pad;
+  if (pad >= 0 && pad < 4 && (PADS[pad].cur.buttons & IN_Y)) return 2;          /* under Y, in any view */
+  coach_t co;
+  if (game_coach(&co) && co.seat == seat && co.beat == 3) return 1;
+  if (SAVE.matches < 6) return 1;                                                /* the first evenings */
+  return SFX_[bot_slot(b)].weak_t > 0;
+}
+
+static void weak_side_draw(int viewport, const rect_t *vp, int seat, float dt) {
+  const bot_t *b = seat_bot(seat);
+  if (!b || !weak_side_wanted(seat, b)) return;
+  const bot_t *e = nearest_enemy(b);
+  if (!e || e->is_ops) return;
+  int ei = bot_slot(e), disc = 0;
+  int exposed = enemy_exposed(b, e, &disc);
+  if (exposed && !was_exposed[ei]) exposed_t[ei] = 60;
+  was_exposed[ei] = (uint8_t)exposed;
+  if (exposed_t[ei] > 0) exposed_t[ei] -= dt * 60.f;
+  float fx = sinf(e->b.h), fz = cosf(e->b.h), rx = cosf(e->b.h), rz = -sinf(e->b.h);
+  float tx = b->b.x - e->b.x, tz = b->b.z - e->b.z, tl = sqrtf(tx * tx + tz * tz);
+  if (tl > 1e-4f) { tx /= tl; tz /= tl; }
+  /* the candidate sides: back, left, right with their outward normals and extents */
+  struct { int panel; float nx, nz, ext; } side[3] = {
+    { PN_BACK, -fx, -fz, e->b.hl }, { PN_LEFT, -rx, -rz, e->b.hw }, { PN_RIGHT, rx, rz, e->b.hw } };
+  if (e->b.shape == SH_CIRCLE) for (int k = 0; k < 3; k++) side[k].ext = e->b.hl;
+  int best = 0; float bs = -1e9f;
+  for (int k = 0; k < 3; k++) {
+    int st = e->panel_state[side[k].panel];
+    float pool = e->panel_hp[side[k].panel];
+    float score = st * 10.0f + (side[k].nx * tx + side[k].nz * tz) + (pool > 0 ? -pool * 0.01f : 0);
+    if (score > bs) { bs = score; best = k; }
+  }
+  float nx = side[best].nx, nz = side[best].nz, ext = side[best].ext;
+  float top = e->b.y + CHASSIS[e->build.chassis].hgt;
+  float cx = e->b.x + nx * ext, cz = e->b.z + nz * ext, cy = top;
+  if (exposed && disc) {
+    const weapon_def_t *w = &WEAPONS[e->build.weapon];
+    cx = e->b.x + fx * w->hb_z0; cz = e->b.z + fz * w->hb_z0; nx = fx; nz = fz; ext = w->hb_r;
+  } else if (exposed) {
+    /* the underside: the side that faces you, low */
+    nx = tx; nz = tz; ext = e->b.shape == SH_CIRCLE ? e->b.hl : e->b.hw; cx = e->b.x + nx * ext; cz = e->b.z + nz * ext; cy = e->b.y + 0.05f;
+  }
+  /* the chevron hangs 0.45 u over the edge and a little outside it, pointing down at it, so it reads as that
+   * side of that bot even when the two bots touch */
+  float px = cx + nx * 0.2f, pz = cz + nz * 0.2f, py = cy + 0.45f;
+  float sx0, sy0, sx1, sy1;
+  if (!project(viewport, px, py, pz, &sx0, &sy0) || !project(viewport, cx, cy, cz, &sx1, &sy1)) return;
+  float dx = sx1 - sx0, dy = sy1 - sy0, l = sqrtf(dx * dx + dy * dy);
+  if (l < 1) { dx = 0; dy = 1; } else { dx /= l; dy /= l; }
+  if (sx0 < vp->x || sx0 > vp->x + vp->w || sy0 < vp->y || sy0 > vp->y + vp->h) return;
+  uint32_t c = exposed ? C_HAZARD : C_LIVE;
+  /* steady: a pulse would change its rows every frame even while the bots stand still */
+  int a = 235;
+  float s = 12, ox = -dy, oy = dx;
+  float tipx = sx0 + dx * s, tipy = sy0 + dy * s, bx = sx0 - dx * s, by = sy0 - dy * s;
+  hud_clip(vp->x, vp->y, vp->w, vp->h);
+  hud_tri(tipx + 2, tipy + 2, bx + ox * s + 2, by + oy * s + 2, bx - ox * s + 2, by - oy * s + 2, C_CHAR, a);
+  hud_tri(tipx, tipy, bx + ox * s, by + oy * s, bx - ox * s, by - oy * s, c, a);
+  if (exposed && exposed_t[ei] > 0) {
+    const char *w = HIT_WHY[HIT_WHY_EXPOSED];
+    int tw = hud_text_w(F_MONO_S, w) + 12;
+    hud_rect((int)sx0 - tw / 2, (int)sy0 - 36, tw, 20, C_CHAR, 200);
+    hud_text(F_MONO_S, (int)sx0, (int)sy0 - 34, w, C_HAZARD, 255, AL_CENTER);
+  }
+  hud_clip_clear();
+}
+
+/* -- the attack coach chip (deep-controls 4.3): above the strip, centred, a tape top, the beat's line with
+ * the key as a cap and a plain second line; a live check for 0.3 s when the beat is done ----------------- */
+static const char *const *coach_lines(const coach_t *co) {
+  if (co->beat == 1) return COACH_1;
+  if (co->beat == 3) return COACH_3;
+  switch (co->kind) {
+    case COACH_SPIN: return COACH_2_SPIN; case COACH_SAW: return COACH_2_SAW; case COACH_TAP: return COACH_2_TAP;
+    case COACH_LIFT: return COACH_2_LIFT; case COACH_FLAME: return COACH_2_FLAME; default: return COACH_2_RAM;
+  }
+}
+
+static void coach_draw(const rect_t *vp, int seat) {
+  coach_t co;
+  if (!game_coach(&co) || co.seat != seat) return;
+  int pad = key_seat_pad(seat);
+  const char *l1, *l2 = "";
+  int which = co.beat == 1 ? KN_STICK : KN_A;
+  if (co.front_t > 0) l1 = COACH_3_FRONT;
+  else { const char *const *ls = coach_lines(&co); l1 = ls[0]; l2 = ls[1]; }
+  int compact = vp->h <= 360;
+  int strip_h = compact ? 56 : 72;
+  int w1 = key_text_w(F_MONO, l1, pad, which), w2 = l2[0] ? hud_text_w(F_MONO_S, l2) : 0;
+  int w = (w1 > w2 ? w1 : w2) + 64;
+  if (w < 360) w = 360;
+  if (w > vp->w - 24) w = vp->w - 24;
+  int h = 64, x = vp->x + (vp->w - w) / 2, y = vp->y + vp->h - strip_h - h - 12;
+  int done = co.tick_t > 0;
+  hud_rect(x + 6, y + 6, w, h, C_SHADOW, 200);
+  hud_rect(x, y, w, h, C_CHAR, 220);
+  hud_tape(x, y, w, 6, 0);              /* still: a scrolling tape would re-send the chip every frame */
+  hud_frame(x, y, w, h, 2, done ? C_LIVE : co.front_t > 0 ? C_RUST : C_STEEL_HI, 255);
+  int tx = x + 16;
+  hud_glyph(tx, y + 14, done ? GL_CHECK : GL_TAG, 1, done ? C_LIVE : C_HAZARD, 255);
+  tx += 24;
+  hud_clip(x, y, w, h);
+  key_text(F_MONO, tx, y + 12, l1, pad, which, co.front_t > 0 ? C_RUST : C_BONE, 255);
+  if (l2[0] && co.front_t <= 0) hud_text(F_MONO_S, tx, y + 40, l2, C_ASH, 255, AL_LEFT);
+  hud_clip_clear();
+  hud_dirty(x, y, w + 6, h + 6);
 }
 
 static void speed_ticks(int x, int y, int w, int h, const bot_t *b, int n) {
@@ -521,11 +979,18 @@ static void mode_chip(int x, int y, int w, int h, const bot_t *b) {
   }
 }
 
+static float strip_pop(const bot_t *b) { return SFX_[bot_slot(b)].pop_t; }
+
+/* the strip (10.4, deep-controls 4.2): chip, name, the HP bar and number, the panel outline and the status
+ * word under the bar, the weapon widget, and a right column with the speed ticks and the boost. Laid out
+ * from the right so a mode chip (HILL, 2V2) or a quadrant's seam cut only shortens the HP bar. */
 void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
   if (!b) return;
   int h = compact ? 56 : 72, y = vp->y + vp->h - h;
   int seat_idx = bot_seat_colour_index(b);
+  int seat = b->seat <= 3 ? b->seat : -1;
   uint32_t sc = SEAT_RGB[seat_idx];
+  const slotfx_t *fx = &SFX_[bot_slot(b)];
   hud_rect(vp->x, y, vp->w, h, C_CHAR, 220);
   hud_rect(vp->x, y, vp->w, 2, sc, 255);
   /* quadrant content stops 110 px short of the inner seam so the PIP never covers it */
@@ -533,36 +998,48 @@ void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
   if (compact && vp->w <= 640) { cw = vp->w - 110; if (vp->x >= 640) ox = 110; }
   int x = vp->x + ox;
   char name[24];
-  fit_text(name, sizeof name, F_MONO_S, b->name, compact ? 280 : 340);
+  int sw = strip_status(b);
   if (!compact) {
+    int chip_mode = vp->w >= 640 && (M.mode == MODE_HILL || M.mode == MODE_2V2);
+    int right = x + cw - 6 - (chip_mode ? 50 : 0);
+    int col_w = chip_mode ? 46 : 96, col_x = right - col_w;
+    int ww = 170, wx = col_x - 8 - ww;
+    int num_r = wx - 10, bar_x = x + 52, bar_w = num_r - 60 - bar_x;
     strip_chip(x + 8, y + 8, 36, 56, b, F_H2);
-    hud_text(F_MONO_S, x + 52, y + 6, name, C_BONE, 255, AL_LEFT);
-    strip_hp(x + 52, y + 26, 340, 18, x + 460, 22, b, seat_idx, 1);
-    gauge(x + 474, y + 8, 44, b, sc);
-    speed_ticks(x + 530, y + 26, 60, 18, b, 6);
-    if (DRIVES[b->build.drive].boost) {
-      if (b->boost_cd > 0 && b->boost <= 0) {
-        float f = 1 - clampf(b->boost_cd / (b->red_tag_t > 0 ? 120.f : 240.f), 0, 1);
-        hud_rect(x + 530, y + 48, 60, 8, C_STEEL, 255);
-        hud_rect(x + 530, y + 48, (int)(60 * f), 8, C_RUST, 255);
-      } else hud_rect(x + 530, y + 48, 60, 8, b->boost > 0 ? C_BONE : C_LIVE, 255);
-    }
-    int sw = status_of(b);
-    if (sw != SW_NONE) hud_text(F_MONO_S, x + 474, y + 54, STATUS_WORD[sw], status_colour(sw, C_LIVE), 255, AL_LEFT);
-    if (vp->w >= 640) mode_chip(vp->x + vp->w - 50, y + 8, 44, 56, b);
+    fit_text(name, sizeof name, F_MONO_S, b->name, num_r - bar_x);
+    hud_text(F_MONO_S, bar_x, y + 6, name, C_BONE, 255, AL_LEFT);
+    strip_hp(bar_x, y + 26, bar_w, 18, num_r, 22, b, seat_idx, 1);
+    if (fx->dealt_t > 0) hud_rect(bar_x + bar_w + 2, y + 24, 10, 22, C_LIVE, 255);     /* the landed tick (4.4) */
+    panel_icon(bar_x, y + 50, b);
+    if (sw != SW_NONE && M.mode != MODE_KO_FLIP) hud_text(F_MONO_S, bar_x + 20, y + 50, STATUS_WORD[sw], status_colour(sw, C_LIVE), 255, AL_LEFT);
+    weapon_widget(wx, y + 8, ww, 56, b, seat, sc, 0);
+    speed_ticks(col_x, y + 8, col_w, 14, b, 6);
+    if (fx->brake_chip_t > 0) {
+      hud_rect(col_x, y + 28, col_w, 20, C_BONE, 255);
+      hud_text(F_MONO_S, col_x + col_w / 2, y + 30, WIDGET_WORD[WW_BRAKE], C_TAPE, 255, AL_CENTER);
+    } else boost_block(col_x, y + 30, col_w, b, seat, 0, !chip_mode);
+    if (chip_mode) mode_chip(vp->x + vp->w - 50, y + 8, 44, 56, b);
   } else {
+    int hill = M.mode == MODE_HILL;
+    int right = x + cw - 4 - (hill ? 44 : 0);
+    int col_w = 60, col_x = right - col_w;
+    int ww = 164, wx = col_x - 6 - ww;
+    int num_r = wx - 8, bar_x = x + 40, bar_w = num_r - 52 - bar_x;
     strip_chip(x + 8, y + 8, 28, 40, b, F_H3);
-    hud_text(F_MONO_S, x + 40, y + 4, name, C_BONE, 255, AL_LEFT);
-    strip_hp(x + 40, y + 20, 280, 14, x + 384, 18, b, seat_idx, 0);
-    gauge(x + 400, y + 10, 36, b, sc);
-    speed_ticks(x + 446, y + 20, 40, 12, b, 6);
-    if (DRIVES[b->build.drive].boost) {
-      /* a 3 pip row: ready pips teal, the cooldown fills them back in */
-      float f = b->boost_cd > 0 && b->boost <= 0 ? 1 - clampf(b->boost_cd / (b->red_tag_t > 0 ? 120.f : 240.f), 0, 1) : 1;
-      for (int k = 0; k < 3; k++) hud_rect(x + 446 + k * 13, y + 38, 9, 6, f >= (k + 1) / 3.f - 0.01f ? C_LIVE : C_STEEL, 255);
-    }
+    fit_text(name, sizeof name, F_MONO_S, b->name, num_r - bar_x);
+    hud_text(F_MONO_S, bar_x, y + 4, name, C_BONE, 255, AL_LEFT);
+    strip_hp(bar_x, y + 20, bar_w, 14, num_r, 18, b, seat_idx, 0);
+    if (fx->dealt_t > 0) hud_rect(bar_x + bar_w + 2, y + 18, 8, 18, C_LIVE, 255);
+    panel_icon(bar_x, y + 38, b);
+    if (sw != SW_NONE && M.mode != MODE_KO_FLIP) hud_text(F_MONO_S, bar_x + 18, y + 37, STATUS_WORD[sw], status_colour(sw, C_LIVE), 255, AL_LEFT);
+    weapon_widget(wx, y + 8, ww, 40, b, seat, sc, 1);
+    speed_ticks(col_x, y + 8, 42, 10, b, 6);
+    if (fx->brake_chip_t > 0) {
+      hud_rect(col_x, y + 26, col_w, 18, C_BONE, 255);
+      hud_text(F_MONO_S, col_x + col_w / 2, y + 27, WIDGET_WORD[WW_BRAKE], C_TAPE, 255, AL_CENTER);
+    } else boost_block(col_x, y + 24, col_w, b, seat, 1, 0);
     /* the hill score as a small chip at the content's right end */
-    if (M.mode == MODE_HILL) {
+    if (hill) {
       hud_glyph(x + cw - 40, y + 8, GL_CROWN, 1, C_LIVE, 255);
       char score_s[8]; snprintf(score_s, sizeof score_s, "%d", M.score[b->seat & 3]);
       hud_text(F_MONO_L, x + cw - 4, y + 22, score_s, C_BONE, 255, AL_RIGHT);
@@ -571,7 +1048,7 @@ void hud_strip(const rect_t *vp, const bot_t *b, int compact) {
   hud_dirty(vp->x, y, vp->w, h);
 }
 
-/* the 320 px short strip for the practice bot (10.17): chip, name, HP */
+/* the 320 px short strip for the practice bot (10.17): chip, name, HP, the panel outline and the status */
 void hud_strip_short(const rect_t *vp, const bot_t *b) {
   if (!b) return;
   int h = 72, y = vp->y + vp->h - h, x = vp->x;
@@ -583,9 +1060,60 @@ void hud_strip_short(const rect_t *vp, const bot_t *b) {
   fit_text(name, sizeof name, F_MONO_S, b->name, vp->w - 60);
   hud_text(F_MONO_S, x + 52, y + 6, name, C_BONE, 255, AL_LEFT);
   strip_hp(x + 52, y + 26, vp->w - 52 - 76, 18, x + vp->w - 12, 22, b, seat_idx, 0);
-  int sw = status_of(b);
-  if (sw != SW_NONE) hud_text(F_MONO_S, x + 52, y + 54, STATUS_WORD[sw], status_colour(sw, C_LIVE), 255, AL_LEFT);
+  panel_icon(x + 52, y + 50, b);
+  int sw = strip_status(b);
+  if (sw != SW_NONE && M.mode != MODE_KO_FLIP) hud_text(F_MONO_S, x + 72, y + 50, STATUS_WORD[sw], status_colour(sw, C_LIVE), 255, AL_LEFT);
   hud_dirty(x, y, vp->w, h);
+}
+
+/* -- count-out and the self right prompt (2.7, 10.4, deep-controls 4.6) -------------------------------
+ * The prompt tells the truth for the build: the brake key for a HAMMER or FLIPPER (RIGHTING while it
+ * works), the three DRUM steps (spin, let go, tap) with SLIPPED on the 20 percent miss, KEEP MOVING for a
+ * build that drives upside down, the HORIZONTAL's lot, and the OPS rescue or NO SELF RIGHT otherwise. */
+static void self_right_prompt(const bot_t *b, int seat, const char **fmt, int *which, uint32_t *ink) {
+  const weapon_def_t *w = &WEAPONS[b->build.drive == DR_MELTY ? WP_NONE : b->build.weapon];
+  const slotfx_t *fx = &SFX_[bot_slot(b)];
+  int ops = sim_is_1v1(&M) && M.mode != MODE_KO_FLIP;
+  *which = -1; *ink = C_BONE;
+  if (!b->inverted) { *fmt = S_GET_MOVING; return; }
+  if (b->selfright > 0) { *fmt = WIDGET_WORD[WW_RIGHTING]; *ink = C_HAZARD; return; }
+  if (fx->slipped_t > 0) { *fmt = WIDGET_WORD[WW_SLIPPED]; *ink = C_RUST; return; }
+  if (w->selfright == SR_B) { *fmt = S_RIGHT_YOURSELF; *which = KN_B; return; }
+  if (w->selfright == SR_DRUM) {
+    int pad = key_seat_pad(seat), held = pad >= 0 && pad < 4 && (PADS[pad].cur.buttons & IN_A);
+    *which = KN_A;
+    *fmt = b->spin < SPINNER_HIT_MIN ? S_SR_DRUM_SPIN : held ? S_SR_DRUM_LET : S_SR_DRUM_TAP;
+    return;
+  }
+  if (b->build.weapon == WP_HORIZ && b->build.drive != DR_MELTY) { *fmt = ops ? S_SR_HORIZ_OPS : S_SR_HORIZ; return; }
+  if (w->inv_drive) { *fmt = S_SR_DRIVES; return; }
+  *fmt = ops ? S_NO_SELF_RIGHT_OPS : S_NO_SELF_RIGHT;
+}
+
+void countout(const rect_t *vp, const bot_t *b) {
+  if (!b || b->countout <= 0 || !b->alive) return;
+  char s[4];
+  snprintf(s, sizeof s, "%d", count_number(b));
+  int compact = vp->h <= 360;
+  int cx = vp->x + vp->w / 2, cy = vp->y + vp->h / 2;
+  /* F_TITLE at the viewport centre; in a quadrant F_H1 under the stinger slot so the two never collide */
+  int font = compact ? F_H1 : F_TITLE;
+  int fh = hud_font_h(font);
+  int y = compact ? vp->y + 196 : cy - fh / 2 - 30;
+  int seat = b->seat <= 3 ? b->seat : -1, pad = key_seat_pad(seat);
+  const char *fmt; int which; uint32_t ink;
+  self_right_prompt(b, seat, &fmt, &which, &ink);
+  /* a char plate behind the numeral and the prompt, like the clock's, so the count reads over tape and ramps */
+  int tw = which >= 0 ? key_text_w(F_MONO, fmt, pad, which) : hud_text_w(F_MONO, fmt);
+  int pw = tw + 48, nw = hud_text_w(font, s) + 48; if (nw > pw) pw = nw;
+  int ph = fh + (compact ? 30 : 34);
+  hud_rect(cx - pw / 2, y - 4, pw, ph, C_CHAR, 200);
+  hud_text(font, cx + 4, y + 4, s, C_SHADOW, 200, AL_CENTER);
+  hud_text(font, cx, y, s, C_RUST, 255, AL_CENTER);
+  int py = y + fh - (compact ? 4 : 10);
+  if (which >= 0) key_text(F_MONO, cx - tw / 2, py, fmt, pad, which, ink, 255);
+  else hud_text_sh(F_MONO, cx, py, fmt, ink, 255, AL_CENTER);
+  hud_dirty(cx - pw / 2 - 4, y - 4, pw + 8, ph + 8);
 }
 
 /* -- the minimap (9.5) ------------------------------------------- */
@@ -743,14 +1271,15 @@ void hazard_seat_view(const rect_t *vp, int seat) {
   map_outline(&m, a, C_STEEL_HI, 2);
   map_contents(&m, a, &M, big, seat, &mr);
   /* the hints */
-  const char *pick = kind == HZ_FLAME ? S_SEAT_PICK_FLAME : kind == HZ_FLOORFLIP ? S_SEAT_PICK_FLIPPER : S_SEAT_PICK_HAMMER;
+  const char *pick_fmt = kind == HZ_FLAME ? S_SEAT_PICK_FLAME : kind == HZ_FLOORFLIP ? S_SEAT_PICK_FLIPPER : S_SEAT_PICK_HAMMER;
+  char pick[40]; key_format(pick, sizeof pick, pick_fmt, key_seat_pad(seat), KN_STICK);
   const char *fire = kind == HZ_PULVERIZER ? S_SEAT_SWING : S_SEAT_FIRE;
   int hx = vp->x + (ix > 8 ? ix : 16);
   int hf = big ? F_MONO : F_MONO_S;
   hud_chevron(hx + 6, hy + 8 * k, -1, 0, 10, 2, C_HAZARD, 255);
   int tw = hud_text(hf, hx + 16, hy, pick, C_ASH, 255, AL_LEFT);
   int kx = hx + 16 + tw + 16;
-  kx += hud_keycap(kx, hy - 2, "A", C_BONE, C_TAPE) + 8;
+  kx += key_cap_seat(kx, hy - 2, seat, KN_A, C_BONE, C_TAPE) + 8;
   hud_text(hf, kx, hy, fire, C_ASH, 255, AL_LEFT);
   if (chosen >= 0 && M.haz[chosen].cooldown > 0) {
     char s[24]; int cs = M.haz[chosen].cooldown * 10 / 60;
@@ -817,7 +1346,8 @@ void pause_overlay(void) {
     float held = clampf(G.reset_hold, 0, 1);
     hud_ring(448 + 384 - 28, 320 + 8 + 3 * 41 + 20, 12, 3, 1, C_TAPE, 120);
     if (held > 0) hud_ring(448 + 384 - 28, 320 + 8 + 3 * 41 + 20, 12, 3, held, C_TAPE, 255);
-    hud_text(F_MONO_S, 448 + 384 - 48, 320 + 8 + 3 * 41 + 12, S_HOLD_A_QUIT, C_TAPE, 255, AL_RIGHT);
+    char q[32]; key_format(q, sizeof q, S_HOLD_A_QUIT, key_seat_pad(G.pauser), KN_A);
+    hud_text(F_MONO_S, 448 + 384 - 48, 320 + 8 + 3 * 41 + 12, q, C_TAPE, 255, AL_RIGHT);
   }
   hud_dirty(0, 0, 1280, 720);
 }
@@ -990,6 +1520,8 @@ static int names_collide(const bot_t *const *bs, int n) {
 }
 
 static int evening_wins(int seat) { return G.seats[seat & 3].wins; }
+/* the pad the shared key hints are named for: the first human seat's, else pad 0 */
+static int first_human_pad(void) { for (int i = 0; i < 4; i++) if (G.seats[i].kind == SEAT_HUMAN && G.seats[i].pad >= 0) return G.seats[i].pad; return 0; }
 
 /* a char backdrop everywhere but the turntable viewport: the 3D pass clears only that
  * viewport, so nothing stale shows through and every line of the screen sits on char */
@@ -1092,14 +1624,14 @@ void results_screen(float t) {
     } else if (line) hud_text(F_MONO_S, jx, jy + 48, line, C_HAZARD, 255, AL_LEFT);
   }
   /* the key hints name what the buttons do now: A skips the results hold, then A votes and B takes a vote back */
-  int kx = 520;
+  int kx = 520, kpad = first_human_pad();
   if (G.phase == PH_REMATCH) {
-    kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
+    kx += key_cap(kx, 660, kpad, KN_A, C_BONE, C_TAPE) + 6;
     kx += hud_text_sh(F_MONO_S, kx, 664, S_KEY_VOTE, C_BONE, 255, AL_LEFT) + 18;
-    kx += hud_keycap(kx, 660, "B", C_BONE, C_TAPE) + 6;
+    kx += key_cap(kx, 660, kpad, KN_B, C_BONE, C_TAPE) + 6;
     hud_text_sh(F_MONO_S, kx, 664, S_KEY_UNDO, C_BONE, 255, AL_LEFT);
   } else if (G.phase_frames >= RESULTS_MIN) {
-    kx += hud_keycap(kx, 660, "A", C_BONE, C_TAPE) + 6;
+    kx += key_cap(kx, 660, kpad, KN_A, C_BONE, C_TAPE) + 6;
     hud_text_sh(F_MONO_S, kx, 664, S_KEY_SKIP, C_BONE, 255, AL_LEFT);
   }
   char wins[48];
@@ -1270,6 +1802,7 @@ static void fight_frame(float dt) {
   const arena_def_t *a = cur_arena();
   int compact = view_layout == LAY_QUADS || view_layout == LAY_THREE;
   SPEECH.t -= dt;
+  slots_tick(dt, a);
   for (int i = 0; i < nviews; i++) {
     const rect_t *vp = &views[i];
     int seat = view_seat[i];
@@ -1279,7 +1812,11 @@ static void fight_frame(float dt) {
       for (int k = 0; k < M.nbots && n < 4; k++) if (bot_is_player(&M.bots[k])) bs[n++] = &M.bots[k];
       if (n <= 2) for (int k = 0; k < n; k++) { rect_t r = { 640 * k, 0, 640, 720 }; hud_strip(&r, bs[k], 0); }
       else for (int k = 0; k < n; k++) { rect_t r = { 320 * k, 0, 320, 720 }; hud_strip_short(&r, bs[k]); }
+      rings_draw(i, vp, dt);
       numbers_draw(i, vp, dt);
+      marks_draw(i, vp, dt);
+      /* the shared view shows the weak side only for a seat holding Y (4.5) */
+      for (int s = 0; s < 4; s++) { const bot_t *sb = seat_bot(s); if (sb && weak_side_wanted(s, sb) == 2) weak_side_draw(i, vp, s, dt); }
       speech_draw(i, vp);
       stinger_draw(i, vp, 0, dt);
       viewport_white(vp, fx_white_alpha(i));
@@ -1295,8 +1832,13 @@ static void fight_frame(float dt) {
       ghost_update(b, dt);
       if (in_tell_zone(b, a)) hazard_tape_strip(vp, G.tape_phase);
     }
+    if (b) taken_frame(vp, b);
+    if (b && b->alive) weak_side_draw(i, vp, seat, dt);
+    rings_draw(i, vp, dt);
     numbers_draw(i, vp, dt);
+    marks_draw(i, vp, dt);
     speech_draw(i, vp);
+    if (b && b->alive && G.phase == PH_FIGHT) coach_draw(vp, seat);
     if (b && b->alive) chevron(i, vp, seat);
     if (b) countout(vp, b);
     stinger_draw(i, vp, compact, dt);
@@ -1336,6 +1878,7 @@ static void fight_frame(float dt) {
 /* -- draw_hud ---------------------------------------------------- */
 void draw_init(void) {
   memset(NUMS, 0, sizeof NUMS); memset(STING, 0, sizeof STING); memset(GHOST, 0, sizeof GHOST);
+  memset(RINGS, 0, sizeof RINGS); memset(MARKS, 0, sizeof MARKS); memset(SFX_, 0, sizeof SFX_);
   SPEECH.t = 0; results_confetti_done = 0; rematch_focus_y = 0;
 #ifdef RTR_FAKE_HUD
   extern void fake_hud_init(void);
@@ -1349,6 +1892,10 @@ extern void fake_hud_frame(float dt);
 
 void draw_hud(float dt) {
   T += dt;
+  /* the key names follow the host's pad names: asked every second here too, so the cart is right without
+   * main.c's keys_poll (deep-controls 6.2) */
+  static int poll_n;
+  if (poll_n++ % 60 == 0) keys_poll();
   hud_clear();
 #ifdef RTR_FAKE_HUD
   fake_hud_frame(dt);
@@ -1370,7 +1917,7 @@ void draw_hud(float dt) {
         if (G.controls_card_seat >= 0) {
           rect_t cr = { 320, 180, 640, 360 }; controls_card(&cr, 0, G.controls_card_seat);
           /* the way out, under the card (the card's own bottom line is the keyboard map) */
-          int kx = cr.x; kx += hud_keycap(kx, cr.y + cr.h + 16, "B", C_BONE, C_TAPE) + 8;
+          int kx = cr.x; kx += key_cap_seat(kx, cr.y + cr.h + 16, G.controls_card_seat, KN_B, C_BONE, C_TAPE) + 8;
           hud_text_sh(F_MONO_S, kx, cr.y + cr.h + 20, S_KEY_CLOSE, C_BONE, 255, AL_LEFT);
           hud_dirty(cr.x, cr.y, cr.w + 8, cr.h + 48);
         }
@@ -1494,7 +2041,7 @@ void fake_hud_frame(float dt) {
   (void)dt;
   int f = (int)G.frame;
   static int stage = -1;
-  int s = f / 200; if (s > 12) s = 12;
+  int s = f / 200; if (s > 13) s = 13;
   if (s != stage) {
     stage = s;
     G.phase_t = 0; G.paused = 0; G.miniko_frames = 0; G.timescale = 1;
@@ -1533,6 +2080,14 @@ void fake_hud_frame(float dt) {
         cam_set_match(&M, 2, 0, &ARENAS[AR_BAY]);
         break;
       case 9: fake_match(2, AR_BAY, MODE_DEATHMATCH); G.paused = 1; G.pauser = 1; G.pause_row = 3; G.reset_hold = 0.6f; break;
+      case 13:   /* the self right prompts (deep-controls 4.6): a FLIPPER, a DRUM spun down and a HORIZONTAL, inverted */
+        fake_match(4, AR_BAY, MODE_DEATHMATCH);
+        M.bots[0].build.weapon = WP_FLIPPER; M.bots[0].build.drive = DR_TWO;
+        M.bots[1].build.weapon = WP_DRUM; M.bots[1].spin = 0.2f;
+        M.bots[2].build.weapon = WP_HORIZ; M.bots[2].build.drive = DR_FOUR;
+        for (int k = 0; k < 4; k++) { M.bots[k].inverted = 1; M.bots[k].countout = 150; M.bots[k].alive = 1; M.bots[k].hp = 60; }
+        M.bots[0].selfright = 0;
+        break;
       case 11: fake_match(2, AR_BAY, MODE_2V2); M.closing = 1; M.clock_s = 9.4f; M.players = 4; M.bots[0].team = 0; M.bots[1].team = 1; break;
     }
     if (s == 0 || s == 11) { stinger(0, ST_AIRBORNE[0], SEAT_RGB[1]); }
