@@ -671,6 +671,14 @@ static int replay(const char *script, const char *setup, int frames) {
       sim_step(&m);
       rig_clock_events(&clk, &m);
       for (int e = 0; e < m.nev; e++) if (m.ev[e].type == EV_STUCK) { printf("[stuck] f=%d bot %d at (%.2f, %.2f)\n", m.frame, m.ev[e].a, m.ev[e].x, m.ev[e].z); stuck++; }
+      /* verbose=3: the fight's moments by render frame, to read a fixture's shot frames off */
+      if (g_verbose >= 3) for (int e = 0; e < m.nev; e++) {
+        static const char *NAMES[EV_TYPE_COUNT] = { [EV_HIT] = "HIT", [EV_RAM] = "RAM", [EV_LAUNCH] = "LAUNCH", [EV_LAND] = "LAND", [EV_INVERT] = "INVERT", [EV_KO] = "KO", [EV_MINI_KO] = "MINI_KO",
+          [EV_UNDERRIDE] = "UNDERRIDE", [EV_RIDE_END] = "RIDE_END", [EV_WEDGE_CLASH] = "WEDGE_CLASH", [EV_WHEEL_HIT] = "WHEEL_HIT", [EV_PANEL_WEAR] = "PANEL_WEAR", [EV_SHED] = "SHED", [EV_CLASH] = "CLASH", [EV_SPIN_WALL] = "SPIN_WALL", [EV_GRIND] = "GRIND", [EV_SELFRIGHT] = "SELFRIGHT" };
+        const event_t *ev = &m.ev[e];
+        if (ev->type < EV_TYPE_COUNT && NAMES[ev->type] && !(ev->type == EV_LAND && ev->dmg == 0 && ev->zone == LAND_WHEELS))
+          printf("[ev] render=%d sim=%d %s a=%d b=%d zone=%d dmg=%.1f panel=%d flags=%d reason=%d at (%.2f, %.2f)\n", f, m.frame, NAMES[ev->type], ev->a, ev->b, ev->zone, ev->dmg, ev->panel, ev->flags, ev->reason, ev->x, ev->z);
+      }
       m.nev = 0;
       if (m.frame % 60 == 0 && m.frame != last_logged) {
         printf("[sim] f=%d h=%08x\n", m.frame, sim_hash(&m)); last_logged = m.frame;
