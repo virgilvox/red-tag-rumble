@@ -73,11 +73,16 @@ static int menu_pad(void) {
   return 0;
 }
 
-/* a weapon's one line (deep-controls 4.9), MELTY BRAIN's for a melty build */
-static const char *howto_of(const build_t *b, int second) {
+/* a weapon's one line (deep-controls 4.9), MELTY BRAIN's for a melty build; a line with %s (the LIFTER's)
+ * names the weapon key of that pad (keys.c: Z on the keyboard, A on a pad, both for a pad that named nothing) */
+static const char *howto_of(const build_t *b, int second, int pad) {
+  static char line[64];
   if (!second && b->drive == DR_MELTY) return MELTY_HOWTO;
   int w = second ? b->weapon2 : b->weapon;
-  return WEAPON_HOWTO[w < WP_COUNT ? w : WP_NONE];
+  const char *h = WEAPON_HOWTO[w < WP_COUNT ? w : WP_NONE];
+  if (!strstr(h, "%s")) return h;
+  key_format(line, sizeof line, h, pad, KN_A);
+  return line;
 }
 /* the howto's first word or words: everything before the first full stop (TAP, HOLD, PASSIVE, TAP TO TOGGLE) */
 static void howto_head(char *out, int n, const char *howto) {
@@ -285,7 +290,7 @@ static void lobby_seat_card(int i, float t, float dt) {
   char name[24]; bot_name(name, &s->build);
   hud_text(F_H3, x + 16, y + 154, name, C_BONE, 255, AL_LEFT);
   char line[64], head[24];
-  howto_head(head, sizeof head, howto_of(&s->build, 0));
+  howto_head(head, sizeof head, howto_of(&s->build, 0, ai ? -1 : s->pad));
   snprintf(line, sizeof line, "%s . %s  ", preset_label(&s->build), head);     /* the preset and how its weapon works (4.9) */
   char tags[16]; snprintf(tags, sizeof tags, S_TAGS_N, build_cost(&s->build));
   /* the tag count only when it clears the scheme cap below it (a pad that named nothing has two caps) */
@@ -549,7 +554,7 @@ void garage_panel(const rect_t *r, int seat, int compact, float dt) {
     int plain = fl_ink == C_BONE && s->slot_machine_t <= 0;
     int on_weapon = row == ROW_WEAPON || row == ROW_WEAPON2;
     if (plain && ((on_weapon && (((int)(G.phase_t * 0.5f)) & 1)) || (!on_weapon && garage_weapon_t[seat] < 2.0f))) {
-      fl = howto_of(&s->build, row == ROW_WEAPON2 && s->build.weapon2 != WP_NONE); fl_ink = C_LIVE;
+      fl = howto_of(&s->build, row == ROW_WEAPON2 && s->build.weapon2 != WP_NONE, ai ? -1 : s->pad); fl_ink = C_LIVE;
     }
   }
   int kpad = ai ? -1 : s->pad;
@@ -1251,7 +1256,7 @@ void controls_card(const rect_t *r, int compact, int seat) {
     if (kb) { hud_text(F_MONO_S, x + w / 2, ly, CARD_KB_LINE, C_ASH, 255, AL_CENTER); ly += 22; }
     if (seat >= 0 && G.seats[seat].kind != SEAT_EMPTY) {
       const build_t *b = &G.seats[seat].build;
-      char line[64]; snprintf(line, sizeof line, "%s%s", S_WEAPON_LINE, howto_of(b, 0));
+      char line[64]; snprintf(line, sizeof line, "%s%s", S_WEAPON_LINE, howto_of(b, 0, pad));
       hud_text(F_MONO_S, x + w / 2, ly, line, C_LIVE, 255, AL_CENTER);
     }
   } else {

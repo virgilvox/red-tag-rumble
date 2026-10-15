@@ -1172,7 +1172,7 @@ static void coach_update(void) {
         case COACH_SPIN: done = b->spin > SPINNER_HIT_MIN; break;
         case COACH_SAW: done = b->saw_on; break;
         case COACH_TAP: done = b->active > 0 || b->windup > 0 || b->clamp > 0; break;
-        case COACH_LIFT: done = b->lift > 0.3f; break;
+        case COACH_LIFT: done = b->carry_t > 0; break;          /* the first grab */
         case COACH_FLAME: done = b->fuel < coach.fuel0 - 1.0f; break;
         default: done = hud_ram_closing(b, NULL, NULL) > RAM_MIN_CLOSING; break;
       }
