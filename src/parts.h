@@ -210,8 +210,8 @@ static const float DRIVE_VTIP_ADJ[DR_COUNT] __attribute__((unused)) = { -0.4f, 0
 static const float ARMOUR_PANEL_HP[AR_COUNT] __attribute__((unused)) = { 0, 20, 28, 24, 36, 32, 44 };
 /* the wedge kinds (3.5): the lowest lip on a bot's front decides. Lip height over the floor, the slope's
  * length S and the lift at the top of it (S tan slope: 26, 20, 15 and 12 degrees) */
-enum { WK_NONE = -1, WK_CHASSIS, WK_PLATE, WK_FORKS, WK_NOSE, WK_COUNT };
-static const struct { float lip, len, lift; } WEDGE_KIND[WK_COUNT] __attribute__((unused)) = {
+enum { LIP_NONE = -1, LIP_CHASSIS, LIP_PLATE, LIP_FORKS, LIP_NOSE, LIP_COUNT };
+static const struct { float lip, len, lift; } WEDGE_KIND[LIP_COUNT] __attribute__((unused)) = {
   { 0.02f, 0.60f, 0.2926f },     /* the WEDGE chassis: 26 degrees over 0.60 */
   { 0.04f, 0.45f, 0.1638f },     /* the WEDGE plate on any chassis: 20 degrees over 0.45 */
   { 0.05f, 0.35f, 0.0938f },     /* LIFTER forks while lowered: 15 degrees over 0.35 */
