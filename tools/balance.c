@@ -36,7 +36,7 @@ static int usage(void) {
   fprintf(stderr, "usage: balance --parts | --robin N [arenas=...] [hazards=on|off|both] [driver=ai|builtin] [mode=M] | --check-arenas |\n"
                   "               --replay script.json --setup \"line\" [frames=N] [verbose=1|2] | --make-fight script.json --setup \"line\" |\n"
                   "               --trace arena a b [frames] [driver=ai|builtin] | --hashcheck | --make-drive arena out.json | --modes [N] |\n"
-                  "               --scenario <name>|all\n");
+                  "               --scenario <name>|all | --robin-build N chassis,drive,weapon,armour[,weapon2]\n");
   return 2;
 }
 
@@ -167,7 +167,7 @@ static void drive_builtin(const match_t *m, int slot, drv_t *d, pad_state_t *out
 }
 
 /* -- one match ----------------------------------------------------- */
-typedef struct { int winner, how, frames, stuck; int ko_cause[9]; int events[EV_TYPE_COUNT]; int und[2], tips, inv_wedge, inv_flip, glances, wheels, bites[2], hits[2]; float dealt[2]; } result_t;
+typedef struct { int winner, how, frames, stuck; int ko_cause[9]; int events[EV_TYPE_COUNT]; int und[2], tips, inv_wedge, inv_flip, glances, wheels, bites[2], hits[2]; float dealt[2]; int lifts, lift_tips, lift_drops; } result_t;
 
 static int g_use_ai;
 static int g_verbose;
@@ -196,6 +196,9 @@ static void run_match(match_setup_t *s, result_t *r, int trace) {
       if (e->type == EV_INVERT && e->zone == INV_FLIPPER) r->inv_flip++;
       if (e->type == EV_HIT && (e->flags & EVF_DEFLECT)) r->glances++;
       if (e->type == EV_WHEEL_HIT) r->wheels++;
+      if (e->type == EV_LIFT && e->zone == 0) r->lifts++;
+      if (e->type == EV_LIFT_DROP && e->zone == 0) r->lift_drops++;
+      if (e->type == EV_LAUNCH && e->weapon == WP_LIFTER) r->lift_tips++;
       if ((e->type == EV_HIT || e->type == EV_RAM) && e->a < 2 && e->dmg > 0) r->hits[e->a]++;
       if (trace && (e->type == EV_HIT || e->type == EV_RAM || e->type == EV_KO || e->type == EV_MINI_KO || e->type == EV_LAUNCH || e->type == EV_INVERT || e->type == EV_HAZ_HIT || e->type == EV_OPS_WAKE || e->type == EV_CLASH || e->type == EV_SPIN_WALL || e->type == EV_RED_TAG || e->type == EV_PICKUP || e->type == EV_STUCK || e->type == EV_SELFRIGHT || e->type == EV_COUNT_TICK || e->type == EV_UNDERRIDE || e->type == EV_RIDE_END || e->type == EV_WEDGE_CLASH || e->type == EV_LAND || e->type == EV_WHEEL_HIT))
         printf("  f=%d ev=%d a=%d b=%d zone=%d dmg=%.1f at (%.2f, %.2f)\n", m.frame, e->type, e->a, e->b, e->zone, e->dmg, e->x, e->z);
@@ -330,6 +333,41 @@ static int robin(int n, int arena_mask, int haz_mode, int mode) {
   if (stalls) { printf("FAIL: %d matches did not end\n", stalls); fail = 1; }
   if (stuck) { printf("FAIL: [stuck] nudges in the robin\n"); fail = 1; }
   printf(fail ? "robin: FAIL\n" : "robin: PASS\n");
+  return fail;
+}
+
+/* -- --robin-build: one custom build against the six presets ------------------------------------
+ * build/balance --robin-build N c,d,w,a[,w2]: N seeds per preset, side and arena, hazards on and off, the AI
+ * driving both. PASS when the build wins 35 to 60 percent (a draw is nobody's) and fights average 35 to 60 s */
+static int robin_build(int n, const build_t *cb) {
+  int wins[6] = { 0 }, plays[6] = { 0 }, ko[9] = { 0 }, stalls = 0, stuck = 0, judges = 0; long frames = 0, fr_pre[6] = { 0 };
+  long lifts = 0, tips = 0, drops = 0; int matches = 0;
+  char name[24]; bot_name(name, cb);
+  for (int ar = 0; ar < 6; ar++) for (int hz = 0; hz < 2; hz++) for (int p = 0; p < 6; p++) for (int side = 0; side < 2; side++) for (int k = 0; k < n; k++) {
+    match_setup_t s; memset(&s, 0, sizeof s);
+    s.mode = MODE_DEATHMATCH; s.arena = (uint8_t)ar; s.players = 2; s.fight_len_s = 75; s.hazards_off = (uint8_t)hz;
+    if (side == 0) { s.builds[0] = *cb; build_preset(&s.builds[1], p); } else { build_preset(&s.builds[0], p); s.builds[1] = *cb; }
+    s.is_ai[0] = s.is_ai[1] = 1; s.ai_level[0] = s.ai_level[1] = AI_MEDIUM;
+    s.seed = 1000003u * (uint32_t)(ar * 24 + hz * 12 + p * 2 + side) + 7u * (uint32_t)k + 11u;
+    result_t r; run_match(&s, &r, g_trace_seed && s.seed == g_trace_seed ? 1 : 0);
+    matches++; frames += r.frames; fr_pre[p] += r.frames; stuck += r.stuck; plays[p]++;
+    if (r.winner == side) wins[p]++;
+    if (r.how == WIN_NONE) stalls++;
+    if (r.how == WIN_JUDGES) judges++;
+    for (int c = 0; c < 9; c++) ko[c] += r.ko_cause[c];
+    lifts += r.lifts; tips += r.lift_tips; drops += r.lift_drops;
+    if (g_verbose) printf("%-5s haz=%d %s side %d vs %-8s: winner %d by %s in %.1f s, %d lifts %d tips\n", ARENA_KEY[ar], !hz, name, side, PRESETS[p].name, r.winner, KO_NAME[r.how], r.frames / 60.0, r.lifts, r.lift_tips); if (g_verbose && r.stuck) printf("  [stuck] %d seed %u\n", r.stuck, s.seed);
+  }
+  int w_all = 0, p_all = 0;
+  printf("%s (chassis %d drive %d weapon %d armour %d, %d of %d tags) against the presets, every arena, hazards on and off, both sides:\n", name, cb->chassis, cb->drive, cb->weapon, cb->armour, build_cost(cb), build_budget(cb));
+  for (int p = 0; p < 6; p++) { printf("  vs %-8s %5.1f%% of %d, mean %.1f s\n", PRESETS[p].name, plays[p] ? 100.0 * wins[p] / plays[p] : 0, plays[p], plays[p] ? fr_pre[p] / 60.0 / plays[p] : 0); w_all += wins[p]; p_all += plays[p]; }
+  double pct = p_all ? 100.0 * w_all / p_all : 0, mean = matches ? frames / 60.0 / matches : 0;
+  printf("  overall %.1f%% of %d (35 to 60), mean fight %.1f s (35 to 60), %d to the judges, %.2f lifts, %.2f tips, %.2f put downs a match\n", pct, p_all, mean, judges, (double)lifts / matches, (double)tips / matches, (double)drops / matches);
+  printf("  KO causes:"); for (int c = 0; c < 9; c++) if (ko[c]) printf(" %s %d;", KO_NAME[c], ko[c]); printf("\n");
+  int fail = pct < 35.0 || pct > 60.0 || mean < 35.0 || mean > 60.0 || stalls || stuck;
+  if (stalls) printf("FAIL: %d matches did not end\n", stalls);
+  if (stuck) printf("FAIL: %d [stuck] frames\n", stuck);
+  printf(fail ? "robin-build: FAIL\n" : "robin-build: PASS\n");
   return fail;
 }
 
@@ -1815,6 +1853,15 @@ int main(int argc, char **argv) {
     g_use_ai = !strcmp(dr, "ai");
     int mode = arg_int(argc, argv, "mode", MODE_DEATHMATCH);
     return robin(n, mask, haz, mode);
+  }
+  if (!strcmp(argv[1], "--robin-build")) {
+    if (argc < 4) return usage();
+    int n = atoi(argv[2]); if (n <= 0) n = 4;
+    int v[5] = { 0, 0, 0, 0, WP_NONE }; int got = sscanf(argv[3], "%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4]);
+    if (got < 4) return usage();
+    build_t b = { (uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], (uint8_t)v[4], (uint8_t)v[3], 0, 0 };
+    g_use_ai = 1;
+    return robin_build(n, &b);
   }
   if (!strcmp(argv[1], "--map")) {
     if (argc < 4) return usage();
