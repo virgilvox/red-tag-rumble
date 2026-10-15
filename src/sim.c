@@ -553,7 +553,6 @@ static void hp_thresholds(match_t *m, int slot) {
   }
 }
 
-static int weapon_is_spinner(int w) { return w == WP_HORIZ || w == WP_DRUM || w == WP_SAW; }
 
 /* one landed contact, everything DEEP-plan 2.5 puts on the event (see apply_hit) */
 typedef struct {
