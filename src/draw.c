@@ -526,10 +526,16 @@ static void widget_state(const bot_t *b, uint32_t seat_c, wstate_t *w) {
     else if (b->cooldown > 0) { w->frac = 1 - clampf((float)b->cooldown / cd, 0, 1); w->ring = C_RUST; secs_text(w->text, sizeof w->text, b->cooldown); w->word_c = C_RUST; }
     else { w->frac = 1; w->ring = C_LIVE; w->word = dealt ? WW_HIT : WW_TAP; w->word_c = C_LIVE; }
   } else if (wp == WP_LIFTER) {
+    /* HOLD (ash, then live while held: the forks are down and live), LIFT while they rise, LET GO: TIP at
+     * full lift, CARRY n.n S for the last 1.5 s before the forks put it down; the ring is the lift, then the
+     * carry time left */
     float l = clampf(b->lift, 0, 1);
+    int left = WP_LIFTER_MAX_HOLD - b->carry_t; if (left < 0) left = 0;
     w->frac = l;
-    if (b->carry_t > 0) { int left = WP_LIFTER_MAX_HOLD - b->carry_t; if (left < 0) left = 0; int t = (left * 10 + 59) / 60; snprintf(w->text, sizeof w->text, S_WW_CARRY_N, t / 10, t % 10); w->ring = C_LIVE; w->word_c = C_LIVE; }
-    else if (l > 0.3f) { w->word = WW_LIFT; w->ring = C_LIVE; w->word_c = C_LIVE; }
+    if (b->carry_t > 0 && (l < WP_LIFTER_TIP_LIFT || b->carry_t < WP_LIFTER_TIP_HOLD)) { w->word = WW_LIFT; w->ring = C_HAZARD; w->word_c = C_HAZARD; }
+    else if (b->carry_t > 0 && left > 90) { w->frac = (float)left / WP_LIFTER_MAX_HOLD; w->word = WW_LET_GO; w->ring = C_LIVE; w->word_c = C_LIVE; }
+    else if (b->carry_t > 0) { int t = (left * 10 + 59) / 60; w->frac = (float)left / WP_LIFTER_MAX_HOLD; snprintf(w->text, sizeof w->text, S_WW_CARRY_N, t / 10, t % 10); w->ring = C_HAZARD; w->word_c = C_HAZARD; }
+    else if (b->fork_armed) { w->frac = 1; w->word = WW_HOLD; w->ring = C_LIVE; w->word_c = C_LIVE; }
     else { w->word = WW_HOLD; w->word_c = C_ASH; }
   } else if (wp == WP_FLAME) {
     float f = clampf(b->fuel / WP_FLAME_FUEL, 0, 1);

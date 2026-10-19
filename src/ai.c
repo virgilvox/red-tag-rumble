@@ -355,7 +355,7 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     }
     else if (!e->inverted && !e->airborne) {
       if (weapon_spinner(e->weapon) && e->spin > 0.3f && dist > 1.6f) { tx -= efx * 0.9f; tz -= efz * 0.9f; }
-      else if ((front_weapon(e->weapon) || view_is_wedge(e) || bot_is_wedge(me)) && dist > 1.4f) {
+      else if ((front_weapon(e->weapon) || view_is_wedge(e) || bot_is_wedge(me) || me->build.weapon == WP_LIFTER) && dist > 1.4f) {
         /* swing to the flank only from inside its front cone (a wedge's plate is the hardest zone there,
          * 4.7); behind or beside it is already the weak side */
         float lx, lz; to_local(e->h, e->x, e->z, mx, mz, &lx, &lz);
@@ -734,6 +734,58 @@ static void steer_to(ai_t *a, const match_t *m, const bot_t *me, float tx, float
   write_stick(out, turn, throttle);
 }
 
+/* -- the LIFTER's carry ------------------------------------------- */
+/* a chassis the tip turns onto its lid (deep-physics 3.8 tumble rates over the tip's air time): BOX, WEDGE,
+ * FRAME, LUNCHBOX on any drive that can be inverted; a LOWBOY or SHELL lands back upright too often, a HOVER
+ * or MELTY never inverts */
+static int lifter_tips(const bot_t *v) {
+  if (v->build.drive == DR_HOVER || v->build.drive == DR_MELTY) return 0;
+  return v->build.chassis == CH_BOX || v->build.chassis == CH_WEDGE || v->build.chassis == CH_FRAME || v->build.chassis == CH_LUNCHBOX;
+}
+enum { LK_NONE, LK_PIT, LK_EDGE, LK_PULVERIZER };
+/* the nearest place to put a carried bot: an open (or soon open) pit, an open edge, a pulverizer, inside 8 u
+ * (what 3 s of carry at 0.6x reaches); a practice bot never carries a person to an edge */
+static int lifter_kill_target(const ai_t *a, const match_t *m, const bot_t *me, const bot_t *v, float *tx, float *tz) {
+  const arena_def_t *ar = ai_arena(a, m);
+  int kind = LK_NONE; float bd = 8.0f;
+  for (int i = 0; i < ar->nhaz && i < MAX_HAZ; i++) {
+    const hazard_def_t *h = &ar->haz[i];
+    if (h->type != HZ_PIT && h->type != HZ_PULVERIZER) continue;
+    if (h->type == HZ_PIT && v->build.drive == DR_HOVER) continue;
+    if (!haz_danger(a, m, i, 2.0f, 0)) continue;
+    float d = len2(h->x - me->b.x, h->z - me->b.z);
+    if (d < bd) { bd = d; kind = h->type == HZ_PIT ? LK_PIT : LK_PULVERIZER; *tx = h->x; *tz = h->z; }
+  }
+  if (ar->open_mask && !(skill_of(a)->backoff > 0 && !v->is_ai)) {
+    float hw = ar->w * 0.5f, hd = ar->d * 0.5f, x = me->b.x, z = me->b.z;
+    /* a point 1 u past the edge, straight out from me */
+    if ((ar->open_mask & OPEN_PX) && hw - x < bd) { bd = hw - x; kind = LK_EDGE; *tx = hw + 1.0f; *tz = z; }
+    if ((ar->open_mask & OPEN_NX) && x + hw < bd) { bd = x + hw; kind = LK_EDGE; *tx = -hw - 1.0f; *tz = z; }
+    if ((ar->open_mask & OPEN_PZ) && hd - z < bd) { bd = hd - z; kind = LK_EDGE; *tx = x; *tz = hd + 1.0f; }
+    if ((ar->open_mask & OPEN_NZ) && z + hd < bd) { bd = z + hd; kind = LK_EDGE; *tx = x; *tz = -hd - 1.0f; }
+  }
+  return kind;
+}
+/* the carried bot is where letting go kills: over the pit (it drops in), past the edge (it falls), or a throw
+ * short of the pulverizer (the tip lands it under the head) */
+static int lifter_at_kill(const ai_t *a, const match_t *m, const bot_t *v, int kind, float tx, float tz) {
+  const arena_def_t *ar = ai_arena(a, m);
+  if (kind == LK_PIT) {
+    for (int i = 0; i < ar->nhaz && i < MAX_HAZ; i++) {
+      const hazard_def_t *h = &ar->haz[i];
+      if (h->type == HZ_PIT && absf(v->b.x - h->x) < h->w * 0.5f - 0.35f && absf(v->b.z - h->z) < h->d * 0.5f - 0.35f) return 1;
+    }
+    return 0;
+  }
+  if (kind == LK_EDGE) {
+    float hw = ar->w * 0.5f, hd = ar->d * 0.5f;
+    return ((ar->open_mask & OPEN_PX) && v->b.x > hw + 0.35f) || ((ar->open_mask & OPEN_NX) && v->b.x < -hw - 0.35f) ||
+           ((ar->open_mask & OPEN_PZ) && v->b.z > hd + 0.35f) || ((ar->open_mask & OPEN_NZ) && v->b.z < -hd - 0.35f);
+  }
+  if (kind == LK_PULVERIZER) return len2(v->b.x - tx, v->b.z - tz) < 1.4f;
+  return 1;
+}
+
 /* -- weapons (8.3) ------------------------------------------------- */
 static int enemy_in_box(const bot_t *me, const ai_view_t *e, float ehl, float w, float z0, float z1, float lead_frames) {
   float ex = e->x + e->vx * lead_frames * DT, ez = e->z + e->vz * lead_frames * DT;
@@ -793,10 +845,26 @@ static void weapons(ai_t *a, const match_t *m, const ai_frame_t *f, pad_state_t 
       else if (e && me->fuel > 30 && dist < 2.0f + ehl && in_front) { a->burst_t = 60; btn |= IN_A; }
       break;
     case WP_LIFTER: {
-      int holding = 0;
-      for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == a->slot + 1) holding = 1;
-      if (holding || (e && dist < me->b.hl + ehl + 0.4f && in_front)) btn |= IN_A;
-      else if (e && dist < 1.5f) btn |= IN_A;                                          /* raise early, the lift takes 36 frames */
+      /* held while closing (the forks stay down and grab what they touch); on the forks at full lift: a tall
+       * or boxy bot is let go at once (it tips over and lands on its lid), anything else is carried to a pit,
+       * an open edge or a pulverizer and let go there; with none in reach it is tipped anyway */
+      int holding = -1;
+      for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == a->slot + 1) holding = i;
+      if (holding >= 0) {
+        int full = me->lift > WP_LIFTER_TIP_LIFT && me->carry_t >= WP_LIFTER_TIP_HOLD, let = 0;
+        if (full) {
+          float tx, tz; int kind = lifter_kill_target(a, m, me, &m->bots[holding], &tx, &tz);
+          if (lifter_tips(&m->bots[holding]) || kind == LK_NONE || me->stuck_t > 20) let = 1;   /* blocked on the way: tip it here */
+          else let = lifter_at_kill(a, m, &m->bots[holding], kind, tx, tz);
+        }
+        if (!let) btn |= IN_A;
+      } else if (e && dist < me->b.hl + ehl + 2.5f) {
+        /* armed only from its side or rear (outside its 90 degree front cone): the front is where its weapon
+         * or its wedge is; a dome, a skirt or a spinning frame has no front */
+        float lx, lz; to_local(e->h, e->x, e->z, me->b.x, me->b.z, &lx, &lz);
+        int round = e->chassis == CH_SHELL || e->drive == DR_HOVER || e->drive == DR_MELTY;
+        if ((round || lz < absf(lx)) && (tap_ok || (prev_a && dist > me->b.hl + ehl + 0.3f))) btn |= IN_A;   /* a hesitating think misses the moment */
+      }
       break;
     }
     case WP_NONE: case WP_WEDGE:
@@ -817,6 +885,7 @@ static int lifter_carry_target(const ai_t *a, const match_t *m, const bot_t *me,
   int holding = -1;
   for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == a->slot + 1) holding = i;
   if (holding >= 0 && me->build.weapon != WP_LIFTER) holding = -1;
+  if (holding >= 0) return 0;                       /* a lifter's carry is steered in ai_think (lifter_kill_target) */
   if (holding < 0 && me->riding && me->riding - 1 < m->nbots && m->bots[me->riding - 1].ride_up > 0.5f) holding = me->riding - 1;
   if (holding < 0) return 0;
   int best = -1; float bd = 1e9f;
@@ -930,6 +999,36 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
     weapons(a, m, f, out);
     a->prev_buttons = out->buttons;
     return;
+  }
+
+  /* a LIFTER with a bot on its forks drives it to the kill: where the lifter stands when the carried bot is
+   * over the pit, just past the edge, or a throw short of the pulverizer; straight there and slowing in,
+   * past the hazard and edge margins steer_to keeps (they are the point) */
+  if (me->build.weapon == WP_LIFTER && me->carry_t > 0) {
+    int held = -1;
+    for (int i = 0; i < m->nbots; i++) if (m->bots[i].lifted_by == a->slot + 1) held = i;
+    float px = 0, pz = 0;
+    int kind = held >= 0 ? lifter_kill_target(a, m, me, &m->bots[held], &px, &pz) : LK_NONE;
+    if (kind != LK_NONE) {
+      const bot_t *v = &m->bots[held];
+      float ux = px - me->b.x, uz = pz - me->b.z; norm2(&ux, &uz);
+      float reach = len2(v->b.x - me->b.x, v->b.z - me->b.z);
+      float back = kind == LK_PIT ? reach : kind == LK_PULVERIZER ? reach + 1.0f : 0;
+      float tx = px - ux * back, tz = pz - uz * back;
+      if (kind == LK_EDGE) { tx = px - ux * (0.6f + reach); tz = pz - uz * (0.6f + reach); }   /* px is 1 u past the edge: the carried bot 0.4 past it */
+      float dx = tx - me->b.x, dz = tz - me->b.z, dist = len2(dx, dz);
+      if (DRIVES[me->build.drive].strafe) {
+        float k = dist < 0.15f ? 0 : rtr_clamp(dist, 0.3f, 1.0f);
+        out->cam_yaw = 0; out->lx = (int16_t)(-dx / (dist + 1e-4f) * k * STICK); out->ly = (int16_t)(-dz / (dist + 1e-4f) * k * STICK);
+      } else if (dist > 0.15f) {
+        float err = rtr_wrap_pi(rtr_atan2(dx, dz) - me->b.h);
+        float thr = (absf(err) < DEG(60) ? 1.0f : 0.5f) * rtr_clamp(dist, 0.3f, 1.0f);
+        write_stick(out, 2.2f * err, thr);
+      }
+      weapons(a, m, f, out);
+      a->prev_buttons = out->buttons;
+      return;
+    }
   }
 
   switch (a->goal) {

@@ -754,7 +754,7 @@ static int weapon_shape(const bot_t *b, int which, shape_t *s) {
     case WP_HORIZ: case WP_DRUM: on = spin > SPINNER_HIT_MIN; break;
     case WP_SAW: on = spin > 0.5f; break;
     case WP_FLIPPER: case WP_HAMMER: case WP_SPIKE: on = active > 0; break;
-    case WP_LIFTER: on = lift > 0.3f; break;
+    case WP_LIFTER: on = b->is_ops ? lift > 0.3f : b->fork_armed && b->carry_t == 0 && lift < 0.3f; break;   /* the forks are live while they are down and armed */
     case WP_CRUSHER: on = b->clamp == 1; break;     /* the closing frame */
     default: on = 0;
   }
@@ -863,7 +863,7 @@ static void drive_step(match_t *m, int slot) {
   }
   float sx, sy; stick_vec(in, &sx, &sy);
   float top = bot_top_speed(b);
-  if (b->lift > 0.3f && b->carry_t > 0) top *= 0.6f;          /* carrying a victim */
+  if (b->carry_t > 0 && (b->lift > 0.3f || !b->is_ops)) top *= 0.6f;   /* carrying a victim */
   float accel = d->accel * (b->build.drive == DR_TREAD ? 1.0f : ar->traction_mult);
   if (b->dig_t > 0) accel *= 1.6f;                            /* DIG IN: the plate scrapes and the motors bite */
   if (arena_on_slope(ar, b->b.x, b->b.z) && b->build.drive != DR_LEGTRACK && b->build.drive != DR_SIX) accel *= 0.6f, top *= 0.6f;
@@ -1019,8 +1019,15 @@ static void weapon_machine(match_t *m, int slot, int which) {
       else if (ew && *cooldown == 0 && operate && b->stun <= 0) { *active = w->active; tell(m, slot, TELL_SPIKE_OUT, WP_SPIKE); }
       break;
     case WP_LIFTER: {
-      float want = wb && operate ? 1.0f : 0.0f;
-      b->lift += rtr_clamp(want - b->lift, -1.0f / WP_LIFTER_FRAMES, 1.0f / WP_LIFTER_FRAMES);
+      if (b->is_ops) {
+        float want = wb && operate ? 1.0f : 0.0f;
+        b->lift += rtr_clamp(want - b->lift, -1.0f / WP_LIFTER_FRAMES, 1.0f / WP_LIFTER_FRAMES);
+        break;
+      }
+      /* held, the forks stay down (the lip) and live; they rise only with a bot on them (holds_step) */
+      b->fork_armed = (uint8_t)(wb && operate && !b->ride_by);
+      float want = b->carry_t > 0 ? 1.0f : 0.0f;
+      b->lift += rtr_clamp(want - b->lift, -1.0f / WP_LIFTER_RISE, 1.0f / WP_LIFTER_RISE);
       break;
     }
     case WP_FLAME: {
@@ -1075,6 +1082,37 @@ static void tooth_dir(float ox, float oz, float cx, float cz, float nx, float nz
   *dx = ux / ul; *dz = uz / ul;
 }
 
+/* the LIFTER's forks touch a bot (armed, down, nothing on them): it is grabbed from any side, head on too, for
+ * WP_LIFTER_GRAB_DMG through the armour, unless its front lip is lower than the forks' and faces them (a WEDGE
+ * chassis or plate): then the forks ride up the wedge, nothing is grabbed, and the plates clash. OPS is never
+ * grabbed, nor a bot in the air (unless the forks are under it), held or clamped */
+static void lifter_grab(match_t *m, int att, int vic, const contact_t *c, float nx, float nz) {
+  bot_t *a = &m->bots[att], *v = &m->bots[vic];
+  int16_t *cd = &a->hit_cd[vic];
+  if (v->is_ops || v->lifted_by || v->clamped_by || v->falling || a->carry_t > 0 || !a->fork_armed || a->ride_by) return;
+  if (v->airborne && v->ride_by != att + 1) return;
+  int edge = edge_of(v, c->cx, c->cz);
+  float afx, afz, vfx, vfz; fwd_of(a->b.h, &afx, &afz); fwd_of(v->b.h, &vfx, &vfz);
+  int facing = dotp(afx, afz, vfx, vfz) < -0.5f;
+  float vlip = v->inverted ? 0 : v->b.lip_f;
+  float cl = dotp(a->b.vx - v->b.vx, a->b.vz - v->b.vz, nx, nz);
+  if (v->riding == att + 1 || (vlip > 0 && vlip + 0.005f < WEDGE_KIND[LIP_FORKS].lip && (edge == PN_FRONT || facing))) {
+    *cd = 30;
+    ev_full(m, EV_WEDGE_CLASH, att, vic, 0, c->cx, c->cz, a->b.y + 0.05f, cl, nx, nz, PN_FRONT, WP_LIFTER, 0, HIT_WHY_WEDGE, cl, 0);
+    return;
+  }
+  if (v->ride_by) ride_clear(m, vic);
+  hit_t h = { 0 };
+  h.att = att; h.vic = vic; h.weapon = WP_LIFTER; h.raw = WP_LIFTER_GRAB_DMG; h.stun = WEAPONS[WP_LIFTER].stun;
+  h.cx = c->cx; h.cz = c->cz; h.cy = v->b.y + v->b.clr; h.nx = nx; h.nz = nz; h.ev_type = EV_HIT; h.zone = 1.0f; h.panel = edge;
+  h.speed = fmax_f(cl, 0); h.j = 0; h.wear = 1;
+  apply_hit(m, &h);
+  *cd = WP_LIFTER_MAX_HOLD + WP_LIFTER_LIFT_CD;          /* the release sets the 120 that counts */
+  v->lifted_by = (uint8_t)(att + 1); v->lift_edge = (uint8_t)edge; v->airborne = 0; v->lift_from = 0; v->soft_land = 0;
+  a->carry_t = 1; a->lift_esc_t = 0;
+  ev_full(m, EV_LIFT, att, vic, 0, v->b.x, v->b.z, v->b.y, 0, 0, 0, edge, WP_LIFTER, 0, 0, 0, 0);
+}
+
 /* a weapon hitbox overlapping a victim body: one hit. p is the hammer's share of its swing at the contact
  * and handle 1 when the arm met the victim before the head (3.7); both unused by the rest */
 static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t *c, float p, int handle) {
@@ -1112,6 +1150,7 @@ static void weapon_hit(match_t *m, int att, int vic, int which, const contact_t 
     ev_full(m, EV_HIT, att, vic, 10, c->cx, c->cz, v->b.y + v->b.clr + v->b.hgt * 0.5f, 0, nx, nz, edge_of(v, c->cx, c->cz), w, EVF_CORPSE, HIT_WHY_NONE, fmax_f(rel, 0) + tipk * *spin, J);
     return;
   }
+  if (wid == WP_LIFTER && !a->is_ops) { lifter_grab(m, att, vic, c, nx, nz); return; }
   /* the contact: zone, panel and the location factor (3.12) */
   int flags = 0, reason = 0;
   int edge = edge_of(v, c->cx, c->cz), panel = edge;
@@ -1441,12 +1480,80 @@ static void lift_release(match_t *m, int holder, int vic) {
   ev_full(m, EV_LIFT_DROP, holder, vic, m->bots[holder].is_ops ? 1 : 0, v->b.x, v->b.z, v->b.y, 0, 0, 0, 0, m->bots[holder].is_ops ? EVW_OPS : WP_LIFTER, 0, 0, 0, 0);
 }
 
+/* the tip: let go at full lift, the victim goes over the forks, up and forward, the near edge first, at the
+ * flipper's tumble rate for its chassis (the holder driving forward flicks it harder); the flipper's landing
+ * decides the face it comes down on */
+static void lifter_tip(match_t *m, int holder, int vic) {
+  bot_t *a = &m->bots[holder], *v = &m->bots[vic];
+  float fx, fz; fwd_of(a->b.h, &fx, &fz);
+  float s = rtr_clamp(dotp(a->b.vx, a->b.vz, fx, fz), 0, 3.0f);
+  float vy = WP_LIFTER_TIP_VY, wp = CHASSIS_TUMBLE[v->build.chassis] * (0.8f + 0.1f * s);
+  int ed = v->lift_edge;
+  v->lifted_by = 0; v->airborne = 1; v->b.vy = vy;
+  v->b.vx = a->b.vx + fx * WP_LIFTER_TIP_FWD; v->b.vz = a->b.vz + fz * WP_LIFTER_TIP_FWD; v->b.w = 0;
+  if (ed == PN_FRONT) v->b.wp = wp; else if (ed == PN_BACK) v->b.wp = -wp; else if (ed == PN_RIGHT) v->b.wr = wp; else v->b.wr = -wp;
+  v->flip_pending = 1; v->launched_by = (uint8_t)(holder + 1); v->peak_y = v->b.y; v->bounced = 0; v->tipping = 0;
+  v->lift_from = (uint8_t)(holder + 1); v->soft_land = 0;
+  a->carry_t = 0; a->hit_cd[vic] = WP_LIFTER_LIFT_CD; a->lift_esc_t = 0;
+  ev_full(m, EV_LAUNCH, holder, vic, LAUNCH_FLIPPER, v->b.x, v->b.z, v->b.y, vy, fx, fz, ed, WP_LIFTER, 0, 0, vy, wp);
+}
+
+/* a held bot over an open pit or past an open edge: let go, it drops straight in (the lifter's real kill) */
+static int haz_contains(const hazard_def_t *h, float x, float z, float grow);
+static int over_hole(const match_t *m, const bot_t *v) {
+  const arena_def_t *ar = sim_arena(m);
+  float hw = ar->w * 0.5f, hd = ar->d * 0.5f, x = v->b.x, z = v->b.z;
+  if (((ar->open_mask & OPEN_PX) && x > hw + 0.3f) || ((ar->open_mask & OPEN_NX) && x < -hw - 0.3f) ||
+      ((ar->open_mask & OPEN_PZ) && z > hd + 0.3f) || ((ar->open_mask & OPEN_NZ) && z < -hd - 0.3f)) return 1;
+  if (!m->hazards_on || v->build.drive == DR_HOVER) return 0;
+  for (int i = 0; i < ar->nhaz; i++) if (ar->haz[i].type == HZ_PIT && m->haz[i].active && haz_contains(&ar->haz[i], x, z, -0.3f)) return 1;
+  return 0;
+}
+
+/* the LIFTER's carry, every frame: put down (let go early, the 3 s limit, the escape, the holder beaten), tipped
+ * (let go at full lift), or carried on the forks at the holder's front, near edge up */
+static void lifter_hold(match_t *m, int holder, int vic) {
+  bot_t *a = &m->bots[holder];
+  if (vic < 0) { a->carry_t = 0; a->lift_esc_t = 0; return; }
+  bot_t *v = &m->bots[vic];
+  /* the escape: its stick held and its push over 1.3x mine, WP_LIFTER_ESCAPE frames running */
+  float sx, sy; stick_vec(&v->in, &sx, &sy);
+  int pushing = len2(sx, sy) > 0.5f || (v->scheme == SCHEME_TANK && (v->in.ry > 16384 || v->in.ry < -16384));
+  if (pushing && build_push(&v->build) > 1.3f * build_push(&a->build)) a->lift_esc_t++; else a->lift_esc_t = 0;
+  int drop = !a->alive || !v->alive || a->stun > 0 || a->inverted || a->ride_by || a->lifted_by || a->clamped_by ||
+             a->carry_t > WP_LIFTER_MAX_HOLD || a->lift_esc_t >= WP_LIFTER_ESCAPE;
+  if (!drop && !a->fork_armed && a->lift > WP_LIFTER_TIP_LIFT && a->carry_t >= WP_LIFTER_TIP_HOLD && !over_hole(m, v)) { lifter_tip(m, holder, vic); return; }
+  if (drop || !a->fork_armed) {
+    lift_release(m, holder, vic);
+    v->soft_land = 1; v->lift_from = (uint8_t)(holder + 1);
+    a->carry_t = 0; a->hit_cd[vic] = WP_LIFTER_LIFT_CD; a->lift_esc_t = 0;
+    return;
+  }
+  float fx, fz; fwd_of(a->b.h, &fx, &fz);
+  float reach = a->b.hl + body_extent(v, fx, fz) * 0.8f;
+  v->b.h = rtr_wrap_pi(v->b.h + rtr_wrap_pi(a->b.h - a->b.ph));      /* it turns with the forks */
+  v->b.x = a->b.x + fx * reach; v->b.z = a->b.z + fz * reach;
+  clamp_inside(m, v);
+  float want_y = a->floor_y + WP_LIFTER_HOLD_Y + WP_LIFTER_RAISE_Y * a->lift;
+  v->b.y += rtr_clamp(want_y - v->b.y, -0.05f, 0.05f);
+  v->b.vy = 0; v->b.vx = a->b.vx; v->b.vz = a->b.vz; v->b.w = 0; v->airborne = 0;
+  /* the edge on the forks is up 20 degrees (a SHELL's dome sits level on them) */
+  float ang = v->build.chassis == CH_SHELL ? 0 : 0.349f, wp_ = 0, wr_ = 0;
+  if (v->lift_edge == PN_FRONT) wp_ = ang; else if (v->lift_edge == PN_BACK) wp_ = -ang; else if (v->lift_edge == PN_RIGHT) wr_ = ang; else wr_ = -ang;
+  v->b.pitch += rtr_clamp(wp_ - v->b.pitch, -6.0f * DT, 6.0f * DT);
+  v->b.roll += rtr_clamp(wr_ - v->b.roll, -6.0f * DT, 6.0f * DT);
+  v->b.wp = v->b.wr = 0;
+  a->control += 1; v->countout = 0;
+  a->carry_t++;
+}
+
 /* lifter and crusher holds, every frame (4.6) */
 static void holds_step(match_t *m) {
   for (int i = 0; i < m->nbots; i++) {
     bot_t *a = &m->bots[i];
     /* lifting */
-    if (a->carry_t > 0) {
+    if (a->carry_t > 0 && !a->is_ops) { int vic = -1; for (int j = 0; j < m->nbots; j++) if (m->bots[j].lifted_by == i + 1) vic = j; lifter_hold(m, i, vic); }
+    else if (a->carry_t > 0) {
       int vic = -1;
       for (int j = 0; j < m->nbots; j++) if (m->bots[j].lifted_by == i + 1) vic = j;
       int release = vic < 0 || !a->alive || a->lift < 0.3f || a->stun > 0 || a->carry_t > WP_LIFTER_MAX_HOLD || a->inverted;
@@ -2093,7 +2200,8 @@ static void landing(match_t *m, int slot) {
   float impact = fabs_f(bd->vy);
   int from_flip = b->flip_pending;
   float dmg = 0;
-  if (from_flip) dmg = b->bounced ? 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f) : 2.0f + 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f);
+  if (b->soft_land) dmg = 0;                             /* put down off the forks */
+  else if (from_flip) dmg = b->bounced ? 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f) : 2.0f + 3.0f * rtr_clamp(impact / 7.0f, 0, 1.5f);
   else if (b->peak_y - b->floor_y > 1.2f || b->peak_y >= 0.99f) dmg = 8;
   int launcher = b->launched_by ? b->launched_by - 1 : -1;
   int on_bot = 0;
@@ -2102,6 +2210,7 @@ static void landing(match_t *m, int slot) {
     bot_t *o = &m->bots[j];
     if (!o->alive || o->airborne) continue;
     if (b->tipping && j == launcher) continue;          /* tipped off a wedge: it comes down on the slope, not on the bot */
+    if (b->lift_from == j + 1) continue;                 /* off a lifter's forks: it comes down past them, not on the lifter */
     /* only a real fall lands on a bot: a flip, or a drop of half a unit; a spinner's hop up a wedge plate or
      * a ramp lip settles back onto it */
     if (!from_flip && b->peak_y - b->floor_y < 0.5f) continue;
@@ -2180,6 +2289,7 @@ static void landing(match_t *m, int slot) {
   } else ev_full(m, EV_LAND, launcher >= 0 ? launcher : slot, slot, zone, bd->x, bd->z, bd->y, 0, 0, 1, b->inverted ? PN_TOP : 0, EVW_LAND, 0, 0, impact, 0);
   bd->vy = 0; bd->vx *= 0.6f; bd->vz *= 0.6f;
   b->airborne = 0; b->flip_pending = 0; b->launched_by = 0; b->peak_y = bd->y; b->bounced = 0; b->tipping = 0;
+  b->lift_from = 0; b->soft_land = 0;
 }
 
 /* -- hazards (6.2) ------------------------------------------------- */
@@ -2408,7 +2518,7 @@ static void checks_step(match_t *m) {
     /* landing */
     if (b->airborne && bd->y <= b->floor_y + 1e-4f && bd->vy <= 0 && !b->lifted_by) landing(m, i);
     /* ring out: the centre 0.3 beyond an open edge */
-    if (!b->is_ops && !b->falling) {
+    if (!b->is_ops && !b->falling && !b->lifted_by) {            /* held over the edge, it goes when it is let go */
       if (((ar->open_mask & OPEN_PX) && bd->x > hw + 0.3f) || ((ar->open_mask & OPEN_NX) && bd->x < -hw - 0.3f) ||
           ((ar->open_mask & OPEN_PZ) && bd->z > hd + 0.3f) || ((ar->open_mask & OPEN_NZ) && bd->z < -hd - 0.3f)) {
         b->falling = 1; b->airborne = 1; if (bd->vy > 0) bd->vy = 0;

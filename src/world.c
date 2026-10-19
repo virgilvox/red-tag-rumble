@@ -1327,6 +1327,7 @@ typedef struct {
   float deck_y, deck_w, deck_l;                /* the surface the lid marks sit on (a bare FRAME's is its electronics box) */
   float hinge_y, hinge_z;                      /* the WEDGE plate's hinge, for a 2ND mounted on it */
   float flip_rest;                             /* a flipper on a slope (WEDGE, SHELL) rests along it */
+  float fork_vis, fork_y0, fork_z0;            /* the LIFTER: the forks' idle lift (0 armed), the hinge's height and z on the body */
 } wbot_t;
 static wbot_t bots[MAX_BOTS];
 
@@ -2164,7 +2165,7 @@ static void build_weapon(wbot_t *b, int secondary, soup_t *sh) {
       /* bevelled forks along the floor so the lifter gets under, a crossbar, two hinge blocks and a
        * hydraulic ram that grows as it lifts */
       float fork_y = (r < 0.2f ? r : 0.2f) + 0.035f;
-      if (!secondary) { y0 = fork_y + 0.09f; z0 = front_z(b, y0) + 0.02f; t3_object_set_position(piv, 0, y0, z0); }
+      if (!secondary) { y0 = fork_y + 0.09f; z0 = front_z(b, y0) + 0.02f; t3_object_set_position(piv, 0, y0, z0); b->fork_y0 = y0; b->fork_z0 = z0; b->fork_vis = 0.14f; }
       float fy = fork_y - y0;
       soup_rgb(&s, BC_STEEL);
       for (int k = -1; k <= 1; k += 2) {
@@ -2780,7 +2781,26 @@ static void pose_weapon(wbot_t *b, const bot_t *bt, int secondary, float dt) {
       break; }
     case WP_LIFTER: {
       float lift = bt->lift;
-      t3_object_set_rotation(piv, -lift * 0.9f, 0, 0);
+      if (bt->is_ops || secondary) { t3_object_set_rotation(piv, -lift * 0.9f, 0, 0); break; }
+      /* idle the forks ride a hand off the floor; held (armed) they drop flat onto it, the lip that gets under;
+       * with a bot on them they rise with the lift and sit under its belly, so it is seen riding them */
+      float want = bt->fork_armed || bt->carry_t > 0 || !bt->alive ? 0 : 0.14f;
+      b->fork_vis += (want - b->fork_vis) * fminf(1.0f, dt * 14.0f);
+      float ang = b->fork_vis + lift * 0.9f;
+      int slot = (int)(b - bots);
+      if (bt->carry_t > 0 && slot >= 0 && slot < MAX_BOTS && bt == &M.bots[slot]) {
+        for (int j = 0; j < M.nbots && j < MAX_BOTS; j++) {
+          const bot_t *v = &M.bots[j];
+          if (v->lifted_by != slot + 1) continue;
+          float fx = sinf(bt->b.h), fz = cosf(bt->b.h);
+          float dz = (v->b.x - bt->b.x) * fx + (v->b.z - bt->b.z) * fz - b->fork_z0;
+          float dy = (v->b.y + v->b.clr) - (bt->b.y + b->fork_y0) + 0.06f;
+          if (dz < 0.15f) dz = 0.15f;
+          float under = atan2f(dy, dz);
+          ang = fminf(under, 1.2f) * fminf(1.0f, lift / 0.3f) + ang * (1.0f - fminf(1.0f, lift / 0.3f));
+        }
+      }
+      t3_object_set_rotation(piv, -ang, 0, 0);
       break; }
     case WP_HAMMER: {
       float st = 1, ang = hammer_angle(b, bt, active, cooldown, &st);
@@ -3105,7 +3125,7 @@ static void pose_test_fire(wbot_t *b, float dt) {
       if (f < A) t.active = (int16_t)(A - f); else if (f < A + C) t.cooldown = (int16_t)(C - (f - A));
       running |= f < A + C;
     } else if (wp == WP_LIFTER) {
-      t.lift = ft < 0.6f ? ft / 0.6f : (ft < 1.4f ? 1 : fmaxf(0, 1 - (ft - 1.4f) / 0.6f));
+      t.lift = ft < 0.6f ? ft / 0.6f : (ft < 1.4f ? 1 : fmaxf(0, 1 - (ft - 1.4f) / 0.6f)); t.fork_armed = 1;
       running |= ft <= 2.1f;
     } else if (wp == WP_FLAME) {
       t.fuel = WP_FLAME_FUEL; t.in.buttons = ft < 1.6f ? IN_A : 0;

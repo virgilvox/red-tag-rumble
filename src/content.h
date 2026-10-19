@@ -280,12 +280,13 @@ STR char *S_ROW_2ND_SHORT = "2ND";
 /* -- the attack lens (docs/design/deep-controls.md 4.2 to 4.9) ---- */
 /* the weapon widget's state word (4.2), indexed by WW_* */
 STR char *WIDGET_WORD[] = { "HOLD", "SPIN UP", "READY", "SPENT", "TAP", "TAP: ON", "ON", "SWING", "CLAMP", "LIFT", "CARRY", "EMPTY",
-                            "REFILL", "RAM", "DRIVE AT THEM", "HIT", "INVERTED", "NO BOOST", "BOOST", "BRAKE", "RIGHTING", "SLIPPED" };
+                            "REFILL", "RAM", "DRIVE AT THEM", "HIT", "INVERTED", "NO BOOST", "BOOST", "BRAKE", "RIGHTING", "SLIPPED",
+                            "LET GO: TIP" };
 enum { WW_HOLD, WW_SPIN_UP, WW_READY, WW_SPENT, WW_TAP, WW_TAP_ON, WW_ON, WW_SWING, WW_CLAMP, WW_LIFT, WW_CARRY, WW_EMPTY,
-       WW_REFILL, WW_RAM, WW_DRIVE_AT, WW_HIT, WW_INVERTED, WW_NO_BOOST, WW_BOOST, WW_BRAKE, WW_RIGHTING, WW_SLIPPED, WW_COUNT };
+       WW_REFILL, WW_RAM, WW_DRIVE_AT, WW_HIT, WW_INVERTED, WW_NO_BOOST, WW_BOOST, WW_BRAKE, WW_RIGHTING, WW_SLIPPED, WW_LET_GO, WW_COUNT };
 STR char *S_WW_SECONDS = "%d.%d S";            /* a cooldown counting down */
 STR char *S_WW_HOLD_N  = "HOLD %d S";          /* the CRUSHER's hold */
-STR char *S_WW_CARRY_N = "CARRY %d.%d S";      /* the LIFTER's carry */
+STR char *S_WW_CARRY_N = "CARRY %d.%d S";      /* the LIFTER's carry: the time left before the forks put it down */
 STR char *S_BOOST_PROMPT = "BOOST %s";         /* the boost key, once per 20 s on a long drive at the enemy */
 STR char *S_BRAKE_PROMPT = "%s BRAKES";        /* the brake key, once per 20 s near a drop at speed */
 /* why a landed hit was weak or strong (4.4), indexed by HIT_WHY_* in sim.h */
@@ -295,7 +296,7 @@ STR char *COACH_1[2]        = { "DRIVE WITH %s", "TURN TOWARD THE ARROW" };
 STR char *COACH_2_SPIN[2]   = { "HOLD %s TO SPIN UP.", "KEEP OFF THE WALL" };
 STR char *COACH_2_SAW[2]    = { "TAP %s: SAW ON", "IT GRINDS WHAT IT TOUCHES" };
 STR char *COACH_2_TAP[2]    = { "TAP %s WHEN THEY ARE CLOSE", "" };
-STR char *COACH_2_LIFT[2]   = { "HOLD %s UNDER THEIR SIDE", "" };
+STR char *COACH_2_LIFT[2]   = { "HOLD %s, DRIVE INTO THEM", "LET GO TO TIP" };
 STR char *COACH_2_FLAME[2]  = { "HOLD %s. IT IS SHORT", "GET CLOSE FIRST" };
 STR char *COACH_2_RAM[2]    = { "DRIVE INTO THEIR SIDE.", "SPEED IS THE WEAPON" };
 STR char *COACH_3[2]        = { "HIT THEIR SIDE, NOT THE FRONT", "THE ARROW MARKS THE WEAK SIDE" };
@@ -313,7 +314,7 @@ STR char *WEAPON_HOWTO[] = {
   "NO WEAPON. RAM THEIR SIDE AT SPEED",            /* NONE */
   "PASSIVE. RAM AT SPEED. SLIDES UNDER THEM",      /* WEDGE: the lip at 0.6 */
   "TAP. A JAB STRAIGHT AHEAD. REACH 1.0",          /* SPIKE: hb_z1 1.05 */
-  "HOLD. GETS UNDER A TURNED BOT. REACH 0.8",      /* LIFTER: hb_z1 0.8 */
+  "HOLD %s. DRIVE INTO THEM. LET GO TO TIP",       /* LIFTER: %s is the weapon key (howto_of fills it) */
   "TAP TO TOGGLE. GRINDS ON CONTACT. REACH 0.7",   /* SAW: the circle at 0.7 */
   "HOLD. SHORT CONE, FUEL RUNS OUT. REACH 1.5",    /* FLAME: the 1.5 cone */
   "TAP. A SHORT WIND UP, THEN DENTS. REACH 1.0",   /* HAMMER: 15 frames of wind up, hb_z1 1.0 */
