@@ -640,7 +640,7 @@ void wc_render(void) {
 
   /* the sim: fixed steps, the timescale scales the accumulator, never DT (20.5) */
   if (G.sim_on && M.nbots > 0) acc += dt * G.timescale; else acc = 0;
-  int steps = 0;
+  int steps = 0, frame0 = M.frame;
   /* a 60 Hz host frame is exactly one step: the tolerance absorbs float rounding of delta_ms so
    * a scripted run never splits one frame's input across two steps (the replay lines up, 15.7) */
   while (acc >= DT - 1e-5f && steps < 4) {
@@ -648,6 +648,15 @@ void wc_render(void) {
     acc -= DT; if (acc < 0) acc = 0; steps++;
   }
   if (steps == 4) acc = 0;                   /* a stall drops time, never fast-forwards */
+  {                                          /* the KO burst travels at full speed through the hit stop, the slow motion and the hold */
+    static float ko_dacc; static int ko_scattered;
+    if (G.phase == PH_KO && G.miniko_frames == 0 && M.over && G.sim_on && !G.attract) {
+      if (!ko_scattered) { sim_ko_scatter(&M, G.ko_victim, J_KO_SCATTER); ko_scattered = 1; }
+      ko_dacc += dt / DT - (float)(M.frame - frame0);
+      for (int k = 0; ko_dacc >= 1.0f && k < 4; k++) { sim_debris_step(&M); ko_dacc -= 1.0f; }
+      if (ko_dacc > 1.0f) ko_dacc = 0;
+    } else { ko_dacc = 0; ko_scattered = 0; }
+  }
   {                                          /* the band's weapon, drive, damage and hazard loops follow the match */
     static int fighting;
     int f = G.sim_on && !G.attract && !G.paused && M.nbots > 0 && (G.phase == PH_FIGHT || G.phase == PH_KO);

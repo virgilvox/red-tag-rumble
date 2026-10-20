@@ -231,6 +231,9 @@ void     sim_init(match_t *m, const match_setup_t *s);
 void     sim_step(match_t *m);
 void     sim_snapshot(const match_t *src, match_t *dst);     /* a memcpy */
 int      sim_over(const match_t *m);
+/* the cart's KO only (the match is over): integrate the debris alone, and widen a KO burst's scatter by k */
+void sim_debris_step(match_t *m);
+void sim_ko_scatter(match_t *m, int slot, float k);
 uint32_t sim_hash(const match_t *m);                        /* FNV-1a over x, z, h, y, hp of every bot and x, z of live debris */
 /* the one trig table: linear interpolation between 1024 entries, octant reduction for atan2 */
 float    rtr_sin(float a);

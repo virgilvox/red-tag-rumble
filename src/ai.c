@@ -74,6 +74,27 @@ static const skill_t *skill_of(const ai_t *a) {
   int d = a->difficulty > AI_HARD ? AI_MEDIUM : a->difficulty;
   return a->vs_human ? &SKILL_VS_HUMAN[d] : &SKILL[d];
 }
+/* EASY against a person backed onto a wall (DEEP feel gate): the person cannot drive away, so the 90 frame
+ * breath only spaced out the blows and a spinner on a pinned bot ended a first fight in about 10 s. After a
+ * landed hit on a person at a wall EASY backs off for AI_EASY_WALL_BREATH and waits out in the open, AI_EASY_WALL_GAP
+ * off them toward the middle, until they have come off the wall or the breath runs out */
+#ifndef AI_EASY_WALL_BREATH
+#define AI_EASY_WALL_BREATH 300
+#endif
+#define AI_EASY_WALL_GAP    5.0f
+static int person_at_wall(const match_t *m, int t) {
+  if (t < 0 || t >= m->nbots) return 0;
+  const bot_t *b = &m->bots[t];
+  if (b->is_ai || b->is_ops || !b->alive) return 0;
+  if (b->pinned & 1) return 1;
+  const arena_def_t *ar = sim_arena(m);
+  float r = (b->b.hl > b->b.hw ? b->b.hl : b->b.hw) + 0.5f, hw = ar->w * 0.5f, hd = ar->d * 0.5f;
+  if (!(ar->open_mask & OPEN_PX) && hw - b->b.x < r) return 1;
+  if (!(ar->open_mask & OPEN_NX) && b->b.x + hw < r) return 1;
+  if (!(ar->open_mask & OPEN_PZ) && hd - b->b.z < r) return 1;
+  if (!(ar->open_mask & OPEN_NZ) && b->b.z + hd < r) return 1;
+  return 0;
+}
 static int human_in_match(const match_t *m) {
   for (int i = 0; i < m->nbots && i < MAX_BOTS; i++) if (!m->bots[i].is_ai && !m->bots[i].is_ops && m->bots[i].hp_max > 0) return 1;
   return 0;
@@ -391,6 +412,11 @@ static void score_goals(ai_t *a, const match_t *m, const ai_frame_t *f, scores_t
     float rx, rz; rot2(dx, dz, DEG(60), &rx, &rz);
     s->tx[GOAL_EVADE] = e->x + rx * 3.5f; s->tz[GOAL_EVADE] = e->z + rz * 3.5f;
     if (a->backoff_t > 0 && dist > 4.0f) { s->tx[GOAL_EVADE] = mx + dx * 1.0f; s->tz[GOAL_EVADE] = mz + dz * 1.0f; }
+    if (a->backoff_t > 0 && a->wall_breath) {
+      /* wait in the open, off the person toward the middle, so they have room to drive off the wall */
+      float cx = -e->x, cz = -e->z; if (len2(cx, cz) < 0.01f) { cx = dx; cz = dz; } norm2(&cx, &cz);
+      s->tx[GOAL_EVADE] = e->x + cx * AI_EASY_WALL_GAP; s->tz[GOAL_EVADE] = e->z + cz * AI_EASY_WALL_GAP;
+    }
   }
 
   /* a practice bot (EASY, and MEDIUM against a person) never shoves a person toward an open edge: with the
@@ -946,7 +972,13 @@ void ai_think(ai_t *a, const match_t *m, pad_state_t *out) {
     a->vs_human = (uint8_t)human_in_match(m);
     const skill_t *sk = skill_of(a);
     if (m->frame <= 1 && sk->backoff > 0 && a->vs_human) a->backoff_t = AI_OPENING_BREATH;
-    if (me->dealt > a->last_dealt + 0.5f && sk->backoff > 0) a->backoff_t = sk->backoff;
+    if (me->dealt > a->last_dealt + 0.5f && sk->backoff > 0) {
+      a->backoff_t = sk->backoff;
+      a->wall_breath = (uint8_t)(a->difficulty == AI_EASY && person_at_wall(m, a->target));
+      if (a->wall_breath) a->backoff_t = AI_EASY_WALL_BREATH;
+    }
+    /* the long breath ends early once the person has driven off the wall and the normal one would be over */
+    if (a->wall_breath && (a->backoff_t == 0 || (!person_at_wall(m, a->target) && a->backoff_t < AI_EASY_WALL_BREATH - sk->backoff))) { a->wall_breath = 0; if (a->backoff_t > 0 && !person_at_wall(m, a->target)) a->backoff_t = 0; }
     a->last_dealt = me->dealt;
     if (a->backoff_t > 0) a->backoff_t--;
     if (a->evade_block_t > 0) a->evade_block_t--;

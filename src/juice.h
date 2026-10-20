@@ -117,6 +117,7 @@ static const spark_spray_t SPRAY[WP_COUNT + 2] __attribute__((unused)) = {
 #define J_KO_TIMESCALE        0.2f
 #define J_KO_SLOW_FRAMES      90
 #define J_KO_HOLD_FRAMES      60
+#define J_KO_SCATTER          2.2f   /* the KO burst's spread over a fight shed, and it flies at full speed through the slow motion */
 #define J_KO_ORBIT_DEG_S      30.0f
 #define J_KO_ORBIT_DIST       4.5f
 #define J_KO_ORBIT_HEIGHT     2.4f

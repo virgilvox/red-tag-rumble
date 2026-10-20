@@ -442,6 +442,8 @@ static void debris_remove(match_t *m, int i) {
   if (i != m->ndebris) m->debris[i] = m->debris[m->ndebris];
 }
 
+static void debris_integrate(match_t *m);
+
 static void debris_burst_at(match_t *m, float x, float z, int kind, int colour, int count) {
   for (int k = 0; k < count; k++) {
     float a = rnd01(m) * 6.2831853f, sp = 1.0f + rnd01(m) * 2.0f;
@@ -2261,7 +2263,14 @@ static void landing(match_t *m, int slot) {
   if (!never && !on_bot) {
     /* the residual off the face it landed on, which then settles to the floor */
     float res = inv ? rtr_wrap_pi(o - (o >= 0 ? PI_F : -PI_F)) : o;
-    if (use_roll) { bd->roll = res; } else { bd->pitch = res; }
+    if (use_roll) { bd->roll = res; }
+    else if (inv != b->inverted) {
+      /* over the nose or the tail: a half turn about the side axis is a half turn about the up axis plus the
+       * roll the inverted flag stands for, so the bot now faces back the way it came. The heading turns with
+       * it and the residual pitch changes sign; the previous pose snaps so the renderer never spins it */
+      bd->h = rtr_wrap_pi(bd->h + PI_F); bd->ph = bd->h;
+      bd->pitch = -res; bd->pp = bd->pitch;
+    } else { bd->pitch = res; }
     bd->wp = bd->wr = 0;
     b->inverted = (uint8_t)inv;
     if (inv) zone = LAND_INVERTED;
@@ -2632,7 +2641,13 @@ static void checks_step(match_t *m) {
       if (taken) { debris_remove(m, d); d--; }
     }
   }
-  /* debris integration: gravity 20, one bounce at e 0.3, slide with drag 0.9, recycled at 0 life */
+  debris_integrate(m);
+}
+
+/* debris integration: gravity 20, one bounce at e 0.3, slide with drag 0.9, recycled at 0 life */
+static void debris_integrate(match_t *m) {
+  const arena_def_t *ar = sim_arena(m);
+  float hw = ar->w * 0.5f, hd = ar->d * 0.5f;
   for (int d = 0; d < m->ndebris; d++) {
     debris_t *db = &m->debris[d];
     float fy = arena_floor_y(ar, db->x, db->z);
@@ -2645,6 +2660,22 @@ static void checks_step(match_t *m) {
     if (db->x < -hw) db->x = -hw; if (db->x > hw) db->x = hw; if (db->z < -hd) db->z = -hd; if (db->z > hd) db->z = hd;
     db->life--;
     if (db->life <= 0) { debris_remove(m, d); d--; }
+  }
+}
+
+/* after the match is over (the cart's KO, never a replayed step): the burst flies at full speed through the
+ * slow motion and the hold, and gets a wider kick than a fight's shed. Nothing here is hashed while it matters:
+ * the replay ends at the KO and no fight step follows */
+void sim_debris_step(match_t *m) { if (m->over) debris_integrate(m); }
+void sim_ko_scatter(match_t *m, int slot, float k) {
+  if (!m->over || slot < 0 || slot >= m->nbots) return;
+  const bot_t *b = &m->bots[slot];
+  for (int d = 0; d < m->ndebris; d++) {
+    debris_t *db = &m->debris[d];
+    if (db->owner != slot || db->life <= 0) continue;
+    db->vx = b->b.vx + (db->vx - b->b.vx) * k; db->vz = b->b.vz + (db->vz - b->b.vz) * k;
+    if (db->vy > 0) db->vy *= 1.0f + (k - 1.0f) * 0.4f;
+    db->bounced = 0;
   }
 }
 

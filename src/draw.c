@@ -34,7 +34,9 @@ typedef struct { float x, y, z; char text[12]; uint32_t rgb; int big; float age;
 static num_t NUMS[4][J_NUMBERS_PER_VIEW];
 
 typedef struct { char s[24]; uint32_t c; float frames; int live; } stinger_t;
-static stinger_t STING[4];
+#define STING_QUEUE   3        /* waiting stingers per view; one shows at a time in the status slot */
+#define STING_STALE   90.f     /* a stinger that waited this long is old news and is dropped */
+static stinger_t STING[4], STINGQ[4][STING_QUEUE];
 
 /* the ghost HP drain per bot slot (10.4) */
 typedef struct { float ghost, last, hold; int seen; } ghost_t;
@@ -155,38 +157,67 @@ static void numbers_draw(int viewport, const rect_t *vp, float dt) {
   hud_clip_clear();
 }
 
-/* -- stingers (10.5) --------------------------------------------- */
+/* -- stingers (10.5) and the status slot ----------------------------
+ * Every viewport has one status slot just above its strip, under the bot the chase camera parks at about
+ * 55 percent: the count, a stinger or the coach chip, in that order of priority, never two at once. A stinger
+ * is a small tag (under 40 px tall), not a bar across the view: the old bar over the middle hid the very
+ * flip or hit it announced. Stingers that arrive while the slot is busy wait in a short queue and go stale
+ * after 1.5 s; the same word twice in a row is shown once. */
+static int slot_h(int compact) { return compact ? 30 : 36; }
+static int slot_y(const rect_t *vp, int compact, int h) { int strip_h = compact ? 56 : 72; return vp->y + vp->h - strip_h - 12 - h; }
+
 void stinger(int viewport, const char *s, uint32_t seat_colour) {
   if (viewport < 0 || viewport >= 4 || !s) return;
   stinger_t *st = &STING[viewport];
-  snprintf(st->s, sizeof st->s, "%s", s);
-  st->c = seat_colour; st->frames = 0; st->live = 1;
+  if (st->live && !strcmp(st->s, s)) { if (st->frames > 6) st->frames = 6; st->c = seat_colour; return; }
+  stinger_t *q = STINGQ[viewport];
+  for (int k = 0; k < STING_QUEUE; k++) if (q[k].live && !strcmp(q[k].s, s)) { q[k].frames = 0; q[k].c = seat_colour; return; }
+  if (!st->live) { snprintf(st->s, sizeof st->s, "%s", s); st->c = seat_colour; st->frames = 0; st->live = 1; return; }
+  /* the slot is busy: queue it, pushing out the oldest waiting one when the queue is full */
+  int k = 0;
+  while (k < STING_QUEUE && q[k].live) k++;
+  if (k == STING_QUEUE) { memmove(&q[0], &q[1], sizeof q[0] * (STING_QUEUE - 1)); k = STING_QUEUE - 1; }
+  snprintf(q[k].s, sizeof q[k].s, "%s", s); q[k].c = seat_colour; q[k].frames = 0; q[k].live = 1;
 }
 void stinger_all(const char *s, uint32_t seat_colour) { for (int i = 0; i < 4; i++) stinger(i, s, seat_colour); }
 
-static void stinger_draw(int viewport, const rect_t *vp, int compact, float dt) {
+/* age the queue and move the next waiting stinger up when the slot is free */
+static void stinger_tick(int viewport, float dt, int slot_busy) {
+  stinger_t *st = &STING[viewport], *q = STINGQ[viewport];
+  for (int k = 0; k < STING_QUEUE; k++) if (q[k].live && (q[k].frames += dt * 60.f) >= STING_STALE) q[k].live = 0;
+  int n = 0;
+  for (int k = 0; k < STING_QUEUE; k++) if (q[k].live) q[n++] = q[k];
+  for (int k = n; k < STING_QUEUE; k++) q[k].live = 0;
+  if (st->live && slot_busy) { st->live = 0; return; }     /* the count took the slot: this one is over */
+  if (!st->live && !slot_busy && q[0].live) {
+    *st = q[0]; st->frames = 0;
+    memmove(&q[0], &q[1], sizeof q[0] * (STING_QUEUE - 1)); q[STING_QUEUE - 1].live = 0;
+  }
+}
+
+/* draws the live stinger, returns 1 when it held the slot this frame */
+static int stinger_draw(int viewport, const rect_t *vp, int compact, float dt) {
   stinger_t *st = &STING[viewport];
-  if (!st->live) return;
+  if (!st->live) return 0;
   st->frames += dt * 60.f;
-  if (st->frames >= J_STINGER_FRAMES) { st->live = 0; return; }
+  if (st->frames >= J_STINGER_FRAMES) { st->live = 0; return 0; }
   float in = clampf(st->frames / 6.f, 0, 1), out = clampf((J_STINGER_FRAMES - st->frames) / 6.f, 0, 1);
   int a = (int)(255 * (in < out ? in : out));
-  int dx = (int)(-20 * (1 - hud_ease_out(in)));
-  int h = compact ? 48 : 72;
-  /* the bar sits low, under the bot the chase camera parks at about 55 percent and over the coach chip's slot:
-   * at 35 percent (10.5) it covered a flipped bot at the top of its arc and the far bot, which is what an
-   * AIRBORNE or a BIG HIT announces. In a quadrant (no coach) it sits right on the strip */
-  int strip_h = compact ? 56 : 72;
-  int y = compact ? vp->y + vp->h - strip_h - 12 - h : vp->y + vp->h - strip_h - 12 - 64 - 8 - h;
-  int font = compact ? F_STINGER_Q : fit_font(F_STINGER, st->s, vp->w - 48);
-  hud_set_alpha(a);
-  hud_rect(vp->x + dx + 6, y + 6, vp->w, h, st->c, 255);
-  hud_rect(vp->x + dx, y, vp->w, h, C_CHAR, 225);
+  int dy = (int)(8 * (1 - hud_ease_out(in)));
+  int h = slot_h(compact), font = F_H3;
   char s[24];
-  fit_text(s, sizeof s, font, st->s, vp->w - 32);
-  hud_text(font, vp->x + dx + vp->w / 2, cy_text(font, y, h), s, C_BONE, 255, AL_CENTER);
+  fit_text(s, sizeof s, font, st->s, vp->w - 64);
+  int w = hud_text_w(font, s) + 44;
+  int x = vp->x + (vp->w - w) / 2, y = slot_y(vp, compact, h) + dy;
+  hud_set_alpha(a);
+  hud_rect(x + 4, y + 4, w, h, C_SHADOW, 200);
+  hud_rect(x, y, w, h, C_CHAR, 225);
+  hud_rect(x, y, 8, h, st->c, 255);
+  hud_rect(x + 8, y + h - 3, w - 8, 3, st->c, 255);
+  hud_text(font, x + 8 + (w - 8) / 2, cy_text(font, y, h - 2), s, C_BONE, 255, AL_CENTER);
   hud_set_alpha(255);
-  hud_dirty(vp->x - 20, y, vp->w + 26, h + 6);
+  hud_dirty(x, y - 2, w + 6, h + 14);
+  return 1;
 }
 
 /* -- the clock chip (10.5) --------------------------------------- */
@@ -739,8 +770,10 @@ void strip_panel_gone(int seat, int panel) {
 
 void hit_mark_add(int viewport, int reason, float x, float y, float z) {
   if (viewport < 0 || viewport >= 4 || reason <= HIT_WHY_NONE || reason >= HIT_WHY_COUNT) return;
+  /* one reason word per view at a time: a new hit's word replaces the last one (two or three words stacked
+   * under each other at the hit points read as noise next to the strip, the count and a stinger) */
+  for (int k = 1; k < MARKS_PER_VIEW; k++) MARKS[viewport][k].live = 0;
   mark_t *slot = &MARKS[viewport][0];
-  for (int k = 0; k < MARKS_PER_VIEW; k++) { if (!MARKS[viewport][k].live) { slot = &MARKS[viewport][k]; break; } if (MARKS[viewport][k].age > slot->age) slot = &MARKS[viewport][k]; }
   slot->x = x; slot->y = y; slot->z = z; slot->age = 0; slot->reason = reason; slot->live = 1;
   /* a glancing word shows the weak side for 2 s after it (4.5) */
   int seat = viewport < nviews ? view_seat[viewport] : -1;
@@ -1097,30 +1130,34 @@ static void self_right_prompt(const bot_t *b, int seat, const char **fmt, int *w
   *fmt = ops ? S_NO_SELF_RIGHT_OPS : S_NO_SELF_RIGHT;
 }
 
+/* the count in the status slot over the strip: a rust numeral and the self right prompt on one char plate.
+ * It used to stand in F_TITLE at the viewport centre, on top of the bot it was counting */
 void countout(const rect_t *vp, const bot_t *b) {
   if (!b || b->countout <= 0 || !b->alive) return;
   char s[4];
   snprintf(s, sizeof s, "%d", count_number(b));
   int compact = vp->h <= 360;
-  int cx = vp->x + vp->w / 2, cy = vp->y + vp->h / 2;
-  /* F_TITLE at the viewport centre; in a quadrant F_H1 near the top, clear of the stinger slot over the strip */
-  int font = compact ? F_H1 : F_TITLE;
-  int fh = hud_font_h(font);
-  int y = compact ? vp->y + 64 : cy - fh / 2 - 30;
+  int font = compact ? F_H3 : F_H2;
   int seat = b->seat <= 3 ? b->seat : -1, pad = key_seat_pad(seat);
   const char *fmt; int which; uint32_t ink;
   self_right_prompt(b, seat, &fmt, &which, &ink);
-  /* a char plate behind the numeral and the prompt, like the clock's, so the count reads over tape and ramps */
-  int tw = which >= 0 ? key_text_w(F_MONO, fmt, pad, which) : hud_text_w(F_MONO, fmt);
-  int pw = tw + 48, nw = hud_text_w(font, s) + 48; if (nw > pw) pw = nw;
-  int ph = fh + (compact ? 30 : 34);
-  hud_rect(cx - pw / 2, y - 4, pw, ph, C_CHAR, 200);
-  hud_text(font, cx + 4, y + 4, s, C_SHADOW, 200, AL_CENTER);
-  hud_text(font, cx, y, s, C_RUST, 255, AL_CENTER);
-  int py = y + fh - (compact ? 4 : 10);
-  if (which >= 0) key_text(F_MONO, cx - tw / 2, py, fmt, pad, which, ink, 255);
-  else hud_text_sh(F_MONO, cx, py, fmt, ink, 255, AL_CENTER);
-  hud_dirty(cx - pw / 2 - 4, y - 4, pw + 8, ph + 8);
+  int pfont = F_MONO;
+  int tw = which >= 0 ? key_text_w(pfont, fmt, pad, which) : hud_text_w(pfont, fmt);
+  int nw = hud_text_w(font, s);
+  int h = compact ? 40 : 52;
+  int w = 16 + nw + 16 + tw + 16;
+  if (w > vp->w - 16) w = vp->w - 16;
+  int x = vp->x + (vp->w - w) / 2, y = slot_y(vp, compact, h);
+  hud_rect(x + 4, y + 4, w, h, C_SHADOW, 200);
+  hud_rect(x, y, w, h, C_CHAR, 225);
+  hud_frame(x, y, w, h, 2, C_RUST, 255);
+  hud_clip(x, y, w, h);
+  hud_text(font, x + 16, cy_text(font, y, h), s, C_RUST, 255, AL_LEFT);
+  int px = x + 16 + nw + 16, py = cy_text(pfont, y, h);
+  if (which >= 0) key_text(pfont, px, py, fmt, pad, which, ink, 255);
+  else hud_text(pfont, px, py, fmt, ink, 255, AL_LEFT);
+  hud_clip_clear();
+  hud_dirty(x, y, w + 6, h + 6);
 }
 
 /* -- the minimap (9.5) ------------------------------------------- */
@@ -1825,6 +1862,7 @@ static void fight_frame(float dt) {
       /* the shared view shows the weak side only for a seat holding Y (4.5) */
       for (int s = 0; s < 4; s++) { const bot_t *sb = seat_bot(s); if (sb && weak_side_wanted(s, sb) == 2) weak_side_draw(i, vp, s, dt); }
       speech_draw(i, vp);
+      stinger_tick(i, dt, 0);
       stinger_draw(i, vp, 0, dt);
       viewport_white(vp, fx_white_alpha(i));
       continue;
@@ -1832,6 +1870,7 @@ static void fight_frame(float dt) {
     const bot_t *b = seat_bot(seat);
     if (b && !b->alive && game_hazard_seat_of(seat) >= 0) {
       hazard_seat_view(vp, seat);
+      stinger_tick(i, dt, 0);
       stinger_draw(i, vp, compact, dt);
       continue;
     }
@@ -1845,10 +1884,12 @@ static void fight_frame(float dt) {
     numbers_draw(i, vp, dt);
     marks_draw(i, vp, dt);
     speech_draw(i, vp);
-    if (b && b->alive && G.phase == PH_FIGHT) coach_draw(vp, seat);
     if (b && b->alive) chevron(i, vp, seat);
-    if (b) countout(vp, b);
-    stinger_draw(i, vp, compact, dt);
+    /* the status slot: the count, else a stinger, else the coach chip (one at a time, the rest wait) */
+    int counting = b && b->countout > 0 && b->alive;
+    stinger_tick(i, dt, counting);
+    if (counting) countout(vp, b);
+    else if (!stinger_draw(i, vp, compact, dt) && b && b->alive && G.phase == PH_FIGHT) coach_draw(vp, seat);
     if (view_layout == LAY_FULL && M.players <= 2 && nviews == 1 && b) {
       /* 1 player: a 640 strip bottom left and a 320 short strip for the practice bot bottom right */
       rect_t l = { 0, 0, 640, 720 };
@@ -1884,7 +1925,7 @@ static void fight_frame(float dt) {
 
 /* -- draw_hud ---------------------------------------------------- */
 void draw_init(void) {
-  memset(NUMS, 0, sizeof NUMS); memset(STING, 0, sizeof STING); memset(GHOST, 0, sizeof GHOST);
+  memset(NUMS, 0, sizeof NUMS); memset(STING, 0, sizeof STING); memset(STINGQ, 0, sizeof STINGQ); memset(GHOST, 0, sizeof GHOST);
   memset(RINGS, 0, sizeof RINGS); memset(MARKS, 0, sizeof MARKS); memset(SFX_, 0, sizeof SFX_);
   SPEECH.t = 0; results_confetti_done = 0; rematch_focus_y = 0;
 #ifdef RTR_FAKE_HUD
@@ -1903,6 +1944,10 @@ void draw_hud(float dt) {
    * main.c's keys_poll (deep-controls 6.2) */
   static int poll_n;
   if (poll_n++ % 60 == 0) keys_poll();
+  /* a new countdown starts with an empty status slot: nothing waits over from the last fight */
+  static int last_phase = -1;
+  if (G.phase == PH_COUNTDOWN && last_phase != PH_COUNTDOWN) { memset(STING, 0, sizeof STING); memset(STINGQ, 0, sizeof STINGQ); memset(MARKS, 0, sizeof MARKS); }
+  last_phase = G.phase;
   hud_clear();
 #ifdef RTR_FAKE_HUD
   fake_hud_frame(dt);

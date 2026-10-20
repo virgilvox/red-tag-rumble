@@ -1774,6 +1774,45 @@ static int sc_lift_cooldown(char *msg, int n) {
         "grab %d, put down %d, grabbed again %d frames later (120 to 150), touching for %d of the 120 frames between", grab, drop, grab2 - drop, gap);
 }
 
+/* a front flip over the nose: the STOMP lands inverted facing back the way it came (a half turn about the
+ * side axis is a half turn of heading plus the roll the inverted flag draws), and the landing step snaps the
+ * previous pose so the renderer never interpolates a half spin */
+static int sc_flip_heading(char *msg, int n) {
+  sc_init_presets(AR_BAY, PRE_LAUNCH, PRE_STOMP, 0);
+  sc_place(0, -1.0f, 0, HALF_PI); sc_place(1, 0, 0, -HALF_PI);
+  float h0 = SM.bots[1].b.h, worst = 0; int inv_f = -1;
+  for (int f = 0; f < 150; f++) {
+    sc_pad(0, 0, 0, f < 2 ? IN_A : 0); sc_pad(1, 0, 0, 0); sc_step();
+    float dh = fabsf(rtr_wrap_pi(SM.bots[1].b.h - SM.bots[1].b.ph)); if (dh > worst) worst = dh;
+    if (inv_f < 0 && SM.bots[1].inverted) inv_f = f;
+  }
+  float turned = fabsf(rtr_wrap_pi(SM.bots[1].b.h - h0));
+  SC_OK(inv_f >= 0 && turned > 2.8f && worst < 0.2f && fabsf(SM.bots[1].b.pitch) < 0.6f, "inverted at %d, heading turned %.2f rad (pi), the largest step to step heading change %.3f (< 0.2), pitch at rest %.2f",
+        inv_f, turned, worst, SM.bots[1].b.pitch);
+}
+
+/* the practice bot and a person backed onto a wall: an EASY CHOP against a parked LAUNCH touching the
+ * BAY's east wall. It used to land a blow every 2.3 s there and end the fight in about 10 s; now it waits
+ * out in the open after each hit on a person at a wall */
+static int sc_easy_wall_breath(char *msg, int n) {
+  match_setup_t s; memset(&s, 0, sizeof s);
+  s.mode = MODE_DEATHMATCH; s.arena = AR_BAY; s.players = 2; s.fight_len_s = 90; s.seed = 7;
+  build_preset(&s.builds[0], PRE_LAUNCH); build_preset(&s.builds[1], PRE_CHOP);
+  s.is_ai[0] = 0; s.is_ai[1] = 1; s.ai_level[1] = AI_EASY; s.hazards_off = 1; s.hitstop_off = 1; s.no_ops = 1;
+  sim_init(&SM, &s);
+  float hw = sim_arena(&SM)->w * 0.5f;
+  sc_place(0, hw - SM.bots[0].b.hw - 0.02f, 0, 0); sc_place(1, 0, 0, HALF_PI);
+  static ai_t ai; ai_init(&ai, AI_EASY, 1); ai_bind(&ai, 1);
+  int hits = 0, first = -1, ko = -1;
+  for (int f = 0; f < 1800 && !sim_over(&SM); f++) {
+    sc_pad(0, 0, 0, 0); SM.bots[0].still_t = 0; SM.bots[0].countout = 0;   /* a person who holds the wall: no count-out */
+    ai_think(&ai, &SM, &SM.bots[1].in); sc_step();
+    for (int e = 0; e < SNEV; e++) if (SEV[e].type == EV_HIT && SEV[e].b == 0 && SEV[e].a == 1) { hits++; if (first < 0) first = f; }
+    if (!SM.bots[0].alive && ko < 0) ko = f;
+  }
+  SC_OK(ko < 0 && hits <= 5 && SM.bots[0].hp > 40, "%d hits on the person in 30 s (<= 5; 7 with the old 90 frame breath), first at %d, person HP %.0f (> 40), KO %s", hits, first, SM.bots[0].hp, ko < 0 ? "none" : "yes");
+}
+
 static const scenario_t SCENARIOS[] = {
   { "ghost-sim", sc_ghost_sim },
   { "mound-contact", sc_mound_contact },
@@ -1809,6 +1848,8 @@ static const scenario_t SCENARIOS[] = {
   { "lift-carry-to-pit", sc_lift_carry_to_pit },
   { "lift-escape", sc_lift_escape },
   { "lift-cooldown", sc_lift_cooldown },
+  { "flip-heading", sc_flip_heading },
+  { "easy-wall-breath", sc_easy_wall_breath },
 };
 
 static int scenarios(const char *which) {

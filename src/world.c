@@ -818,13 +818,18 @@ static void arena_walls(warena_t *w, const arena_def_t *a) {
   /* the surround: an outer concrete floor and dark shop walls with strip lights, or a skyline on the roof */
   t3_mesh *outer = part(w->root, g_plane, M_RUBBER(0x24201b), a->w * 3, a->d * 3, 1, 0, -0.02f, 0);
   rot(outer, -PI / 2, 0, 0);
+  /* the lit parts of the surround (the rim lights, the windows, the strip lights) one soup per glow: they
+   * were a mesh each, 56 objects on THE ROOF and about 20 round a walled arena */
+  soup_t glow_a, glow_b; soup_init(&glow_a, 400); soup_init(&glow_b, 600);
   if (roof) {
     for (int k = 0; k < 14; k++) {
       float ang = k * 0.45f, r = 22 + (k % 3) * 6, h = 4 + (k * 7) % 9;
       soup_rgb(&trim, 0x1d1915u); sp_box_at(&trim, 4 + (k % 4), h, 4 + (k % 3), cosf(ang) * r, h / 2 - 1.5f, sinf(ang) * r);
-      part(w->root, g_box, emis(C_HAZARD, 1.2f), 4 + (k % 4) + 0.04f, 0.06f, 4 + (k % 3) + 0.04f, cosf(ang) * r, h - 1.5f + 0.03f, sinf(ang) * r);   /* the amber rim light */
-      for (int wy = 0; wy < 3; wy++) part(w->root, g_box, emis(C_HAZARD, 1.5f), 0.3f, 0.3f, 0.3f, cosf(ang) * r + (k % 3) - 1, wy * 1.6f + 0.5f, sinf(ang) * r - 2 - (k % 3) * 0.5f);
+      sp_box_at(&glow_a, 4 + (k % 4) + 0.04f, 0.06f, 4 + (k % 3) + 0.04f, cosf(ang) * r, h - 1.5f + 0.03f, sinf(ang) * r);   /* the amber rim light */
+      for (int wy = 0; wy < 3; wy++) sp_box_at(&glow_b, 0.3f, 0.3f, 0.3f, cosf(ang) * r + (k % 3) - 1, wy * 1.6f + 0.5f, sinf(ang) * r - 2 - (k % 3) * 0.5f);
     }
+    if (glow_a.n_) soup_mesh(w->root, &glow_a, emis(C_HAZARD, 1.2f)); else soup_free_empty(&glow_a);
+    if (glow_b.n_) soup_mesh(w->root, &glow_b, emis(C_HAZARD, 1.5f)); else soup_free_empty(&glow_b);
   } else {
     for (int s = 0; s < 4; s++) {
       if (side[s].open) continue;
@@ -832,8 +837,10 @@ static void arena_walls(warena_t *w, const arena_def_t *a) {
       float x = side[s].x + side[s].nx * -dist, z = side[s].z + side[s].nz * -dist, len = side[s].len + 2 * dist; int az = side[s].along_z;
       soup_rgb(&trim, 0x1d1915u); sp_box_at(&trim, az ? 0.4f : len, 5, az ? len : 0.4f, x, 2.5f, z);
       for (float p = -len / 2 + 3; p < len / 2 - 1; p += 6)
-        part(w->root, g_box, emis(a->floor_style == FL_DARK ? C_LIVE : 0xfff1d6, 1.8f), az ? 0.1f : 2.4f, 0.08f, az ? 2.4f : 0.1f, az ? x + side[s].nx * 0.25f : p, 3.6f, az ? p : z + side[s].nz * 0.25f);
+        sp_box_at(&glow_a, az ? 0.1f : 2.4f, 0.08f, az ? 2.4f : 0.1f, az ? x + side[s].nx * 0.25f : p, 3.6f, az ? p : z + side[s].nz * 0.25f);
     }
+    if (glow_a.n_) soup_mesh(w->root, &glow_a, emis(a->floor_style == FL_DARK ? C_LIVE : 0xfff1d6, 1.8f)); else soup_free_empty(&glow_a);
+    soup_free_empty(&glow_b);
   }
   if (trim.n_) soup_mesh(w->root, &trim, VM_BODY); else soup_free_empty(&trim);
 }
@@ -1188,10 +1195,11 @@ void world_build_arena(int idx, const arena_def_t *a) {
   w->def = a;
   arena_floor(w, a);
   arena_walls(w, a);
-  for (int c = 0; c < 16; c++) w->cells[c] = group_at(w->root, 0, 0, 0);
+  /* a vis cell's group is made when a prop lands in it: an arena with no props had 16 empty groups */
   for (int i = 0; i < a->nprops && i < 32; i++) {
     if (a->props[i].kind == PR_GATE) continue;
     int cell = arena_cell(a, a->props[i].x, a->props[i].z);
+    if (!w->cells[cell]) w->cells[cell] = group_at(w->root, 0, 0, 0);
     t3_object *g = build_prop(w, &a->props[i], i);
     /* the mound boxes are terrain skin: each sits on the height field, tilted down the slope */
     for (int k = 0; k < a->nhaz; k++) {
@@ -2627,12 +2635,28 @@ void world_bot_build_ops(int slot) {
   bot_rebuild(b);
 }
 
+/* a hidden bot also leaves the scene graph (its root, the danger ring and the seat ring stay alive here):
+ * the two empty slots of a 1v1 were 68 objects the renderer walked every frame for nothing */
+static uint8_t bot_out[MAX_BOTS];
+static void bot_scene(int slot, int in) {
+  wbot_t *b = &bots[slot];
+  if (in && bot_out[slot]) {
+    t3_object_add(&S->base, b->ring); t3_object_add(&S->base, b->seat_ring); t3_object_add(&S->base, b->root);
+    t3_release(b->ring); t3_release(b->seat_ring); t3_release(b->root);
+    bot_out[slot] = 0;
+  } else if (!in && !bot_out[slot]) {
+    t3_retain(b->ring); t3_retain(b->seat_ring); t3_retain(b->root);
+    t3_object_remove(&S->base, b->ring); t3_object_remove(&S->base, b->seat_ring); t3_object_remove(&S->base, b->root);
+    bot_out[slot] = 1;
+  }
+}
 void world_bot_visible(int slot, int on) {
   if (slot < 0 || slot >= MAX_BOTS || !bots[slot].root) return;
   bots[slot].visible = on;
   bots[slot].root->visible = on != 0;
   if (!on) blob_hide(slot);
   if (!on) { set_vis(bots[slot].seat_ring, 0); set_vis(bots[slot].ring, 0); }
+  bot_scene(slot, on);
 }
 
 /* the root: heading, then the pitch and roll about the bot's own axes, then the inverted flip (DEEP-plan
@@ -3172,7 +3196,7 @@ void world_weapon_test_fire(int slot) {
  * cardboard, bench wood, bumpers, a thrown track) as boxes; and a soft blob under each airborne piece */
 enum { DM_PLATE, DM_WHEEL, DM_BOX, DM_COUNT };
 static t3_instanced_mesh *debris_im[DM_COUNT], *debris_blob;
-static t3_mesh *pickup_rings[MAX_DEBRIS];
+static t3_instanced_mesh *pickup_im;          /* the comeback pickup rings, one instanced draw (one object, was 24) */
 
 static t3_geometry *debris_plate_geo(void) {
   soup_t s; soup_init(&s, 60); sp_cbox(&s, 1, 1, 1, 0.22f); return soup_finish(&s);
@@ -3190,7 +3214,7 @@ static void im_drawn(t3_instanced_mesh *im, int n) { im->count = n; im->mesh.bas
 static void debris_hide_all(void) {
   for (int k = 0; k < DM_COUNT; k++) im_drawn(debris_im[k], 0);
   im_drawn(debris_blob, 0);
-  for (int i = 0; i < MAX_DEBRIS; i++) set_vis(pickup_rings[i], 0);
+  if (pickup_im) im_drawn(pickup_im, 0);
 }
 
 static void debris_init(void) {
@@ -3208,12 +3232,10 @@ static void debris_init(void) {
   debris_blob = t3_instanced_mesh_new(quad_geo(0, 0, 1, 1), bm, MAX_DEBRIS); t3_release(bm);
   debris_blob->mesh.base.frustum_culled = false;
   t3_object_add(&S->base, debris_blob); t3_release(debris_blob);
-  for (int i = 0; i < MAX_DEBRIS; i++) {
-    t3_material *rm = glass(C_LIVE, 0.8f);
-    pickup_rings[i] = t3_mesh_new(g_ring, rm); rot(pickup_rings[i], -PI / 2, 0, 0); t3_object_set_scale(pickup_rings[i], 0.5f, 0.5f, 1);
-    t3_object_add(&S->base, pickup_rings[i]); t3_release(pickup_rings[i]); t3_release(rm);
-    set_vis(pickup_rings[i], 0);
-  }
+  { t3_material *rm = glass(C_LIVE, 0.8f);
+    pickup_im = t3_instanced_mesh_new(g_ring, rm, MAX_DEBRIS); t3_release(rm);
+    pickup_im->mesh.base.frustum_culled = false;
+    t3_object_add(&S->base, pickup_im); t3_release(pickup_im); }
   debris_hide_all();
 }
 
@@ -3236,10 +3258,10 @@ static uint32_t debris_colour(const debris_t *d) {
 }
 
 static void sync_debris(const match_t *m, float alpha) {
-  int nk[DM_COUNT] = { 0 }, nb = 0;
+  int nk[DM_COUNT] = { 0 }, nb = 0, np = 0;
   for (int i = 0; i < MAX_DEBRIS; i++) {
     const debris_t *d = &m->debris[i];
-    if (i >= m->ndebris || d->life <= 0) { set_vis(pickup_rings[i], 0); continue; }
+    if (i >= m->ndebris || d->life <= 0) continue;
     float fade = d->life < J_DEBRIS_FADE ? (float)d->life / J_DEBRIS_FADE : 1;
     float t = (m->frame + alpha) * DT;
     int k = d->kind == DB_PANEL ? DM_PLATE : d->kind == DB_WHEEL ? DM_WHEEL : DM_BOX;
@@ -3272,9 +3294,13 @@ static void sync_debris(const match_t *m, float alpha) {
       t3_mat4 bmx; t3_mat4_compose(&bmx, (t3_vec3){ d->x, fy + 0.013f, d->z }, t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2), (t3_vec3){ bs, bs, 1 });
       t3_instanced_mesh_set_matrix_at(debris_blob, nb++, &bmx);
     }
-    set_vis(pickup_rings[i], d->pickup);
-    if (d->pickup) { t3_object_set_position(pickup_rings[i], d->x, 0.02f, d->z); float ps = 0.5f + 0.06f * sinf(world_t * 5 + i); t3_object_set_scale(pickup_rings[i], ps, ps, 1); }
+    if (d->pickup) {
+      float ps = 0.5f + 0.06f * sinf(world_t * 5 + i);
+      t3_mat4 rmx; t3_mat4_compose(&rmx, (t3_vec3){ d->x, 0.02f, d->z }, t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2), (t3_vec3){ ps, ps, 1 });
+      t3_instanced_mesh_set_matrix_at(pickup_im, np++, &rmx);
+    }
   }
+  im_drawn(pickup_im, np); pickup_im->instance_matrix->version++;
   for (int k = 0; k < DM_COUNT; k++) { im_drawn(debris_im[k], nk[k]); debris_im[k]->instance_matrix->version++; if (debris_im[k]->instance_color) debris_im[k]->instance_color->version++; }
   im_drawn(debris_blob, nb); debris_blob->instance_matrix->version++;
 }
@@ -3673,7 +3699,8 @@ static void warm_show(int on) {
       for (int k = 0; k < DM_COUNT; k++) { t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ -1.0f + k, 0.3f, 0.6f }, t3_quat_identity(), (t3_vec3){ 0.3f, 0.3f, 0.3f }); t3_instanced_mesh_set_matrix_at(debris_im[k], 0, &m); im_drawn(debris_im[k], 1); debris_im[k]->instance_matrix->version++; }
       t3_mat4 m; t3_mat4_compose(&m, (t3_vec3){ 0, 0.02f, 0.6f }, t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2), (t3_vec3){ 0.5f, 0.5f, 1 }); t3_instanced_mesh_set_matrix_at(debris_blob, 0, &m); im_drawn(debris_blob, 1); debris_blob->instance_matrix->version++;
     } else debris_hide_all();
-    set_vis(pickup_rings[0], on);
+    if (on) { t3_mat4 rmx; t3_mat4_compose(&rmx, (t3_vec3){ 0, 0.02f, 0.6f }, t3_quat_from_axis_angle((t3_vec3){ 1, 0, 0 }, -PI / 2), (t3_vec3){ 0.5f, 0.5f, 1 }); t3_instanced_mesh_set_matrix_at(pickup_im, 0, &rmx); pickup_im->instance_matrix->version++; }
+    im_drawn(pickup_im, on ? 1 : 0);
   }
   if (attached_idx >= 0 && arenas[attached_idx].hill) set_vis(arenas[attached_idx].hill, on);
   fx_warm(on);
